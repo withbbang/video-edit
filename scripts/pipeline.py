@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -286,6 +287,31 @@ def wav_duration(path: Path) -> float:
 # ---------------------------------------------------------------------------
 # 2) 전사
 # ---------------------------------------------------------------------------
+def whisper_options(prompt: str) -> dict:
+    return dict(
+        language="ko",
+        beam_size=5,
+        word_timestamps=True,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
+        condition_on_previous_text=False,
+        # initial_prompt 는 condition_on_previous_text=False 면 첫 30초 창에만 들어간다.
+        # hotwords 는 창마다 다시 붙으므로 영상 끝까지 "어/음"이 전사에 남는다.
+        hotwords=prompt or None,
+        hallucination_silence_threshold=2.0,
+    )
+
+
+def load_whisper(model_name: str, device: str, compute_type: str):
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        sys.exit("오류: faster-whisper 가 설치되지 않았습니다. ./setup.sh 를 먼저 실행하세요.")
+    threads = perf_cores()
+    log(f"Whisper 모델 로드: {model_name} (device={device}, compute={compute_type}, threads={threads})")
+    return WhisperModel(model_name, device=device, compute_type=compute_type, cpu_threads=threads)
+
+
 def transcribe(asr_wav: Path, out_json: Path, audio_key: dict, model_name: str, device: str,
                compute_type: str, prompt: str, force: bool) -> dict:
     key = {"audio": audio_key, "model": model_name, "compute_type": compute_type, "hotwords": prompt}
@@ -299,30 +325,11 @@ def transcribe(asr_wav: Path, out_json: Path, audio_key: dict, model_name: str, 
             pass
         log("원본·오디오·모델·프롬프트 중 바뀐 것이 있어 전사를 다시 합니다")
 
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        sys.exit("오류: faster-whisper 가 설치되지 않았습니다. ./setup.sh 를 먼저 실행하세요.")
-
-    threads = perf_cores()
-    log(f"Whisper 모델 로드: {model_name} (device={device}, compute={compute_type}, threads={threads})")
     log("  처음 한 번은 모델 다운로드(1~3GB)로 시간이 걸립니다")
-    model = WhisperModel(model_name, device=device, compute_type=compute_type, cpu_threads=threads)
+    model = load_whisper(model_name, device, compute_type)
 
     log("전사 시작 (한국어, 단어 타임스탬프, 필러 보존 프롬프트)")
-    segments_iter, info = model.transcribe(
-        str(asr_wav),
-        language="ko",
-        beam_size=5,
-        word_timestamps=True,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
-        condition_on_previous_text=False,
-        # initial_prompt 는 condition_on_previous_text=False 면 첫 30초 창에만 들어간다.
-        # hotwords 는 창마다 다시 붙으므로 영상 끝까지 "어/음"이 전사에 남는다.
-        hotwords=prompt or None,
-        hallucination_silence_threshold=2.0,
-    )
+    segments_iter, info = model.transcribe(str(asr_wav), **whisper_options(prompt))
     segments = []
     t0 = time.time()
     for i, seg in enumerate(segments_iter):
@@ -496,6 +503,199 @@ def find_suspect_words(tr: dict, quiet, hop: float, cfg: dict) -> dict[tuple[int
         if inner:
             out[(seg, i)] = max(b - a for a, b in inner) * hop
     return out
+
+
+ALIGN_VERSION = 2  # 정렬 방식이 바뀌면 올린다 → 저장된 보정 시간을 되돌리고 다시 정렬
+CTC_MODEL = "kresnik/wav2vec2-large-xlsr-korean"  # 한글 음절 단위 CTC 모델 (WhisperX 가 한국어에 쓰는 것)
+
+
+class CtcAligner:
+    """wav2vec2 CTC 강제 정렬. 텍스트를 알 때 글자마다 소리가 난 프레임을 찾는다.
+    긴 구간에선 이 모델도 헤매므로 필러 주변 몇 초짜리 창에만 쓴다."""
+    def __init__(self):
+        import torch
+        from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+        log(f"정렬 모델 로드: {CTC_MODEL} (처음 한 번은 약 1.2GB 다운로드)")
+        self.torch = torch
+        self.proc = Wav2Vec2Processor.from_pretrained(CTC_MODEL)
+        self.model = Wav2Vec2ForCTC.from_pretrained(CTC_MODEL).eval()
+        self.vocab = self.proc.tokenizer.get_vocab()
+        self.blank = self.proc.tokenizer.pad_token_id
+
+    def align(self, pcm, sr: int, texts: list[str]) -> list[list[float]] | None:
+        """texts(단어들)의 글자마다 정렬된 시각(창 시작 기준 초). 모델이 모르는 글자가 있으면 None"""
+        import numpy as np
+        chars = [[ch for ch in PUNCT_RE.sub("", t)] for t in texts]
+        if any(not c or any(ch not in self.vocab for ch in c) for c in chars):
+            return None
+        inp = self.proc(pcm, sampling_rate=sr, return_tensors="pt").input_values
+        with self.torch.no_grad():
+            em = self.torch.log_softmax(self.model(inp).logits[0], -1).numpy()
+        T = em.shape[0]
+        fr = len(pcm) / sr / T
+        seq = [self.blank]
+        for c in chars:
+            for ch in c:
+                seq += [self.vocab[ch], self.blank]
+        L = len(seq)
+        if T < (L - 1) // 2:
+            return None
+        # CTC 비터비: 상태 s 는 blank 를 끼운 토큰열의 위치
+        dp = np.full((T, L), -np.inf)
+        bp = np.zeros((T, L), dtype=np.int64)
+        tok = np.asarray(seq)
+        skip_ok = np.zeros(L, dtype=bool)
+        skip_ok[2:] = (tok[2:] != self.blank) & (tok[2:] != tok[:-2])
+        dp[0, :2] = em[0, tok[:2]]
+        for t in range(1, T):
+            stay = dp[t - 1]
+            step = np.concatenate(([-np.inf], dp[t - 1, :-1]))
+            jump = np.where(skip_ok, np.concatenate(([-np.inf, -np.inf], dp[t - 1, :-2])), -np.inf)
+            best = np.stack([stay, step, jump])
+            arg = best.argmax(0)
+            dp[t] = best[arg, np.arange(L)] + em[t, tok]
+            bp[t] = np.arange(L) - arg
+        s = L - 1 if dp[T - 1, L - 1] >= dp[T - 1, L - 2] else L - 2
+        first: dict[int, int] = {}
+        for t in range(T - 1, -1, -1):
+            if s % 2 == 1:
+                first[(s - 1) // 2] = t  # 거꾸로 따라가므로 마지막에 남는 값이 그 글자의 첫 프레임
+            s = bp[t, s]
+        times = [(first[i] + 0.5) * fr for i in range((L - 1) // 2)]
+        out, i = [], 0
+        for c in chars:
+            out.append(times[i:i + len(c)])
+            i += len(c)
+        return out
+
+
+def filler_needs_ctc(k: int, words: list, cfg: dict, quiet, hop: float, suspects: dict) -> tuple[float, float] | None:
+    """필러 단어의 Whisper 시간이 믿을 만한지 본다. 필러와 끊김 없이 이어진 소리 중에 다른 단어가 설명하지 못하는
+    부분이 있으면 ("앞으로좀" 에서 "앞으로" 가 엉뚱한 곳에 놓임) 필러 시간도 틀렸을 수 있다 → 그 소리 덩어리 구간을 돌려준다."""
+    w = words[k][2]
+    f0, f1 = int(w["start"] / hop), int(math.ceil(w["end"] / hop))
+    voiced_runs = [(a, b) for a, b in runs(~quiet[max(0, f0 - 1):f1 + 1])]
+    if not voiced_runs:
+        return None
+    base = max(0, f0 - 1)
+    # 필러와 겹치는 소리 덩어리를 양옆으로 끝까지 넓힌다
+    rs, re_ = base + voiced_runs[0][0], base + voiced_runs[-1][1]
+    while rs > 0 and not quiet[rs - 1]:
+        rs -= 1
+    while re_ < len(quiet) and not quiet[re_]:
+        re_ += 1
+    others = [x[2] for j, x in enumerate(words) if j != k and (x[0], x[1]) not in suspects]
+
+    def unexplained(t0: float, t1: float) -> bool:
+        if t1 - t0 < 0.1:
+            return False
+        cover = sum(max(0.0, min(t1, o["end"]) - max(t0, o["start"])) for o in others)
+        return cover < 0.7 * (t1 - t0)
+    if unexplained(rs * hop, w["start"]) or unexplained(w["end"], re_ * hop):
+        return rs * hop, re_ * hop
+    return None
+
+
+def ctc_fix_fillers(tr: dict, asr_wav: Path, rms: list[float], hop: float, cfg: dict) -> tuple[int, list[dict]]:
+    """시간이 의심스러운 필러만 주변 몇 초를 CTC 로 정렬해 필러와 이웃 단어의 시간을 바로잡는다 (tr 을 직접 고침).
+    정렬이 그럴듯할 때만 쓴다: 모든 글자가 소리 나는 곳에 있고, 필러가 Whisper 위치에서 0.3초 안에 있어야 한다."""
+    import numpy as np
+    quiet = quiet_mask(rms, hop, cfg)
+    words = all_words(tr)
+    suspects = find_suspect_words(tr, quiet, hop, cfg)
+    known = cfg["_always"] | cfg["_habit"] | cfg["_pause_after"]
+    todo = []
+    for k, (_, _, w) in enumerate(words):
+        nw = normalize(w["word"])
+        if nw in known and nw not in cfg["_never"]:
+            run_ = filler_needs_ctc(k, words, cfg, quiet, hop, suspects)
+            if run_:
+                todo.append((k, run_))
+    if not todo:
+        return 0, []
+    try:
+        aligner = CtcAligner()
+    except ImportError:
+        log("경고: torch/transformers 가 없어 필러 시간 보정을 건너뜁니다 (./setup.sh 로 설치). 해당 필러는 review.md 참고")
+        return 0, [{"start": words[k][2]["start"], "end": words[k][2]["end"], "word": words[k][2]["word"].strip(),
+                    "why": "필러 시간 불확실 (정렬 모델 없음) — 앞뒤 단어가 같이 잘렸는지 확인", "context": ""}
+                   for k, _ in todo]
+    with wave.open(str(asr_wav), "rb") as wf:
+        sr = wf.getframerate()
+        pcm = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
+    r = np.asarray(rms)
+    margin, tol, reach = 0.3, 0.3, 0.3  # 창 여유 / 필러가 Whisper 위치에서 벗어나도 되는 폭 / 글자 앞뒤로 소리를 넓히는 한도
+    fixed, failed = 0, []
+    n_frames = len(quiet)
+
+    def voiced_near(t: float) -> bool:  # CTC 는 글자를 소리 시작보다 한두 프레임 일찍 찍기도 한다
+        i = int(t / hop)
+        return not quiet[max(0, i - 6):min(n_frames, i + 7)].all()
+
+    def edge(t: float, direction: int) -> float:
+        """글자 시각에서 바깥쪽 reach 초 안의 무음 경계, 없으면 가장 조용한 지점 (붙어 있는 다른 소리까지 먹지 않게)"""
+        i = min(n_frames - 1, int(t / hop))
+        lo, hi = (max(0, i - int(reach / hop)), i) if direction < 0 else (i + 1, min(n_frames, i + 1 + int(reach / hop)))
+        if hi <= lo:
+            return t
+        rng = range(hi - 1, lo - 1, -1) if direction < 0 else range(lo, hi)
+        for j in rng:
+            if quiet[j]:
+                return (j + 1) * hop if direction < 0 else j * hop
+        return (lo + int(np.argmin(r[lo:hi]))) * hop
+    for k, (rs, re_) in todo:
+        w = words[k][2]
+        t0, t1 = max(0.0, min(rs, w["start"]) - margin), min(len(pcm) / sr, max(re_, w["end"]) + margin)
+        # 창 안에 들어오는 이웃 단어(자리가 의심스러운 단어는 어디 있든 후보)
+        cand = [j for j in (k - 1, k + 1) if 0 <= j < len(words)
+                and ((words[j][0], words[j][1]) in suspects
+                     or (words[j][2]["end"] > t0 and words[j][2]["start"] < t1))]
+        ok = None
+        for drop in ([], [j for j in cand if (words[j][0], words[j][1]) in suspects], cand):
+            ids = sorted([k] + [j for j in cand if j not in drop])
+            times = aligner.align(pcm[int(t0 * sr):int(t1 * sr)], sr, [words[j][2]["word"] for j in ids])
+            if times is None:
+                continue
+            times = [[t0 + x for x in ts] for ts in times]
+            flat = [x for ts in times for x in ts]
+            in_voice = all(voiced_near(x) for x in flat)
+            mine = times[ids.index(k)]
+            near = w["start"] - tol <= mine[0] and mine[-1] <= w["end"] + tol
+            if in_voice and near:
+                ok = (ids, times)
+                break
+        if not ok:
+            failed.append({"start": w["start"], "end": w["end"], "word": w["word"].strip(),
+                           "why": "필러 시간 불확실 (정렬 실패, Whisper 시간으로 컷) — 앞뒤 단어가 같이 잘렸는지 확인",
+                           "context": ""})
+            continue
+        ids, times = ok
+        # 단어 경계: 앞 단어 마지막 글자와 다음 단어 첫 글자 사이에 무음이 있으면 무음 양끝, 없으면 다음 단어 첫 글자
+        # 바로 앞(0.1초 안)의 가장 조용한 지점. 이 모델은 글자를 음절 첫머리에 찍으므로 그 직전이 자음 막힘(경계)이다
+        bounds = []
+        for (ja, ta), (jb, tb) in zip(zip(ids, times), list(zip(ids, times))[1:]):
+            a_, b_ = int(ta[-1] / hop) + 1, int(tb[0] / hop)
+            q = [(x0 + a_, x1 + a_) for x0, x1 in runs(quiet[a_:b_])] if b_ > a_ else []
+            if q:
+                bounds.append((q[0][0] * hop, q[-1][1] * hop))
+            else:
+                lo = max(a_, b_ - int(0.1 / hop))
+                hi = min(n_frames, b_ + 3)
+                m = (lo + int(np.argmin(r[lo:hi]))) * hop if hi > lo else tb[0]
+                bounds.append((m, m))
+        starts = [edge(times[0][0], -1)] + [b for _, b in bounds]
+        ends = [a for a, _ in bounds] + [edge(times[-1][-1], +1)]
+        for j, s_, e_ in zip(ids, starts, ends):
+            ww = words[j][2]
+            if j != k and (words[j][0], words[j][1]) not in suspects:
+                # 제자리에 있던 이웃 단어는 필러와 맞닿은 쪽 경계만 옮긴다
+                s_, e_ = (ww["start"], e_) if j < k else (s_, ww["end"])
+            if e_ - s_ < hop:
+                continue
+            ww.setdefault("whisper", [ww["start"], ww["end"]])  # 원래 시간 (설정을 바꿔 다시 정렬할 때 되돌림)
+            ww["start"], ww["end"] = round(s_, 3), round(e_, 3)
+        fixed += 1
+    return fixed, failed
 
 
 def detect_silences(tr: dict, rms: list[float], hop: float, duration: float,
@@ -993,6 +1193,21 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     tr_path = out_dir / f"{stem}.transcript.json"
     tr = transcribe(asr_wav, tr_path, audio_key, args.model, args.device, args.compute_type,
                     cfg.get("prompt", ""), args.force)
+    # 필러 시간 보정은 사전(단어 목록)에 따라 대상이 달라진다 → 사전이 바뀌면 원래 시간으로 되돌려 다시 한다
+    align_key = {"v": ALIGN_VERSION, "words": sorted(cfg["_always"] | cfg["_habit"] | cfg["_pause_after"]),
+                 "never": sorted(cfg["_never"]), "silence": [cfg.get("silence_threshold_db", -40),
+                                                            cfg.get("silence_min_sec", 0.3)],
+                 "ctc": all(importlib.util.find_spec(m) for m in ("torch", "transformers"))}  # 나중에 설치하면 다시 보정
+    if not args.apply_cuts and tr.get("align") != align_key:
+        for _, _, w in all_words(tr):
+            if "whisper" in w:
+                w["start"], w["end"] = w.pop("whisper")
+        rms, hop = load_rms(asr_wav)
+        n, align_failed = ctc_fix_fillers(tr, asr_wav, rms, hop, cfg)
+        if n or align_failed:
+            log(f"필러 시간 보정: {n}곳 (실패 {len(align_failed)}곳)")
+        tr["align"], tr["align_failed"] = align_key, align_failed
+        tr_path.write_text(json.dumps(tr, ensure_ascii=False, indent=1), encoding="utf-8")
 
     # 3) 컷 리스트
     cuts_path = out_dir / f"{stem}.cuts.json"
@@ -1005,6 +1220,7 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         raw_cuts, skipped = detect_fillers(tr, cfg, habit_mode, args.filler == "on")
         rms, hop = load_rms(asr_wav)
         suspects = find_suspect_words(tr, quiet_mask(rms, hop, cfg), hop, cfg)
+        skipped += tr.get("align_failed", [])
         aw = all_words(tr)
         for k, (seg, wi, w) in enumerate(aw):
             if (seg, wi) in suspects:

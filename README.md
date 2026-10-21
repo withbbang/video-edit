@@ -8,7 +8,7 @@
 ```bash
 cd ~/Desktop/code/youtube-edit
 ./setup.sh                    # ffmpeg 확인 + .venv + 의존성
-./setup.sh --download-model   # (선택) Whisper 모델 1.6GB 미리 받기
+./setup.sh --download-model   # (선택) Whisper 모델 1.6GB·정렬 모델 1.2GB 미리 받기
 ```
 
 ## 윈도우에서
@@ -56,7 +56,7 @@ python -m venv .venv
 
 - `--vcodec h264_videotoolbox` 는 맥 전용. NVIDIA 그래픽카드가 있으면 `--vcodec h264_nvenc`, 없으면 생략 (기본 libx264)
 - Whisper 는 기본적으로 CPU(int8) 로 돈다. NVIDIA GPU 로 돌리려면 faster-whisper README 의 CUDA 설치 안내를 따른 뒤 `--device cuda --compute-type float16`
-- 첫 실행 때 Whisper 모델(약 1.6GB)을 내려받는 건 맥과 같다
+- 첫 실행 때 Whisper 모델(약 1.6GB)과 정렬 모델(약 1.2GB)을 내려받는 건 맥과 같다
 - `python` 이 없다고 나오면 Microsoft Store 가 가로챈 것일 수 있다. `py -3 -m venv .venv` 로 바꿔 쓰거나, 설정 > 앱 > 앱 실행 별칭에서 python 항목을 끈다
 
 ## 쓰는 법
@@ -156,5 +156,6 @@ python -m venv .venv
 1. ffmpeg `arnndn`(RNNoise) 으로 배경 노이즈 제거 → `loudnorm` 으로 유튜브 권장 라우드니스
 2. faster-whisper(한국어, 단어 타임스탬프)로 전사. 필러가 담긴 프롬프트(hotwords)를 줘서 "어/음"이 전사에 남게 함
 3. 사전과 대조해 필러 컷 후보 추출 + 오디오 에너지로 말 사이 무음 구간 추출 → 필러 경계를 바깥쪽 120ms 안의 가장 조용한 지점까지 넓힘 → 프레임 격자에 정렬
+   Whisper 단어 시간이 1~2초씩 밀린 필러는 주변 몇 초만 wav2vec2(CTC)로 다시 정렬해, 붙어 있는 진짜 단어("앞으로좀"의 "앞으로")는 살리고 필러만 자른다
 4. 잘린 시간을 빼서 SRT 타임코드 재계산 (줄 나눔도 결과 영상 기준)
 5. 오디오는 샘플 단위로, 영상은 프레임 단위로 같은 구간을 잘라 A/V 싱크 유지. 렌더하면서 자막을 mov_text 트랙으로 함께 넣음

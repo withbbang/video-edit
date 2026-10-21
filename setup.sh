@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # youtube-edit 환경 구성 (macOS / Linux)
 #   ./setup.sh                 ffmpeg 확인 + .venv 생성 + 파이썬 의존성 설치
-#   ./setup.sh --download-model   위 작업 + Whisper 모델(large-v3-turbo, ~1.6GB) 미리 받기
+#   ./setup.sh --download-model   위 작업 + Whisper 모델(~1.6GB)·정렬 모델(~1.2GB) 미리 받기
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -36,6 +36,8 @@ else
   .venv/bin/python -m pip install -q -r requirements.txt
 fi
 .venv/bin/python -c "import faster_whisper, numpy; print('faster-whisper', faster_whisper.__version__, '/ numpy', numpy.__version__)"
+.venv/bin/python -c "import torch, transformers; print('torch', torch.__version__, '/ transformers', transformers.__version__)" \
+  || echo "경고: torch/transformers 를 불러오지 못했습니다. 필러 시간 보정(CTC 정렬) 없이 동작합니다"
 
 echo "== 3/3 노이즈 모델"
 if [ -f models/sh.rnnn ]; then
@@ -47,6 +49,8 @@ fi
 if [ "${1:-}" = "--download-model" ]; then
   echo "== Whisper 모델 다운로드 (large-v3-turbo)"
   .venv/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3-turbo', device='cpu', compute_type='int8'); print('OK')"
+  echo "== 정렬 모델 다운로드 (kresnik/wav2vec2-large-xlsr-korean, ~1.2GB)"
+  .venv/bin/python -c "from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor as P; n='kresnik/wav2vec2-large-xlsr-korean'; P.from_pretrained(n); Wav2Vec2ForCTC.from_pretrained(n); print('OK')"
 fi
 
 mkdir -p input output work
