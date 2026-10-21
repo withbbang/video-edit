@@ -20,6 +20,9 @@
   "snap_window_sec": 0.12,
   "min_keep_frames": 3,
 
+  "_전사누락_설명": "Whisper 가 전사하지 않은 목소리가 untranscribed_min_sec 이상이면, 필러 컷 바로 옆일 땐 늘인 필러('이제 에~')로 보고 컷하고 그 밖은 review.md 에 표시만 합니다. 0 이면 끔.",
+  "untranscribed_min_sec": 0.2,
+
   "_무음_설명": "silence_min_sec 이상 이어지는 무음(silence_threshold_db 미만)을 찾아, 말 앞뒤로 silence_pad_sec 씩만 남기고 컷합니다. 영상 맨 앞/뒤 무음은 전부 컷. --silence off 로 끕니다.",
   "silence_threshold_db": -40,
   "silence_min_sec": 0.3,

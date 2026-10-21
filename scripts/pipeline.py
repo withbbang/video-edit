@@ -512,6 +512,53 @@ def detect_silences(tr: dict, rms: list[float], hop: float, duration: float,
     return cuts, skipped
 
 
+UNHEARD = "(전사 누락)"
+
+
+def detect_untranscribed(tr: dict, rms: list[float], hop: float, filler_cuts: list[Cut],
+                         cfg: dict) -> tuple[list[Cut], list[dict]]:
+    """Whisper 가 전사하지 않은 목소리 구간. 필러 컷 바로 옆이면 늘인 필러("이제 에~")로 보고 컷,
+    그 밖은 진짜 말을 빼먹었을 수도 있어 review.md 에만 표시한다."""
+    import numpy as np
+    min_len = float(cfg.get("untranscribed_min_sec", 0.2))
+    if min_len <= 0:
+        return [], []
+    thr = 10 ** (float(cfg.get("silence_threshold_db", -40)) / 20)
+    max_dur = float(cfg.get("max_filler_duration_sec", 1.3))
+    touch, near = 0.05, 0.15  # 단어 경계에 붙음 / 필러 컷과 이웃함 (사이에 짧은 무음 허용)
+    r = np.asarray(rms)
+    k = max(1, int(round(0.05 / hop)))  # detect_silences 와 같은 이동평균이라 무음 컷과 겹치지 않는다
+    voiced = np.convolve(r, np.ones(k) / k, mode="same") >= thr
+    words = [w for _, _, w in all_words(tr)]
+    for w in words:  # 단어가 덮는 구간은 전사된 소리
+        voiced[int(w["start"] / hop):int(np.ceil(w["end"] / hop))] = False
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], voiced.astype(np.int8), [0]))))
+    cut_spans = [(c.start, c.end) for c in filler_cuts]
+    cut_idx = {tuple(i) for c in filler_cuts for i in c.words_idx or []}
+    kept_bounds = [t for (s, i, w) in all_words(tr) if (s, i) not in cut_idx for t in (w["start"], w["end"])]
+    word_starts = [w["start"] for w in words]
+
+    cuts: list[Cut] = []
+    skipped: list[dict] = []
+    for a, b in zip(edges[0::2], edges[1::2]):
+        s, e = a * hop, b * hop
+        if e - s < min_len:
+            continue
+        i = bisect.bisect_left(word_starts, s)
+        ctx_prev = " ".join(x["word"].strip() for x in words[max(0, i - 3):i])
+        ctx_next = " ".join(x["word"].strip() for x in words[i:i + 3])
+        context = f"{ctx_prev} [{e-s:.1f}s 전사 안 된 소리] {ctx_next}".strip()
+        by_filler = any(-touch <= s - ce <= near or -touch <= cs - e <= near for cs, ce in cut_spans)
+        by_kept = any(abs(t - s) <= touch or abs(t - e) <= touch for t in kept_bounds)
+        if by_filler and not by_kept and e - s <= max_dur:
+            cuts.append(Cut(s, e, UNHEARD, "filler(전사 누락)", context, -1, words_idx=[]))
+        elif not by_kept:  # 남긴 단어에 붙은 소리는 대개 Whisper 단어 시간이 짧게 잡힌 꼬리라 표시하지 않는다
+            skipped.append({"start": s, "end": e, "word": UNHEARD,
+                            "why": "전사 안 된 목소리 (놓친 필러·웃음·말일 수 있음, 직접 확인)",
+                            "context": context})
+    return cuts, skipped
+
+
 def snap_to_quiet(t: float, rms: list[float], hop: float, win: float, direction: int) -> float:
     """컷 경계를 바깥쪽(direction=-1: 앞, +1: 뒤)으로만 가장 조용한 지점까지 옮긴다.
     안쪽으로 옮기면 자음과 모음 사이의 짧은 골짜기에 걸려 필러 소리 일부가 남는다."""
@@ -790,9 +837,10 @@ def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: li
                  final_dur: float, modes: dict, args: argparse.Namespace, encoder: str,
                  elapsed: float) -> None:
     from collections import Counter
-    by_word = Counter(normalize(w) for c in cuts for w in c.word.split(" + ") if w != "(무음)")
+    by_word = Counter(normalize(w) for c in cuts for w in c.word.split(" + ") if w not in ("(무음)", UNHEARD))
     removed = sum(c.end - c.start for c in cuts)
     n_silence = sum(1 for c in cuts if "silence" in c.reason)
+    n_unheard = sum(1 for c in cuts if UNHEARD in c.word)
     out = [f"# {src.name} 처리 리포트", "",
            f"- 원본 길이: {fmt_clock(info['duration'])} → 결과: {fmt_clock(final_dur)} "
            f"(-{removed:.1f}s, {len(cuts)}곳 컷)",
@@ -800,6 +848,7 @@ def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: li
            f"- 전사 모델: {args.model}, 아/어/음 컷: {modes['filler']}, 습관어 컷: {modes['habit']}, "
            f"무음 컷: {modes['silence']}, 인코더: {encoder}",
            f"- 무음이 포함된 컷: {n_silence}곳",
+           f"- 전사 안 된 소리(필러 옆)가 포함된 컷: {n_unheard}곳",
            f"- 건너뛴 감지: {len(skipped)}건 (review.md 참고)",
            f"- 소요 시간: {elapsed/60:.1f}분", "",
            "## 잘라낸 단어별 횟수", ""]
@@ -910,6 +959,11 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         habit_mode = {"on": "conservative", "off": "off", "aggressive": "aggressive"}[args.habit]
         raw_cuts, skipped = detect_fillers(tr, cfg, habit_mode, args.filler == "on")
         rms, hop = load_rms(asr_wav)
+        un_cuts, un_skipped = detect_untranscribed(tr, rms, hop, raw_cuts, cfg)
+        raw_cuts += un_cuts
+        skipped += un_skipped
+        if un_cuts or un_skipped:
+            log(f"전사 안 된 목소리: 필러 옆이라 컷 {len(un_cuts)}곳, 확인 필요 {len(un_skipped)}곳")
         n_fillers = len(raw_cuts)
         if args.silence == "on":
             sil_cuts, sil_skipped = detect_silences(tr, rms, hop, info["duration"], cfg)
