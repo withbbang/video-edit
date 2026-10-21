@@ -376,6 +376,7 @@ def load_fillers(path: Path) -> dict:
     for k, name in lists.items():
         cfg[k] = {normalize(w) for w in cfg.get(name, [])}
     # "어떻게 보면" 처럼 띄어 쓴 항목은 전사에서 단어 여러 개로 나뉜다 → 이어 붙여 비교할 길이들
+    cfg["_single_only"] = {normalize(w) for w in cfg.get("single_only", [])}
     cfg["_phrase_lens"] = sorted({len(w.split()) for name in lists.values()
                                   for w in cfg.get(name, []) if len(w.split()) > 1}, reverse=True)
     return cfg
@@ -383,6 +384,16 @@ def load_fillers(path: Path) -> dict:
 
 def all_words(tr: dict) -> list[tuple[int, int, dict]]:
     return [(seg["id"], i, w) for seg in tr["segments"] for i, w in enumerate(seg["words"])]
+
+
+def is_repeated_sound(words: list, norms: list[str], k: int, single_only: set[str]) -> bool:
+    """'하하', '허 허' 처럼 반복된 single_only 단어는 웃음이라 필러로 보지 않는다"""
+    nw = norms[k]
+    if nw not in single_only:
+        return False
+    raw = PUNCT_RE.sub("", words[k][2]["word"].strip())
+    return (len(raw) >= 2 or (k > 0 and norms[k - 1] == nw)
+            or (k + 1 < len(norms) and norms[k + 1] == nw))
 
 
 def detect_fillers(tr: dict, cfg: dict, habit_mode: str, filler: bool = True) -> tuple[list[Cut], list[dict]]:
@@ -404,6 +415,8 @@ def detect_fillers(tr: dict, cfg: dict, habit_mode: str, filler: bool = True) ->
         k_next = k + n
         k_cur, k = k, k + n
         if not nw or nw in cfg["_never"] or nw not in known:
+            continue
+        if n == 1 and is_repeated_sound(words, norms, k_cur, cfg["_single_only"]):
             continue
         is_always = nw in cfg["_always"]
         is_pause_after = nw in cfg["_pause_after"]
@@ -598,6 +611,7 @@ class TimeRemap:
 
 
 def build_srt(tr: dict, remap: TimeRemap, final_dur: float, always_fillers: set[str] = frozenset(),
+              single_only: set[str] = frozenset(),
               max_chars: int = 28, max_dur: float = 5.0, gap_break: float = 0.7) -> str:
     captions: list[list] = []
     cur: list[tuple[float, float, str]] = []   # (결과 영상 기준 시작, 끝, 단어)
@@ -609,10 +623,12 @@ def build_srt(tr: dict, remap: TimeRemap, final_dur: float, always_fillers: set[
                 captions.append([cur[0][0], max(cur[-1][1], cur[0][0] + 0.4), text])
             cur.clear()
 
-    for seg_id, wi, w in all_words(tr):
+    words = all_words(tr)
+    norms = [normalize(w["word"]) for _, _, w in words]
+    for k, (seg_id, wi, w) in enumerate(words):
         if (seg_id, wi) in remap.cut_words:
             continue  # 잘려나간 필러
-        if normalize(w["word"]) in always_fillers:
+        if norms[k] in always_fillers and not is_repeated_sound(words, norms, k, single_only):
             continue  # 오디오엔 남았더라도(건너뛴 항목) 자막에는 '어/음'을 넣지 않는다
         s, e, text = remap(w["start"]), remap(w["end"]), w["word"].strip()
         if cur:
@@ -924,7 +940,7 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     out_media = out_dir / (f"{stem}_clean.mp4" if info["has_video"] else f"{stem}_clean.m4a")
     final_dur = sum(ef - sf for sf, ef in keeps) / float(fps)
     srt_path = out_media.with_suffix(".srt")
-    srt_text = build_srt(tr, TimeRemap(cuts), final_dur, cfg["_always"])
+    srt_text = build_srt(tr, TimeRemap(cuts), final_dur, cfg["_always"], cfg["_single_only"])
     srt_path.write_text(srt_text, encoding="utf-8")
     if not srt_text:
         log("인식된 말소리가 없어 자막이 비어 있습니다 (자막 트랙은 넣지 않음)")
