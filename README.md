@@ -11,6 +11,54 @@ cd ~/Desktop/code/youtube-edit
 ./setup.sh --download-model   # (선택) Whisper 모델 1.6GB 미리 받기
 ```
 
+## 윈도우에서
+
+`setup.sh` 는 bash 용이라 윈도우에서는 쓰지 않는다. 가상환경을 활성화할 필요 없이
+`.venv\Scripts\python` 을 직접 부르는 방식이라 PowerShell 과 cmd 명령이 같다.
+
+### PowerShell
+
+```powershell
+winget install Gyan.FFmpeg          # ffmpeg 없으면
+winget install Python.Python.3.11   # 파이썬 없으면 (설치 후 터미널을 새로 연다)
+cd youtube-edit
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+```
+
+실행:
+
+```powershell
+.venv\Scripts\python scripts\pipeline.py input\영상.mp4
+```
+
+### cmd (명령 프롬프트)
+
+```bat
+winget install Gyan.FFmpeg
+REM ffmpeg 없을 때
+winget install Python.Python.3.11
+REM 파이썬 없을 때 (설치 후 창을 새로 연다)
+cd youtube-edit
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+```
+
+실행:
+
+```bat
+.venv\Scripts\python scripts\pipeline.py input\영상.mp4
+```
+
+### 맥과 다른 점
+
+옵션은 맥과 같다 (`--help` 로 전체 목록).
+
+- `--vcodec h264_videotoolbox` 는 맥 전용. NVIDIA 그래픽카드가 있으면 `--vcodec h264_nvenc`, 없으면 생략 (기본 libx264)
+- Whisper 는 기본적으로 CPU(int8) 로 돈다. NVIDIA GPU 로 돌리려면 faster-whisper README 의 CUDA 설치 안내를 따른 뒤 `--device cuda --compute-type float16`
+- 첫 실행 때 Whisper 모델(약 1.6GB)을 내려받는 건 맥과 같다
+- `python` 이 없다고 나오면 Microsoft Store 가 가로챈 것일 수 있다. `py -3 -m venv .venv` 로 바꿔 쓰거나, 설정 > 앱 > 앱 실행 별칭에서 python 항목을 끈다
+
 ## 쓰는 법
 
 영상을 `input/` 에 넣고, 이 폴더에서 Claude Code 를 열어:

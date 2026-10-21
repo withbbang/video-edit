@@ -225,7 +225,8 @@ def prepare_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: boo
         log("경고: 이 ffmpeg 에 arnndn 필터가 없어 afftdn 으로 대체합니다")
         denoise = "afftdn"
     offset = info["audio_offset"] if info["has_video"] else 0.0
-    model_rel = os.path.relpath(MODELS_DIR / "sh.rnnn", ROOT)
+    # ffmpeg 필터 인자에서 백슬래시는 이스케이프 문자라 Windows 에서도 슬래시 경로를 쓴다 (macOS 에선 변화 없음)
+    model_rel = os.path.relpath(MODELS_DIR / "sh.rnnn", ROOT).replace(os.sep, "/")
     af = audio_filter_chain(denoise, loudnorm, model_rel, offset)
     # 3채널 이상 WAV 는 WAVE_FORMAT_EXTENSIBLE 헤더라 파이썬 wave 모듈이 못 읽는다 → 스테레오로 다운믹스
     ac = ["-ac", "2"] if info["channels"] > 2 else []
