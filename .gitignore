@@ -1,0 +1,9 @@
+.venv/
+work/
+output/*
+!output/.gitkeep
+input/*
+!input/.gitkeep
+__pycache__/
+.DS_Store
+*.swp

@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./setup.sh:*)",
+      "Bash(.venv/bin/python scripts/pipeline.py:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(ffprobe:*)",
+      "Bash(ffmpeg:*)",
+      "Bash(ls:*)",
+      "Read(./output/**)",
+      "Read(./input/**)",
+      "Read(./work/**)",
+      "Edit(./output/*.cuts.json)"
+    ]
+  }
+}
