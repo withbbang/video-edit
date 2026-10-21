@@ -1,5 +1,7 @@
 faster-whisper>=1.1.0
+# ctranslate2 >= 4.5 crashes at model load (access violation) on some Windows PCs
+ctranslate2>=4.0,<4.5
 numpy>=1.24
-# 필러 시간 보정용 CTC 정렬 (없으면 보정만 건너뜀)
+# CTC alignment for filler timing correction (skipped if not installed)
 torch>=2.2
 transformers>=4.40
