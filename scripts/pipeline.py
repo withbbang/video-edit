@@ -469,23 +469,59 @@ def load_rms(asr_wav: Path, hop_sec: float = 0.01) -> tuple[list[float], float]:
     return rms.tolist(), hop_sec
 
 
-def detect_silences(tr: dict, rms: list[float], hop: float, duration: float,
-                    cfg: dict) -> tuple[list[Cut], list[dict]]:
-    """말 사이 빈 구간 감지. 앞뒤로 silence_pad_sec 만 남기고 나머지를 컷한다."""
+def quiet_mask(rms: list[float], hop: float, cfg: dict):
     import numpy as np
     thr = 10 ** (float(cfg.get("silence_threshold_db", -40)) / 20)
+    k = max(1, int(round(0.05 / hop)))  # 50ms 이동평균 — 짧은 잡음 스파이크로 무음이 쪼개지는 것 방지
+    return np.convolve(np.asarray(rms), np.ones(k) / k, mode="same") < thr
+
+
+def runs(mask) -> list[tuple[int, int]]:
+    """True 가 이어지는 [시작, 끝) 프레임 구간들"""
+    import numpy as np
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], np.asarray(mask, dtype=np.int8), [0]))))
+    return list(zip(edges[0::2].tolist(), edges[1::2].tolist()))
+
+
+def find_suspect_words(tr: dict, quiet, hop: float, cfg: dict) -> dict[tuple[int, int], float]:
+    """단어 안에 무음(silence_min_sec 이상)이 끼어 있고 그 앞뒤로 소리가 있으면 Whisper 가 단어를
+    엉뚱한 자리에 놓은 것이다 (앞 단어 꼬리 + 무음 + 숨소리를 한 단어로 묶음). → {(seg, i): 끼인 무음 길이}
+    끝에만 무음이 붙은 단어는 흔한 단어 시간 늘어짐이라 제외한다."""
+    min_len = float(cfg.get("silence_min_sec", 0.3))
+    out = {}
+    for seg, i, w in all_words(tr):
+        f0, f1 = int(w["start"] / hop), int(math.ceil(w["end"] / hop))
+        sub = quiet[f0:f1]
+        inner = [(a, b) for a, b in runs(sub) if a > 0 and b < len(sub) and (b - a) * hop >= min_len]
+        if inner:
+            out[(seg, i)] = max(b - a for a, b in inner) * hop
+    return out
+
+
+def detect_silences(tr: dict, rms: list[float], hop: float, duration: float,
+                    cfg: dict, suspects: dict = None) -> tuple[list[Cut], list[dict]]:
+    """말 사이 빈 구간 감지. 앞뒤로 silence_pad_sec 만 남기고 나머지를 컷한다."""
+    import numpy as np
     min_len = float(cfg.get("silence_min_sec", 0.3))
     pad = float(cfg.get("silence_pad_sec", 0.08))
+    bridge = float(cfg.get("silence_bridge_sec", 0.3))
+    bridge_amp = 10 ** (float(cfg.get("silence_bridge_max_db", -30)) / 20)
     r = np.asarray(rms)
-    k = max(1, int(round(0.05 / hop)))  # 50ms 이동평균 — 짧은 잡음 스파이크로 무음이 쪼개지는 것 방지
-    quiet = np.convolve(r, np.ones(k) / k, mode="same") < thr
-    edges = np.flatnonzero(np.diff(np.concatenate(([0], quiet.astype(np.int8), [0]))))
+    quiet = quiet_mask(rms, hop, cfg)
     words = [w for _, _, w in all_words(tr)]
     word_starts = [w["start"] for w in words]
+    real = [w for (s, i, w) in all_words(tr) if (s, i) not in (suspects or {})]
+    # 무음 사이에 낀 짧고 작은 소리(숨소리·입소리)는 무음으로 친다. 쪼개진 무음마다 여유를 남기면 조각이 생긴다
+    q = runs(quiet)
+    for (_, b0), (a1, _) in zip(q, q[1:]):
+        gs, ge = b0 * hop, a1 * hop
+        if (ge - gs <= bridge and r[b0:a1].max() < bridge_amp
+                and not any(w["start"] < ge and w["end"] > gs for w in real)):
+            quiet[b0:a1] = True
 
     cuts: list[Cut] = []
     skipped: list[dict] = []
-    for a, b in zip(edges[0::2], edges[1::2]):
+    for a, b in runs(quiet):
         s, e = a * hop, min(duration, b * hop)
         if e - s < min_len:
             continue
@@ -516,43 +552,52 @@ UNHEARD = "(전사 누락)"
 
 
 def detect_untranscribed(tr: dict, rms: list[float], hop: float, filler_cuts: list[Cut],
-                         cfg: dict) -> tuple[list[Cut], list[dict]]:
-    """Whisper 가 전사하지 않은 목소리 구간. 필러 컷 바로 옆이면 늘인 필러("이제 에~")로 보고 컷,
+                         cfg: dict, suspects: dict = None) -> tuple[list[Cut], list[dict]]:
+    """Whisper 가 전사하지 않은 목소리 구간. 필러 컷 바로 옆이면 늘인 필러("이제 에~")나 필러 꼬리로 보고 컷,
     그 밖은 진짜 말을 빼먹었을 수도 있어 review.md 에만 표시한다."""
     import numpy as np
     min_len = float(cfg.get("untranscribed_min_sec", 0.2))
     if min_len <= 0:
         return [], []
-    thr = 10 ** (float(cfg.get("silence_threshold_db", -40)) / 20)
+    suspects = suspects or {}
     max_dur = float(cfg.get("max_filler_duration_sec", 1.3))
+    bridge_amp = 10 ** (float(cfg.get("silence_bridge_max_db", -30)) / 20)
     touch, near = 0.05, 0.15  # 단어 경계에 붙음 / 필러 컷과 이웃함 (사이에 짧은 무음 허용)
+    frag = 0.35               # 자리가 의심스러운 단어 안에서 필러에 붙은 소리는 이 길이까지만 꼬리로 본다
     r = np.asarray(rms)
-    k = max(1, int(round(0.05 / hop)))  # detect_silences 와 같은 이동평균이라 무음 컷과 겹치지 않는다
-    voiced = np.convolve(r, np.ones(k) / k, mode="same") >= thr
+    voiced = ~quiet_mask(rms, hop, cfg)  # detect_silences 와 같은 기준이라 무음 컷과 겹치지 않는다
     words = [w for _, _, w in all_words(tr)]
-    for w in words:  # 단어가 덮는 구간은 전사된 소리
-        voiced[int(w["start"] / hop):int(np.ceil(w["end"] / hop))] = False
-    edges = np.flatnonzero(np.diff(np.concatenate(([0], voiced.astype(np.int8), [0]))))
+    in_suspect = np.zeros(len(voiced), dtype=bool)
+    for seg, i, w in all_words(tr):
+        f0, f1 = int(w["start"] / hop), int(np.ceil(w["end"] / hop))
+        if (seg, i) in suspects:
+            in_suspect[f0:f1] = True  # 엉뚱한 자리에 놓인 단어는 그 구간의 소리를 덮지 못한다
+        else:
+            voiced[f0:f1] = False     # 단어가 덮는 구간은 전사된 소리
     cut_spans = [(c.start, c.end) for c in filler_cuts]
     cut_idx = {tuple(i) for c in filler_cuts for i in c.words_idx or []}
-    kept_bounds = [t for (s, i, w) in all_words(tr) if (s, i) not in cut_idx for t in (w["start"], w["end"])]
+    kept_bounds = [t for (s, i, w) in all_words(tr) if (s, i) not in cut_idx and (s, i) not in suspects
+                   for t in (w["start"], w["end"])]
     word_starts = [w["start"] for w in words]
 
     cuts: list[Cut] = []
     skipped: list[dict] = []
-    for a, b in zip(edges[0::2], edges[1::2]):
+    for a, b in runs(voiced):
         s, e = a * hop, b * hop
-        if e - s < min_len:
-            continue
+        by_filler = any(-touch <= s - ce <= near or -touch <= cs - e <= near for cs, ce in cut_spans)
+        by_kept = any(abs(t - s) <= touch or abs(t - e) <= touch for t in kept_bounds)
+        hidden = in_suspect[a:b].any()
         i = bisect.bisect_left(word_starts, s)
         ctx_prev = " ".join(x["word"].strip() for x in words[max(0, i - 3):i])
         ctx_next = " ".join(x["word"].strip() for x in words[i:i + 3])
         context = f"{ctx_prev} [{e-s:.1f}s 전사 안 된 소리] {ctx_next}".strip()
-        by_filler = any(-touch <= s - ce <= near or -touch <= cs - e <= near for cs, ce in cut_spans)
-        by_kept = any(abs(t - s) <= touch or abs(t - e) <= touch for t in kept_bounds)
-        if by_filler and not by_kept and e - s <= max_dur:
-            cuts.append(Cut(s, e, UNHEARD, "filler(전사 누락)", context, -1, words_idx=[]))
-        elif not by_kept:  # 남긴 단어에 붙은 소리는 대개 Whisper 단어 시간이 짧게 잡힌 꼬리라 표시하지 않는다
+        if by_filler and not by_kept:
+            # 필러에 붙은 소리는 짧아도 남기면 '…고' 같은 조각이 들린다
+            if e - s >= 0.05 and e - s <= (frag if hidden else max_dur):
+                cuts.append(Cut(s, e, UNHEARD, "filler(전사 누락)", context, -1, words_idx=[]))
+            continue
+        # 남긴 단어에 붙은 소리는 대개 Whisper 단어 시간이 짧게 잡힌 꼬리, 아주 작은 소리는 숨소리라 표시하지 않는다
+        if e - s >= min_len and not by_kept and r[a:b].max() >= bridge_amp:
             skipped.append({"start": s, "end": e, "word": UNHEARD,
                             "why": "전사 안 된 목소리 (놓친 필러·웃음·말일 수 있음, 직접 확인)",
                             "context": context})
@@ -959,14 +1004,23 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         habit_mode = {"on": "conservative", "off": "off", "aggressive": "aggressive"}[args.habit]
         raw_cuts, skipped = detect_fillers(tr, cfg, habit_mode, args.filler == "on")
         rms, hop = load_rms(asr_wav)
-        un_cuts, un_skipped = detect_untranscribed(tr, rms, hop, raw_cuts, cfg)
+        suspects = find_suspect_words(tr, quiet_mask(rms, hop, cfg), hop, cfg)
+        aw = all_words(tr)
+        for k, (seg, wi, w) in enumerate(aw):
+            if (seg, wi) in suspects:
+                ctx = " ".join(x[2]["word"].strip() for x in aw[max(0, k - 3):k]) + f" [{w['word'].strip()}] " \
+                    + " ".join(x[2]["word"].strip() for x in aw[k + 1:k + 4])
+                skipped.append({"start": w["start"], "end": w["end"], "word": w["word"].strip(),
+                                "why": f"단어 시간 의심: 단어 안에 {suspects[(seg, wi)]:.1f}s 무음 "
+                                       "(실제 위치와 어긋났을 수 있음, 주변 컷·자막 확인)", "context": ctx.strip()})
+        un_cuts, un_skipped = detect_untranscribed(tr, rms, hop, raw_cuts, cfg, suspects)
         raw_cuts += un_cuts
         skipped += un_skipped
         if un_cuts or un_skipped:
             log(f"전사 안 된 목소리: 필러 옆이라 컷 {len(un_cuts)}곳, 확인 필요 {len(un_skipped)}곳")
         n_fillers = len(raw_cuts)
         if args.silence == "on":
-            sil_cuts, sil_skipped = detect_silences(tr, rms, hop, info["duration"], cfg)
+            sil_cuts, sil_skipped = detect_silences(tr, rms, hop, info["duration"], cfg, suspects)
             raw_cuts += sil_cuts
             skipped += sil_skipped
             log(f"무음 감지: {len(sil_cuts)}곳, {sum(c.end - c.start for c in sil_cuts):.1f}s "

@@ -26,5 +26,8 @@
   "_무음_설명": "silence_min_sec 이상 이어지는 무음(silence_threshold_db 미만)을 찾아, 말 앞뒤로 silence_pad_sec 씩만 남기고 컷합니다. 영상 맨 앞/뒤 무음은 전부 컷. --silence off 로 끕니다.",
   "silence_threshold_db": -40,
   "silence_min_sec": 0.3,
-  "silence_pad_sec": 0.08
+  "silence_pad_sec": 0.08,
+  "_무음_이음_설명": "무음 사이에 낀 silence_bridge_sec 이하, silence_bridge_max_db 미만의 작은 소리(숨소리·입소리)는 무음으로 쳐서 한 번에 컷합니다. 단어가 걸쳐 있으면 잇지 않습니다 (자리가 의심스러운 단어는 무시).",
+  "silence_bridge_sec": 0.3,
+  "silence_bridge_max_db": -30
 }
