@@ -302,12 +302,56 @@ def whisper_options(prompt: str) -> dict:
     )
 
 
+WIN_CRASH_CODES = {3221225477, -1073741819,   # 0xC0000005 접근 위반
+                   3221226505, -1073740791}   # 0xC0000409 (CUDA/cuDNN 로드 실패 때 흔함)
+
+
+def probe_whisper_windows(model_name: str, device: str, compute_type: str, threads: int) -> None:
+    """일부 Windows PC 에선 ctranslate2 4.5+ 가 모델 로드·첫 전사에서 파이썬 오류 없이 프로세스째 죽는다.
+    본 프로세스에서 죽으면 사용자는 원인을 알 수 없으니, 처음 한 번 별도 프로세스로 로드+짧은 전사를 해 보고
+    죽으면 고치는 방법을 알려 준다. 성공하면 work/ 에 기록해 ctranslate2 버전·설정이 같으면 다시 하지 않는다."""
+    from importlib.metadata import version
+    key = {"ctranslate2": version("ctranslate2"), "model": model_name, "device": device, "compute_type": compute_type}
+    marker = ROOT / "work" / ".whisper_probe.json"
+    try:
+        if json.loads(marker.read_text(encoding="utf-8")) == key:
+            return
+    except (OSError, json.JSONDecodeError):
+        pass
+    log("Windows 호환성 확인: 별도 프로세스에서 Whisper 모델을 한 번 띄워 봅니다 "
+        "(처음 한 번. 모델을 아직 안 받았으면 다운로드까지 해서 몇 분 걸릴 수 있음)")
+    code = ("import numpy as np; from faster_whisper import WhisperModel; "
+            f"m = WhisperModel({model_name!r}, device={device!r}, compute_type={compute_type!r}, cpu_threads={threads}); "
+            "list(m.transcribe(np.zeros(16000, dtype=np.float32), language='ko', vad_filter=False)[0])")
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    if res.returncode == 0:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps(key), encoding="utf-8")
+        return
+    if res.returncode == 1 and "Traceback" in res.stderr:
+        return  # 보통의 파이썬 오류(네트워크 등)는 본 실행에서 그대로 보여 준다
+    if res.returncode in WIN_CRASH_CODES or res.returncode < 0 or res.returncode > 255:
+        if device != "cpu":
+            sys.exit(f"오류: Whisper 모델을 띄우다 프로세스가 죽었습니다 (종료 코드 {res.returncode}, device={device}).\n"
+                     "  GPU(CUDA/cuDNN) 설정 문제일 가능성이 큽니다. --device cpu 를 붙여 다시 실행하세요.")
+        head = (f"오류: Whisper 모델을 띄우다 프로세스가 죽었습니다 (종료 코드 {res.returncode}, "
+                f"ctranslate2 {key['ctranslate2']}).\n")
+        if tuple(int(x) for x in re.findall(r"\d+", key["ctranslate2"])[:2]) >= (4, 5):
+            sys.exit(head + "  이 PC 는 ctranslate2 4.5 이상과 맞지 않는 경우입니다. 아래로 내린 뒤 다시 실행하세요:\n"
+                     '  .venv\\Scripts\\python -m pip install "ctranslate2==4.4.0"\n'
+                     "  (그래도 같으면 VC++ 런타임: winget install Microsoft.VCRedist.2015+.x64)")
+        sys.exit(head + "  VC++ 런타임이 없거나 오래된 경우가 많습니다. 설치 후 터미널을 새로 열고 다시 실행하세요:\n"
+                 "  winget install Microsoft.VCRedist.2015+.x64")
+
+
 def load_whisper(model_name: str, device: str, compute_type: str):
     try:
         from faster_whisper import WhisperModel
     except ImportError:
         sys.exit("오류: faster-whisper 가 설치되지 않았습니다. ./setup.sh 를 먼저 실행하세요.")
     threads = perf_cores()
+    if os.name == "nt":
+        probe_whisper_windows(model_name, device, compute_type, threads)
     log(f"Whisper 모델 로드: {model_name} (device={device}, compute={compute_type}, threads={threads})")
     return WhisperModel(model_name, device=device, compute_type=compute_type, cpu_threads=threads)
 

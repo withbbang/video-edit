@@ -65,6 +65,9 @@ work/<이름>/          캐시 (정리된 오디오 등). 지워도 됨
   → 영상·오디오 길이 차가 1프레임 이내인지, 인코더·자막 트랙(kor)이 있는지 본다.
 - 로컬 ffmpeg 는 9.x. `-filter_complex_script` 같은 `*_script` 옵션은 없어졌으니 `-/filter_complex <파일>` 처럼 쓴다
   (`render_video` 는 버전을 보고 고른다). ffmpeg 식 파서는 평평한 `a+b+…` 를 100항까지만 받으므로 긴 식은 `sum_tree` 로 묶는다.
+- Windows: 일부 PC 에서 ctranslate2 4.5+ 가 모델 로드 때 메시지 없이 죽는다. requirements 로 버전을 묶지 않고,
+  `probe_whisper_windows` 가 처음 한 번 별도 프로세스로 로드+짧은 전사를 해 보고 죽으면 고칠 방법(`--device cpu` /
+  `ctranslate2==4.4.0` / VC++ 런타임)을 알려 주며 멈춘다. 성공 기록은 `work/.whisper_probe.json`.
 - 합성 신호로 테스트할 땐 `--denoise none` 을 쓴다. RNNoise 는 사인파 같은 일정한 음을 잡음으로 보고 지운다.
 - 처음 실행 시 Whisper 모델(기본 large-v3-turbo, 약 1.6GB)과 정렬 모델(kresnik/wav2vec2-large-xlsr-korean, 약 1.2GB)을
   Hugging Face 에서 내려받는다.

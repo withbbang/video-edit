@@ -1,6 +1,4 @@
 faster-whisper>=1.1.0
-# ctranslate2 >= 4.5 crashes at model load (access violation) on some Windows PCs
-ctranslate2>=4.0,<4.5; sys_platform == "win32"
 numpy>=1.24
 # CTC alignment for filler timing correction (skipped if not installed)
 torch>=2.2

@@ -59,7 +59,7 @@ python -m venv .venv
 
 - `--device cpu` 를 항상 붙인다. 기본값 `auto` 는 NVIDIA 카드가 있으면 CUDA 를 고르는데, cuDNN 이 없으면 에러 메시지 없이 종료된다. GPU 로 돌리려면 faster-whisper README 의 CUDA 설치 안내를 따른 뒤 `--device cuda --compute-type float16`
 - 하드웨어 인코딩(`--hw on`)은 맥 전용이라 윈도우에서는 경고 한 줄 뒤 libx264 로 자동 대체된다. 정상 동작이니 무시해도 된다
-- VC++ 런타임을 설치했는데도 "Whisper 모델 로드" 또는 "전사 시작" 직후 아무 메시지 없이 프롬프트로 돌아오면 `.venv\Scripts\python -m pip install "ctranslate2==4.4.0"` 으로 내리고 다시 실행한다 (4.5 이상이 일부 PC 에서 로드 시 죽는다)
+- 일부 PC 에선 ctranslate2 4.5 이상이 모델 로드 때 메시지 없이 죽는다. 처음 실행 때 파이프라인이 별도 프로세스로 미리 띄워 보고, 죽으면 멈추면서 `.venv\Scripts\python -m pip install "ctranslate2==4.4.0"` 으로 내리라고 알려 준다 (`--device cpu` 를 안 붙였으면 그걸 먼저 안내). 정상인 PC 는 최신 버전을 그대로 쓴다
 - 첫 실행 때 Whisper 모델(약 1.6GB)과 정렬 모델(약 1.2GB)을 내려받는 건 맥과 같다
 - `python` 이 없다고 나오면 Microsoft Store 가 가로챈 것일 수 있다. `py -3 -m venv .venv` 로 바꿔 쓰거나, 설정 > 앱 > 앱 실행 별칭에서 python 항목을 끈다
 
