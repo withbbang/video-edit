@@ -19,6 +19,7 @@ cd ~/Desktop/code/youtube-edit
 ### PowerShell
 
 ```powershell
+winget install Microsoft.VCRedist.2015+.x64   # VC++ 런타임 (없거나 오래되면 모델 로드에서 말없이 죽는다)
 winget install Gyan.FFmpeg          # ffmpeg 없으면
 winget install Python.Python.3.11   # 파이썬 없으면 (설치 후 터미널을 새로 연다)
 cd youtube-edit
@@ -29,12 +30,14 @@ python -m venv .venv
 실행:
 
 ```powershell
-.venv\Scripts\python scripts\pipeline.py input\영상.mp4
+.venv\Scripts\python scripts\pipeline.py input\영상.mp4 --device cpu
 ```
 
 ### cmd (명령 프롬프트)
 
 ```bat
+winget install Microsoft.VCRedist.2015+.x64
+REM VC++ 런타임 (없거나 오래되면 모델 로드에서 말없이 죽는다)
 winget install Gyan.FFmpeg
 REM ffmpeg 없을 때
 winget install Python.Python.3.11
@@ -47,15 +50,16 @@ python -m venv .venv
 실행:
 
 ```bat
-.venv\Scripts\python scripts\pipeline.py input\영상.mp4
+.venv\Scripts\python scripts\pipeline.py input\영상.mp4 --device cpu
 ```
 
 ### 맥과 다른 점
 
 옵션은 맥과 같다 (`--help` 로 전체 목록).
 
-- `--vcodec h264_videotoolbox` 는 맥 전용. NVIDIA 그래픽카드가 있으면 `--vcodec h264_nvenc`, 없으면 생략 (기본 libx264)
-- Whisper 는 기본적으로 CPU(int8) 로 돈다. NVIDIA GPU 로 돌리려면 faster-whisper README 의 CUDA 설치 안내를 따른 뒤 `--device cuda --compute-type float16`
+- `--device cpu` 를 항상 붙인다. 기본값 `auto` 는 NVIDIA 카드가 있으면 CUDA 를 고르는데, cuDNN 이 없으면 에러 메시지 없이 종료된다. GPU 로 돌리려면 faster-whisper README 의 CUDA 설치 안내를 따른 뒤 `--device cuda --compute-type float16`
+- 하드웨어 인코딩(`--hw on`)은 맥 전용이라 윈도우에서는 경고 한 줄 뒤 libx264 로 자동 대체된다. 정상 동작이니 무시해도 된다
+- VC++ 런타임을 설치했는데도 "Whisper 모델 로드" 또는 "전사 시작" 직후 아무 메시지 없이 프롬프트로 돌아오면 `.venv\Scripts\python -m pip install "ctranslate2==4.4.0"` 으로 내리고 다시 실행한다 (4.5 이상이 일부 PC 에서 로드 시 죽는다)
 - 첫 실행 때 Whisper 모델(약 1.6GB)과 정렬 모델(약 1.2GB)을 내려받는 건 맥과 같다
 - `python` 이 없다고 나오면 Microsoft Store 가 가로챈 것일 수 있다. `py -3 -m venv .venv` 로 바꿔 쓰거나, 설정 > 앱 > 앱 실행 별칭에서 python 항목을 끈다
 
