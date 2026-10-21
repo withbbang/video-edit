@@ -170,6 +170,29 @@ def fmt_clock(t: float) -> str:
     return f"{m:02d}:{cs / 100:05.2f}"
 
 
+def pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        # Windows 의 os.kill(pid, 0) 은 확인이 아니라 TerminateProcess 라 실행 중인 파이프라인을 죽인다
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = ctypes.c_void_p
+        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: 다른 사용자의 살아 있는 프로세스
+        try:
+            code = ctypes.c_ulong()
+            return bool(k32.GetExitCodeProcess(ctypes.c_void_p(h), ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(h))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 class RunLock:
     """같은 영상을 두 파이프라인이 동시에 처리하면 work/ 와 output/ 파일을 서로 덮어쓴다."""
     def __init__(self, path: Path):
@@ -179,12 +202,11 @@ class RunLock:
         if self.path.exists():
             try:
                 pid = int(self.path.read_text().strip())
-                os.kill(pid, 0)
+            except ValueError:
+                pid = None  # 깨진 잠금 파일
+            if pid is not None and pid != os.getpid() and pid_alive(pid):
                 sys.exit(f"오류: 같은 영상을 이미 처리 중입니다 (pid {pid}). 끝날 때까지 기다리세요.")
-            except (ValueError, ProcessLookupError):
-                pass  # 비정상 종료로 남은 잠금
-            except PermissionError:
-                sys.exit("오류: 같은 영상을 다른 사용자가 처리 중입니다.")
+            # 아니면 비정상 종료로 남은 잠금
         self.path.write_text(str(os.getpid()))
         return self
 
