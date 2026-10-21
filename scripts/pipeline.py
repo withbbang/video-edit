@@ -5,8 +5,8 @@ youtube-edit 파이프라인
   입력 영상 → (1) 노이즈 제거 + 라우드니스 정규화
            → (2) 한국어 전사 (faster-whisper, 단어 타임스탬프)
            → (3) 필러/습관어 + 말 사이 무음 감지 → 컷 리스트
-           → (4) 컷 적용 (프레임 격자에 맞춰 A/V 싱크 유지)
-           → (5) 컷 반영된 타임코드로 SRT 생성
+           → (4) 컷 반영된 타임코드로 SRT 생성
+           → (5) 컷 적용 (프레임 격자에 맞춰 A/V 싱크 유지, 자막 트랙 함께 mux)
 
 사용 예:
   python scripts/pipeline.py input/my.mp4
@@ -19,8 +19,8 @@ youtube-edit 파이프라인
   python scripts/pipeline.py input/my.mp4 --hw off            # 소프트웨어 인코딩(libx264, 느리지만 고화질)
 
 산출물 (output/<이름>.*):
-  <이름>_clean.mp4     최종 영상
-  <이름>_clean.srt     자막 (최종 영상 기준 타임코드, 영상과 같은 이름). mp4 안에도 자막 트랙으로 들어감
+  <이름>_clean.mp4     최종 영상 (끄고 켤 수 있는 자막 트랙 포함)
+  <이름>_clean.srt     자막 (최종 영상 기준 타임코드, 영상과 같은 이름)
   <이름>.cuts.json     잘라낸 구간 목록 (수정 후 --apply-cuts 로 재적용 가능)
   <이름>.review.md     사람이 보기 좋은 컷 검토표
   <이름>.transcript.json  단어 타임스탬프 포함 전사 원본
@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import hashlib
 import json
 import math
 import os
@@ -46,6 +47,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = ROOT / "models"
 DEFAULT_FILLERS = ROOT / "fillers.json"
+CACHE_VERSION = 2  # 캐시 형식이 바뀌면 올린다 → 예전 캐시는 자동으로 다시 만든다
 
 PUNCT_RE = re.compile(r"[\s\.\,\!\?\~\…\·\'\"\-\…\(\)\[\]「」『』、。:;]+")
 
@@ -61,8 +63,15 @@ def run(cmd: list, cwd: Path | None = None, quiet: bool = False) -> subprocess.C
     if not quiet:
         shown = " ".join(str(c) for c in cmd)
         log("$ " + (shown if len(shown) < 400 else shown[:400] + " …"))
-    return subprocess.run([str(c) for c in cmd], cwd=cwd, check=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        return subprocess.run([str(c) for c in cmd], cwd=cwd, check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except subprocess.CalledProcessError as e:
+        # 캡처한 stderr 를 버리면 "moov atom not found" 같은 원인이 안 보인다
+        log(f"명령 실패 (exit {e.returncode}): {Path(str(cmd[0])).name}")
+        for line in (e.stderr or "").strip().splitlines()[-15:]:
+            log("  " + line)
+        raise
 
 
 def need(binary: str) -> None:
@@ -70,48 +79,123 @@ def need(binary: str) -> None:
         sys.exit(f"오류: {binary} 를 찾을 수 없습니다. macOS: brew install ffmpeg")
 
 
+def ffmpeg_major() -> int:
+    first = run(["ffmpeg", "-version"], quiet=True).stdout.splitlines()[0]
+    m = re.search(r"version n?(\d+)\.", first)
+    return int(m.group(1)) if m else 99  # git 빌드(N-xxxxx)는 최신으로 본다
+
+
+def ffmpeg_has(kind: str, name: str) -> bool:
+    out = run(["ffmpeg", "-hide_banner", f"-{kind}"], quiet=True).stdout
+    return re.search(rf"\s{re.escape(name)}\s", out) is not None
+
+
+def perf_cores() -> int:
+    # Apple Silicon 은 E코어까지 쓰면 오히려 느려진다 (8스레드 17s → 6스레드 12s 측정)
+    try:
+        n = int(subprocess.run(["sysctl", "-n", "hw.perflevel0.physicalcpu"], capture_output=True,
+                               text=True, check=True).stdout.strip())
+        if n > 0:
+            return n
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        pass
+    return max(1, os.cpu_count() or 4)
+
+
+def _frac(x) -> Fraction | None:
+    try:
+        f = Fraction(x)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return f if f > 0 else None
+
+
 def ffprobe(path: Path) -> dict:
     out = run(["ffprobe", "-v", "error", "-print_format", "json",
                "-show_streams", "-show_format", path], quiet=True).stdout
     info = json.loads(out)
-    v = next((s for s in info["streams"] if s["codec_type"] == "video"), None)
+    # 오디오 파일에 붙은 앨범 아트(attached_pic)는 영상이 아니다
+    v = next((s for s in info["streams"] if s["codec_type"] == "video"
+              and not s.get("disposition", {}).get("attached_pic")), None)
     a = next((s for s in info["streams"] if s["codec_type"] == "audio"), None)
     if a is None:
         sys.exit("오류: 오디오 트랙이 없는 파일입니다.")
-    fps = Fraction(v["avg_frame_rate"]) if v and v.get("avg_frame_rate") not in (None, "0/0") else Fraction(30)
-    if v and v.get("r_frame_rate") and fps == 0:
-        fps = Fraction(v["r_frame_rate"])
-    duration = float(info["format"].get("duration") or a.get("duration") or 0)
+
+    fps, vfr = Fraction(30), False
+    if v:
+        avg, rate = _frac(v.get("avg_frame_rate")), _frac(v.get("r_frame_rate"))
+        # 가변 프레임(화면 녹화 등)은 평균이 실제 촬영 속도보다 훨씬 낮다 → 최대 속도 격자를 쓴다
+        if avg and rate and rate > avg * Fraction(105, 100) and rate <= 120:
+            fps, vfr = rate, True
+        else:
+            fps = avg or (rate if rate and rate <= 120 else None) or Fraction(30)
+
+    fmt_dur = float(info["format"].get("duration") or 0)
+    duration = float((v or {}).get("duration") or fmt_dur or a.get("duration") or 0)
+    pix_fmt = (v or {}).get("pix_fmt", "")
+    a_start = float(a.get("start_time") or 0)
+    v_start = float(v.get("start_time") or 0) if v else a_start
     return {
         "has_video": v is not None,
         "fps": fps,
+        "vfr": vfr,
         "width": int(v["width"]) if v else 0,
         "height": int(v["height"]) if v else 0,
         "duration": duration,
         "sample_rate": int(a.get("sample_rate", 48000)),
         "channels": int(a.get("channels", 2)),
+        "audio_offset": a_start - v_start,  # >0: 오디오가 영상보다 늦게 시작
+        "pix_fmt": pix_fmt,
+        "high_bit": bool(re.search(r"p1[0-6]|p010|p016", pix_fmt)),
+        "color": {k: (v or {}).get(k) for k in ("color_primaries", "color_transfer", "color_space")},
     }
 
 
+def source_sig(src: Path) -> dict:
+    st = src.stat()
+    return {"path": str(src), "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
+
 def fmt_srt_time(t: float) -> str:
-    t = max(0.0, t)
-    h = int(t // 3600); t -= h * 3600
-    m = int(t // 60); t -= m * 60
-    s = int(t); ms = int(round((t - s) * 1000))
-    if ms == 1000:
-        s += 1; ms = 0
+    ms = int(round(max(0.0, t) * 1000))  # 반올림 후에 자리 올림 → "00:00:60,000" 이 생기지 않는다
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
 def fmt_clock(t: float) -> str:
-    m = int(t // 60); s = t - m * 60
-    return f"{m:02d}:{s:05.2f}"
+    cs = int(round(max(0.0, t) * 100))
+    m, cs = divmod(cs, 6000)
+    return f"{m:02d}:{cs / 100:05.2f}"
+
+
+class RunLock:
+    """같은 영상을 두 파이프라인이 동시에 처리하면 work/ 와 output/ 파일을 서로 덮어쓴다."""
+    def __init__(self, path: Path):
+        self.path = path
+
+    def __enter__(self):
+        if self.path.exists():
+            try:
+                pid = int(self.path.read_text().strip())
+                os.kill(pid, 0)
+                sys.exit(f"오류: 같은 영상을 이미 처리 중입니다 (pid {pid}). 끝날 때까지 기다리세요.")
+            except (ValueError, ProcessLookupError):
+                pass  # 비정상 종료로 남은 잠금
+            except PermissionError:
+                sys.exit("오류: 같은 영상을 다른 사용자가 처리 중입니다.")
+        self.path.write_text(str(os.getpid()))
+        return self
+
+    def __exit__(self, *exc):
+        self.path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
 # 1) 오디오 정리: 노이즈 제거 + 라우드니스
 # ---------------------------------------------------------------------------
-def audio_filter_chain(denoise: str, loudnorm: bool, model_rel: str) -> str:
+def audio_filter_chain(denoise: str, loudnorm: bool, model_rel: str, offset: float) -> str:
     chain = ["highpass=f=70"]
     if denoise == "rnnoise":
         chain.append(f"arnndn=m={model_rel}:mix=0.85")
@@ -119,44 +203,85 @@ def audio_filter_chain(denoise: str, loudnorm: bool, model_rel: str) -> str:
         chain.append("afftdn=nf=-25:nr=12:tn=1")
     if loudnorm:
         chain.append("loudnorm=I=-14:TP=-1.5:LRA=11")
+    # 오디오/영상 시작 시점 차이를 메워야 영상(setpts=PTS-STARTPTS)과 싱크가 맞는다.
+    # 맨 끝에 둔다: 노이즈 제거·라우드니스가 앞에 붙인 무음까지 분석하지 않게 (adelay→arnndn→loudnorm 순서에서 출력이 무음이 되는 경우를 봄)
+    if offset > 0.001:
+        chain.append(f"adelay=delays={offset * 1000:.1f}:all=1")
+    elif offset < -0.001:
+        chain.append(f"asetpts=PTS-STARTPTS,atrim=start={-offset:.6f},asetpts=PTS-STARTPTS")
     return ",".join(chain)
 
 
-def prepare_audio(src: Path, work: Path, denoise: str, loudnorm: bool, force: bool) -> tuple[Path, Path]:
-    clean = work / "clean.wav"   # 48k, 원본 채널 수 — 최종 영상에 들어갈 오디오
+def prepare_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: bool,
+                  force: bool) -> tuple[Path, Path, dict]:
+    clean = work / "clean.wav"   # 48k, 스테레오 이하 — 최종 영상에 들어갈 오디오
     asr = work / "asr.wav"       # 16k mono — 전사/무음 분석용
-    if clean.exists() and asr.exists() and not force:
-        log("오디오 정리 결과 재사용 (work/ 에 이미 있음)")
-        return clean, asr
+    meta = work / "audio.meta.json"
 
-    model_rel = os.path.relpath(MODELS_DIR / "sh.rnnn", ROOT)
     if denoise == "rnnoise" and not (MODELS_DIR / "sh.rnnn").exists():
         log("경고: models/sh.rnnn 이 없어 afftdn 으로 대체합니다")
         denoise = "afftdn"
-    af = audio_filter_chain(denoise, loudnorm, model_rel)
+    if denoise == "rnnoise" and not ffmpeg_has("filters", "arnndn"):
+        log("경고: 이 ffmpeg 에 arnndn 필터가 없어 afftdn 으로 대체합니다")
+        denoise = "afftdn"
+    offset = info["audio_offset"] if info["has_video"] else 0.0
+    model_rel = os.path.relpath(MODELS_DIR / "sh.rnnn", ROOT)
+    af = audio_filter_chain(denoise, loudnorm, model_rel, offset)
+    # 3채널 이상 WAV 는 WAVE_FORMAT_EXTENSIBLE 헤더라 파이썬 wave 모듈이 못 읽는다 → 스테레오로 다운믹스
+    ac = ["-ac", "2"] if info["channels"] > 2 else []
+    # 필터 체인 문자열 자체를 키에 넣어 처리 방식이 바뀌면 캐시도 자동으로 무효가 되게 한다
+    key = {"v": CACHE_VERSION, "src": source_sig(src), "filter": af, "ac": ac}
+
+    if clean.exists() and asr.exists() and meta.exists() and not force:
+        try:
+            if json.loads(meta.read_text(encoding="utf-8")) == key:
+                log("오디오 정리 결과 재사용 (work/ 에 이미 있음)")
+                return clean, asr, key
+        except json.JSONDecodeError:
+            pass
+        log("원본이나 오디오 설정이 바뀌어 오디오를 다시 정리합니다")
+
+    if abs(offset) > 0.001:
+        log(f"오디오/영상 시작 차이 {offset * 1000:+.0f}ms 보정")
     log(f"오디오 정리: {af}")
+    if ac:
+        log(f"{info['channels']}채널 오디오를 스테레오로 다운믹스합니다")
+    meta.unlink(missing_ok=True)
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src,
-         "-vn", "-af", af, "-ar", "48000", "-c:a", "pcm_s16le", clean], cwd=ROOT)
+         "-vn", "-af", af, "-ar", "48000", *ac, "-c:a", "pcm_s16le", clean], cwd=ROOT)
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", clean,
          "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", asr], cwd=ROOT)
-    return clean, asr
+    meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
+    return clean, asr, key
+
+
+def wav_duration(path: Path) -> float:
+    with wave.open(str(path), "rb") as wf:
+        return wf.getnframes() / wf.getframerate()
 
 
 # ---------------------------------------------------------------------------
 # 2) 전사
 # ---------------------------------------------------------------------------
-def transcribe(asr_wav: Path, out_json: Path, model_name: str, device: str,
+def transcribe(asr_wav: Path, out_json: Path, audio_key: dict, model_name: str, device: str,
                compute_type: str, prompt: str, force: bool) -> dict:
+    key = {"audio": audio_key, "model": model_name, "compute_type": compute_type, "hotwords": prompt}
     if out_json.exists() and not force:
-        log(f"전사 결과 재사용: {out_json.name}")
-        return json.loads(out_json.read_text(encoding="utf-8"))
+        try:
+            cached = json.loads(out_json.read_text(encoding="utf-8"))
+            if cached.get("cache_key") == key:
+                log(f"전사 결과 재사용: {out_json.name}")
+                return cached
+        except json.JSONDecodeError:
+            pass
+        log("원본·오디오·모델·프롬프트 중 바뀐 것이 있어 전사를 다시 합니다")
 
     try:
         from faster_whisper import WhisperModel
     except ImportError:
         sys.exit("오류: faster-whisper 가 설치되지 않았습니다. ./setup.sh 를 먼저 실행하세요.")
 
-    threads = max(1, (os.cpu_count() or 4))
+    threads = perf_cores()
     log(f"Whisper 모델 로드: {model_name} (device={device}, compute={compute_type}, threads={threads})")
     log("  처음 한 번은 모델 다운로드(1~3GB)로 시간이 걸립니다")
     model = WhisperModel(model_name, device=device, compute_type=compute_type, cpu_threads=threads)
@@ -170,7 +295,9 @@ def transcribe(asr_wav: Path, out_json: Path, model_name: str, device: str,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
         condition_on_previous_text=False,
-        initial_prompt=prompt,
+        # initial_prompt 는 condition_on_previous_text=False 면 첫 30초 창에만 들어간다.
+        # hotwords 는 창마다 다시 붙으므로 영상 끝까지 "어/음"이 전사에 남는다.
+        hotwords=prompt or None,
         hallucination_silence_threshold=2.0,
     )
     segments = []
@@ -183,10 +310,16 @@ def transcribe(asr_wav: Path, out_json: Path, model_name: str, device: str,
         if i % 20 == 0:
             log(f"  … {fmt_clock(seg.end)} 까지 전사 ({time.time()-t0:.0f}s)")
     result = {"language": info.language, "duration": float(info.duration), "model": model_name,
-              "segments": segments}
+              "cache_key": key, "segments": segments}
     out_json.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     log(f"전사 완료: {len(segments)} 세그먼트, {sum(len(s['words']) for s in segments)} 단어")
     return result
+
+
+def transcript_sha1(tr: dict) -> str:
+    """cuts.json 의 words_idx 가 가리키는 전사가 그대로인지 확인하는 지문"""
+    words = [[w["word"], round(w["start"], 2)] for seg in tr["segments"] for w in seg["words"]]
+    return hashlib.sha1(json.dumps(words, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -215,68 +348,72 @@ class Cut:
 
 def load_fillers(path: Path) -> dict:
     cfg = json.loads(path.read_text(encoding="utf-8"))
-    cfg["_always"] = {normalize(w) for w in cfg.get("always", [])}
-    cfg["_habit"] = {normalize(w) for w in cfg.get("habit", [])}
-    cfg["_pause_after"] = {normalize(w) for w in cfg.get("habit_pause_after", [])}
-    cfg["_never"] = {normalize(w) for w in cfg.get("never_cut", [])}
+    lists = {"_always": "always", "_habit": "habit", "_pause_after": "habit_pause_after",
+             "_never": "never_cut"}
+    for k, name in lists.items():
+        cfg[k] = {normalize(w) for w in cfg.get(name, [])}
+    # "어떻게 보면" 처럼 띄어 쓴 항목은 전사에서 단어 여러 개로 나뉜다 → 이어 붙여 비교할 길이들
+    cfg["_phrase_lens"] = sorted({len(w.split()) for name in lists.values()
+                                  for w in cfg.get(name, []) if len(w.split()) > 1}, reverse=True)
     return cfg
+
+
+def all_words(tr: dict) -> list[tuple[int, int, dict]]:
+    return [(seg["id"], i, w) for seg in tr["segments"] for i, w in enumerate(seg["words"])]
 
 
 def detect_fillers(tr: dict, cfg: dict, habit_mode: str, filler: bool = True) -> tuple[list[Cut], list[dict]]:
     min_gap = float(cfg.get("min_gap_habit_sec", 0.22))
     max_dur = float(cfg.get("max_filler_duration_sec", 1.3))
+    known = cfg["_always"] | cfg["_habit"] | cfg["_pause_after"]
+    words = all_words(tr)  # 세그먼트 경계를 넘어 앞뒤 단어를 본다
+    norms = [normalize(w["word"]) for _, _, w in words]
     cuts: list[Cut] = []
     skipped: list[dict] = []
 
-    for seg in tr["segments"]:
-        words = seg["words"]
-        for i, w in enumerate(words):
-            nw = normalize(w["word"])
-            if not nw or nw in cfg["_never"]:
-                continue
-            is_always = nw in cfg["_always"]
-            is_habit = nw in cfg["_habit"]
-            is_pause_after = nw in cfg["_pause_after"]
-            if not (is_always or is_habit or is_pause_after):
-                continue
+    k = 0
+    while k < len(words):
+        n = next((m for m in cfg["_phrase_lens"]
+                  if k + m <= len(words) and "".join(norms[k:k + m]) in known), 1)
+        nw = "".join(norms[k:k + n])
+        span = words[k:k + n]
+        first, last = span[0][2], span[-1][2]
+        k_next = k + n
+        k_cur, k = k, k + n
+        if not nw or nw in cfg["_never"] or nw not in known:
+            continue
+        is_always = nw in cfg["_always"]
+        is_pause_after = nw in cfg["_pause_after"]
+        gap_after = (words[k_next][2]["start"] - last["end"]) if k_next < len(words) else 9.0
 
-            prev_end = words[i - 1]["end"] if i > 0 else None
-            next_start = words[i + 1]["start"] if i + 1 < len(words) else None
-            gap_before = (w["start"] - prev_end) if prev_end is not None else 9.0
-            gap_after = (next_start - w["end"]) if next_start is not None else 9.0
-            prev_norm = normalize(words[i - 1]["word"]) if i > 0 else ""
-            next_norm = normalize(words[i + 1]["word"]) if i + 1 < len(words) else ""
-            neighbor_filler = (next_norm in cfg["_always"] or next_norm in cfg["_habit"]
-                               or prev_norm == nw)
+        reason = None
+        if is_always:
+            if not filler:
+                continue
+            reason = "filler"
+        elif habit_mode == "off":
+            continue
+        elif habit_mode == "aggressive":
+            reason = "habit"
+        elif is_pause_after:  # conservative: 뜻이 있을 수 있는 단어(그/저/좀 …)는 뒤 멈춤일 때만
+            if gap_after >= min_gap:
+                reason = "habit(뒤 멈춤)"
+        else:                 # conservative: 순수 습관어(그니까/약간/이제 …)는 전부
+            reason = "habit"
+        if reason is None:
+            continue
 
-            reason = None
-            if is_always:
-                if not filler:
-                    continue
-                reason = "filler"
-            elif habit_mode == "off":
-                continue
-            elif habit_mode == "aggressive":
-                reason = "habit"
-            else:  # conservative: 순수 습관어는 전부, 뜻이 있을 수 있는 단어(그/저/좀 …)는 뒤 멈춤일 때만
-                if is_pause_after:
-                    if gap_after >= min_gap or neighbor_filler:
-                        reason = "habit(뒤 멈춤)"
-                elif is_habit:
-                    reason = "habit"
-            if reason is None:
-                continue
-
-            ctx_prev = " ".join(x["word"].strip() for x in words[max(0, i - 3):i])
-            ctx_next = " ".join(x["word"].strip() for x in words[i + 1:i + 4])
-            context = f"{ctx_prev} [{w['word'].strip()}] {ctx_next}".strip()
-            dur = w["end"] - w["start"]
-            if dur > max_dur or dur <= 0:
-                skipped.append({"start": w["start"], "end": w["end"], "word": w["word"].strip(),
-                                "why": f"단어 길이 {dur:.2f}s 가 비정상 (타임스탬프 불안정)", "context": context})
-                continue
-            cuts.append(Cut(w["start"], w["end"], w["word"].strip(), reason, context, seg["id"],
-                            words_idx=[[seg["id"], i]]))
+        text = " ".join(x[2]["word"].strip() for x in span)
+        ctx_prev = " ".join(x[2]["word"].strip() for x in words[max(0, k_cur - 3):k_cur])
+        ctx_next = " ".join(x[2]["word"].strip() for x in words[k_next:k_next + 3])
+        context = f"{ctx_prev} [{text}] {ctx_next}".strip()
+        dur = last["end"] - first["start"]
+        if dur > max_dur * n or dur <= 0:
+            skipped.append({"start": first["start"], "end": last["end"], "word": text,
+                            "why": f"단어 길이 {dur:.2f}s 가 비정상 (타임스탬프 불안정)", "context": context})
+            continue
+        cuts.append(Cut(first["start"], last["end"], text, reason, context, span[0][0],
+                        words_idx=[[s, i] for s, i, _ in span]))
     return cuts, skipped
 
 
@@ -301,13 +438,13 @@ def detect_silences(tr: dict, rms: list[float], hop: float, duration: float,
     """말 사이 빈 구간 감지. 앞뒤로 silence_pad_sec 만 남기고 나머지를 컷한다."""
     import numpy as np
     thr = 10 ** (float(cfg.get("silence_threshold_db", -40)) / 20)
-    min_len = float(cfg.get("silence_min_sec", 0.4))
-    pad = float(cfg.get("silence_pad_sec", 0.12))
+    min_len = float(cfg.get("silence_min_sec", 0.3))
+    pad = float(cfg.get("silence_pad_sec", 0.08))
     r = np.asarray(rms)
     k = max(1, int(round(0.05 / hop)))  # 50ms 이동평균 — 짧은 잡음 스파이크로 무음이 쪼개지는 것 방지
     quiet = np.convolve(r, np.ones(k) / k, mode="same") < thr
     edges = np.flatnonzero(np.diff(np.concatenate(([0], quiet.astype(np.int8), [0]))))
-    words = [w for seg in tr["segments"] for w in seg["words"]]
+    words = [w for _, _, w in all_words(tr)]
     word_starts = [w["start"] for w in words]
 
     cuts: list[Cut] = []
@@ -320,24 +457,33 @@ def detect_silences(tr: dict, rms: list[float], hop: float, duration: float,
         ctx_prev = " ".join(x["word"].strip() for x in words[max(0, i - 3):i])
         ctx_next = " ".join(x["word"].strip() for x in words[i:i + 3])
         context = f"{ctx_prev} [{e-s:.1f}s 무음] {ctx_next}".strip()
-        # 무음 안에 단어가 통째로 들어 있으면 작은 목소리를 무음으로 오인했을 수 있다
-        if i < len(words) and words[i]["end"] <= e:
-            skipped.append({"start": s, "end": e, "word": "(무음)",
-                            "why": f"무음 안에 단어 '{words[i]['word'].strip()}' 가 있음 (작은 목소리일 수 있음)",
-                            "context": context})
-            continue
-        cs = s if a == 0 else s + pad            # 영상 맨 앞/맨 뒤 무음은 여유 없이 전부 컷
-        ce = e if b >= len(r) else e - pad
-        if ce - cs < 0.05:
-            continue
-        cuts.append(Cut(cs, ce, "(무음)", "silence", context, -1, words_idx=[]))
+        pieces = [(s if a == 0 else s + pad,            # 영상 맨 앞/맨 뒤 무음은 여유 없이 전부 컷
+                   e if b >= len(r) else e - pad)]
+        # 무음 안에 단어가 통째로 들어 있으면 작은 목소리일 수 있다 → 그 단어 주변만 남기고 나머지는 컷
+        j = i
+        while j < len(words) and words[j]["start"] < e:
+            w = words[j]
+            if w["end"] <= e:
+                ps, pe = w["start"] - pad, w["end"] + pad
+                pieces = [q for x0, x1 in pieces for q in ((x0, min(x1, ps)), (max(x0, pe), x1))]
+                skipped.append({"start": w["start"], "end": w["end"], "word": w["word"].strip(),
+                                "why": "무음 안의 작은 소리 (단어 주변만 남기고 나머지 무음은 컷)",
+                                "context": context})
+            j += 1
+        for cs, ce in pieces:
+            if ce - cs >= 0.05:
+                cuts.append(Cut(cs, ce, "(무음)", "silence", context, -1, words_idx=[]))
     return cuts, skipped
 
 
-def snap_to_quiet(t: float, rms: list[float], hop: float, win: float) -> float:
-    i0 = max(0, int((t - win) / hop))
-    i1 = min(len(rms) - 1, int((t + win) / hop))
+def snap_to_quiet(t: float, rms: list[float], hop: float, win: float, direction: int) -> float:
+    """컷 경계를 바깥쪽(direction=-1: 앞, +1: 뒤)으로만 가장 조용한 지점까지 옮긴다.
+    안쪽으로 옮기면 자음과 모음 사이의 짧은 골짜기에 걸려 필러 소리 일부가 남는다."""
     it = min(len(rms) - 1, max(0, int(t / hop)))
+    if direction < 0:
+        i0, i1 = max(0, int((t - win) / hop)), it
+    else:
+        i0, i1 = it, min(len(rms) - 1, int((t + win) / hop))
     if i1 <= i0:
         return t
     j = min(range(i0, i1 + 1), key=lambda k: rms[k])
@@ -347,36 +493,12 @@ def snap_to_quiet(t: float, rms: list[float], hop: float, win: float) -> float:
     return t
 
 
-def refine_cuts(cuts: list[Cut], rms: list[float], hop: float, fps: Fraction,
-                duration: float, cfg: dict) -> list[Cut]:
-    win = float(cfg.get("snap_window_sec", 0.12))
-    merge_gap = int(cfg.get("merge_gap_frames", 2))
-    min_keep = int(cfg.get("min_keep_frames", 3))
+def merge_cuts(cuts: list[Cut], fps: Fraction, min_keep: int) -> list[Cut]:
     f = float(fps)
-    total_frames = int(math.floor(duration * f))
-
-    refined: list[Cut] = []
-    for c in cuts:
-        if c.reason == "silence":  # 이미 무음 안쪽 경계 — 옮기면 남겨 둔 여유가 줄어든다
-            s, e = c.start, c.end
-        else:
-            s = snap_to_quiet(c.start, rms, hop, win)
-            e = snap_to_quiet(c.end, rms, hop, win)
-        if e - s < 0.04:  # 보정이 구간을 뭉갰으면 원래 값 사용
-            s, e = c.start, c.end
-        sf = max(0, int(round(s * f)))
-        ef = min(total_frames, int(round(e * f)))
-        if ef <= sf:
-            ef = min(total_frames, sf + 1)
-        if ef <= sf:
-            continue
-        refined.append(Cut(sf / f, ef / f, c.word, c.reason, c.context, c.seg, sf, ef,
-                           list(c.words_idx or [])))
-
-    refined.sort(key=lambda c: c.start_frame)
+    cuts = sorted(cuts, key=lambda c: c.start_frame)
     merged: list[Cut] = []
-    for c in refined:
-        if merged and c.start_frame <= merged[-1].end_frame + max(merge_gap, min_keep):
+    for c in cuts:
+        if merged and c.start_frame <= merged[-1].end_frame + min_keep:
             m = merged[-1]
             m.end_frame = max(m.end_frame, c.end_frame)
             m.end = m.end_frame / f
@@ -388,6 +510,30 @@ def refine_cuts(cuts: list[Cut], rms: list[float], hop: float, fps: Fraction,
         else:
             merged.append(c)
     return merged
+
+
+def refine_cuts(cuts: list[Cut], rms: list[float], hop: float, fps: Fraction,
+                total_frames: int, cfg: dict) -> list[Cut]:
+    win = float(cfg.get("snap_window_sec", 0.12))
+    min_keep = int(cfg.get("min_keep_frames", 3))
+    f = float(fps)
+
+    refined: list[Cut] = []
+    for c in cuts:
+        if c.reason == "silence":  # 이미 무음 안쪽 경계 — 옮기면 남겨 둔 여유가 줄어든다
+            s, e = c.start, c.end
+        else:
+            s = snap_to_quiet(c.start, rms, hop, win, -1)
+            e = snap_to_quiet(c.end, rms, hop, win, +1)
+        sf = max(0, int(round(s * f)))
+        ef = min(total_frames, int(round(e * f)))
+        if ef <= sf:
+            ef = min(total_frames, sf + 1)
+        if ef <= sf:
+            continue
+        refined.append(Cut(sf / f, ef / f, c.word, c.reason, c.context, c.seg, sf, ef,
+                           list(c.words_idx or [])))
+    return merge_cuts(refined, fps, min_keep)
 
 
 def keep_segments(cuts: list[Cut], total_frames: int) -> list[tuple[int, int]]:
@@ -403,77 +549,21 @@ def keep_segments(cuts: list[Cut], total_frames: int) -> list[tuple[int, int]]:
 
 
 # ---------------------------------------------------------------------------
-# 4) 컷 적용
-# ---------------------------------------------------------------------------
-def cut_audio_numpy(clean_wav: Path, out_wav: Path, keeps: list[tuple[int, int]], fps: Fraction,
-                    fade_ms: float = 3.0) -> int:
-    import numpy as np
-    with wave.open(str(clean_wav), "rb") as wf:
-        sr, ch, n = wf.getframerate(), wf.getnchannels(), wf.getnframes()
-        pcm = np.frombuffer(wf.readframes(n), dtype=np.int16).reshape(-1, ch).astype(np.float32)
-    fade = int(sr * fade_ms / 1000)
-    ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)[:, None] if fade > 0 else None
-    pieces = []
-    for sf, ef in keeps:
-        a = int(round(sf / fps * sr))
-        b = int(round(ef / fps * sr))
-        a, b = max(0, min(a, n)), max(0, min(b, n))
-        if b <= a:
-            continue
-        piece = pcm[a:b].copy()
-        if ramp is not None and len(piece) > 2 * fade:
-            piece[:fade] *= ramp
-            piece[-fade:] *= ramp[::-1]
-        pieces.append(piece)
-    out = np.concatenate(pieces) if pieces else pcm[:0]
-    out = np.clip(out, -32768, 32767).astype(np.int16)
-    with wave.open(str(out_wav), "wb") as wo:
-        wo.setnchannels(ch); wo.setsampwidth(2); wo.setframerate(sr)
-        wo.writeframes(out.tobytes())
-    return len(out)
-
-
-def render_video(src: Path, cut_wav: Path, out_mp4: Path, keeps: list[tuple[int, int]],
-                 fps: Fraction, work: Path, vcodec: str, crf: int, vbitrate: str, preset: str) -> None:
-    f = float(fps)
-    terms = [f"between(t,{(sf-0.5)/f:.6f},{(ef-0.5)/f:.6f})" for sf, ef in keeps]
-    script = work / "video_filter.txt"
-    script.write_text(
-        f"[0:v]setpts=PTS-STARTPTS,fps={fps.numerator}/{fps.denominator},"
-        f"select='{'+'.join(terms)}',setpts=N/FRAME_RATE/TB[v]",
-        encoding="utf-8")
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y",
-           "-i", src, "-i", cut_wav,
-           "-/filter_complex", script,  # ffmpeg 7+ 문법 (-filter_complex_script 는 9.0 에서 제거됨)
-           "-map", "[v]", "-map", "1:a",
-           "-c:v", vcodec, "-pix_fmt", "yuv420p"]
-    if vcodec == "libx264":
-        cmd += ["-preset", preset, "-crf", str(crf)]
-    else:  # h264_videotoolbox 등
-        cmd += ["-b:v", vbitrate]
-    # -shortest 는 마지막 프레임을 떨어뜨리므로 쓰지 않는다 (오디오/영상 길이는 이미 프레임 격자로 맞춤)
-    cmd += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_mp4]
-    log("렌더링 시작 (영상 길이에 따라 몇 분 걸립니다)")
-    subprocess.run([str(c) for c in cmd], check=True)
-
-
-# ---------------------------------------------------------------------------
-# 5) SRT
+# 4) SRT
 # ---------------------------------------------------------------------------
 class TimeRemap:
     """원본 시간 → 컷 적용 후 시간"""
     def __init__(self, cuts: list[Cut]):
         self.starts = [c.start for c in cuts]
         self.ends = [c.end for c in cuts]
+        # 자막에서 빼는 단어는 필러로 판정된 단어뿐이다. 시간으로 겹침을 따지면
+        # Whisper 단어 시간이 무음 컷 쪽으로 번진 진짜 단어까지 지워진다.
         self.cut_words = {(s, i) for c in cuts for s, i in (c.words_idx or [])}
-        # 무음만 잘라낸 구간은 단어를 지우지 않는다 (Whisper 단어 시간이 무음 쪽으로 번지는 일이 잦음)
-        self.word_cut = [c.reason != "silence" for c in cuts]
         self.removed_before = []
         acc = 0.0
         for c in cuts:
             self.removed_before.append(acc)
             acc += c.end - c.start
-        self.total_removed = acc
 
     def __call__(self, t: float) -> float:
         i = bisect.bisect_right(self.starts, t) - 1
@@ -483,64 +573,160 @@ class TimeRemap:
             return self.starts[i] - self.removed_before[i]
         return t - self.removed_before[i] - (self.ends[i] - self.starts[i])
 
-    def inside_cut(self, s: float, e: float) -> bool:
-        mid = (s + e) / 2
-        i = bisect.bisect_right(self.starts, mid) - 1
-        return i >= 0 and mid < self.ends[i] and self.word_cut[i]
 
-
-def build_srt(tr: dict, remap: TimeRemap, always_fillers: set[str] = frozenset(),
+def build_srt(tr: dict, remap: TimeRemap, final_dur: float, always_fillers: set[str] = frozenset(),
               max_chars: int = 28, max_dur: float = 5.0, gap_break: float = 0.7) -> str:
-    captions: list[tuple[float, float, str]] = []
-    cur_words: list[dict] = []
+    captions: list[list] = []
+    cur: list[tuple[float, float, str]] = []   # (결과 영상 기준 시작, 끝, 단어)
 
     def flush():
-        if not cur_words:
-            return
-        s = remap(cur_words[0]["start"])
-        e = remap(cur_words[-1]["end"])
-        text = " ".join(w["word"].strip() for w in cur_words).strip()
-        if text:
-            captions.append((s, max(e, s + 0.4), text))
-        cur_words.clear()
+        if cur:
+            text = " ".join(w for _, _, w in cur).strip()
+            if text:
+                captions.append([cur[0][0], max(cur[-1][1], cur[0][0] + 0.4), text])
+            cur.clear()
 
-    for seg in tr["segments"]:
-        for wi, w in enumerate(seg["words"]):
-            if (seg["id"], wi) in remap.cut_words or remap.inside_cut(w["start"], w["end"]):
-                continue  # 잘려나간 필러
-            if normalize(w["word"]) in always_fillers:
-                continue  # 오디오엔 남았더라도(건너뛴 항목) 자막에는 '어/음'을 넣지 않는다
-            if cur_words:
-                gap = w["start"] - cur_words[-1]["end"]
-                length = sum(len(x["word"].strip()) + 1 for x in cur_words) + len(w["word"].strip())
-                span = w["end"] - cur_words[0]["start"]
-                prev_text = cur_words[-1]["word"].strip()
-                if (gap > gap_break or length > max_chars or span > max_dur
-                        or prev_text.endswith((".", "?", "!"))):
-                    flush()
-            cur_words.append(w)
-        flush()  # 세그먼트 경계에서는 항상 끊음
+    for seg_id, wi, w in all_words(tr):
+        if (seg_id, wi) in remap.cut_words:
+            continue  # 잘려나간 필러
+        if normalize(w["word"]) in always_fillers:
+            continue  # 오디오엔 남았더라도(건너뛴 항목) 자막에는 '어/음'을 넣지 않는다
+        s, e, text = remap(w["start"]), remap(w["end"]), w["word"].strip()
+        if cur:
+            # 멈춤·길이는 결과 영상 기준으로 잰다 — 무음 컷으로 사라진 멈춤에서 끊으면 한 단어 자막이 생긴다
+            length = sum(len(x[2]) + 1 for x in cur) + len(text)
+            if (s - cur[-1][1] > gap_break or length > max_chars or e - cur[0][0] > max_dur
+                    or cur[-1][2].endswith((".", "?", "!"))):
+                flush()
+        cur.append((s, e, text))
+    flush()
 
-    # 자막끼리 겹치지 않게
+    # 자막끼리 겹치지 않게, 영상 길이를 넘지 않게
+    out: list[list] = []
+    for s, e, text in captions:
+        if out:
+            prev = out[-1]
+            if prev[1] > s - 0.05:
+                prev[1] = max(prev[0] + 0.3, s - 0.05)
+            s = max(s, prev[1] + 0.05)
+        e = max(e, s + 0.3)
+        out.append([s, e, text])
     lines = []
-    for i, (s, e, text) in enumerate(captions):
-        if i + 1 < len(captions):
-            e = min(e, captions[i + 1][0] - 0.05)
-        if e <= s:
-            e = s + 0.3
+    for i, (s, e, text) in enumerate(out):
+        e = min(e, final_dur)
+        s = min(s, max(0.0, e - 0.3))
         lines.append(f"{i+1}\n{fmt_srt_time(s)} --> {fmt_srt_time(e)}\n{text}\n")
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def embed_subtitles(mp4: Path, srt: Path, work: Path) -> None:
-    """mp4 에 끄고 켤 수 있는 자막 트랙(mov_text)을 넣는다. 재인코딩 없음, 번인 아님.
-    QuickTime 은 보기 > 자막 으로 켠다. 유튜브는 이 트랙을 쓰지 않으므로 SRT 는 따로 올린다."""
-    tmp = work / "with_subs.mp4"
-    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", mp4, "-i", srt,
-         "-map", "0:v", "-map", "0:a", "-map", "1:s", "-c", "copy", "-c:s", "mov_text",
-         "-metadata:s:s:0", "language=kor", "-movflags", "+faststart", tmp], quiet=True)
-    shutil.move(str(tmp), str(mp4))
-    log("자막 트랙을 영상에 넣음 (번인 아님, 플레이어에서 켜고 끄기)")
+# ---------------------------------------------------------------------------
+# 5) 컷 적용
+# ---------------------------------------------------------------------------
+def cut_audio(clean_wav: Path, out_wav: Path, keeps: list[tuple[int, int]], fps: Fraction,
+              fade_ms: float = 3.0) -> tuple[int, int]:
+    """구간 단위로 읽고 써서 메모리를 아낀다 (1시간 스테레오 전체 로드 ≈ 4GB).
+    오디오가 영상보다 짧으면 0으로 채워 영상 프레임 수와 정확히 맞춘다."""
+    import numpy as np
+    total = 0
+    with wave.open(str(clean_wav), "rb") as wf, wave.open(str(out_wav), "wb") as wo:
+        sr, ch, n = wf.getframerate(), wf.getnchannels(), wf.getnframes()
+        wo.setnchannels(ch); wo.setsampwidth(2); wo.setframerate(sr)
+        fade = int(sr * fade_ms / 1000)
+        ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)[:, None] if fade > 0 else None
+        for sf, ef in keeps:
+            a = int(round(Fraction(sf) / fps * sr))
+            b = int(round(Fraction(ef) / fps * sr))
+            if b <= a:
+                continue
+            piece = np.zeros((b - a, ch), dtype=np.float32)
+            if a < n:
+                wf.setpos(a)
+                got = np.frombuffer(wf.readframes(min(b, n) - a), dtype=np.int16).reshape(-1, ch)
+                piece[:len(got)] = got
+            if ramp is not None and len(piece) > 2 * fade:
+                piece[:fade] *= ramp
+                piece[-fade:] *= ramp[::-1]
+            wo.writeframes(np.clip(piece, -32768, 32767).astype(np.int16).tobytes())
+            total += b - a
+    return total, sr
+
+
+def sum_tree(terms: list[str]) -> str:
+    """ffmpeg 식 파서는 평평한 a+b+c… 를 100항까지만 받는다 → 괄호로 묶어 깊이를 log2(n)로"""
+    if len(terms) == 1:
+        return terms[0]
+    mid = len(terms) // 2
+    return f"({sum_tree(terms[:mid])}+{sum_tree(terms[mid:])})"
+
+
+def auto_bitrate(info: dict) -> str:
+    # 유튜브 권장치 기준: 1080p30 8M, 1080p60 12M, 4K30 ≈32M, 4K60 ≈48M
+    bps = 8e6 * (info["width"] * info["height"]) / (1920 * 1080)
+    if float(info["fps"]) > 31:
+        bps *= 1.5
+    if info["high_bit"]:
+        bps *= 1.25
+    return f"{int(min(max(bps, 4e6), 150e6) / 1e6)}M"
+
+
+def video_encoder_args(info: dict, hw: bool, encoders: str, crf: int, vbitrate: str,
+                       preset: str) -> tuple[str, list]:
+    def has(name: str) -> bool:
+        return re.search(rf"\s{name}\s", encoders) is not None
+
+    bitrate = auto_bitrate(info) if vbitrate == "auto" else vbitrate
+    color = []
+    for opt, key in (("-color_primaries", "color_primaries"), ("-color_trc", "color_transfer"),
+                     ("-colorspace", "color_space")):
+        if info["color"].get(key) and info["color"][key] != "unknown":
+            color += [opt, info["color"][key]]
+    if info["high_bit"]:
+        # 10비트(아이폰 HDR 등)를 8비트 H.264 로 줄이면 계조가 뭉개진다 → HEVC 10비트로 색 정보 유지
+        if hw and has("hevc_videotoolbox"):
+            return "hevc_videotoolbox", ["-c:v", "hevc_videotoolbox", "-profile:v", "main10",
+                                         "-pix_fmt", "p010le", "-b:v", bitrate, "-allow_sw", "1",
+                                         "-tag:v", "hvc1", *color]
+        if has("libx265"):
+            return "libx265", ["-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-preset", preset,
+                               "-crf", str(crf), "-tag:v", "hvc1", *color]
+        log("경고: HEVC 인코더가 없어 10비트 원본을 8비트 H.264 로 인코딩합니다")
+    if hw and has("h264_videotoolbox"):
+        # -allow_sw: 하드웨어 세션이 거부되는 해상도(5K 이상 등)에서도 VideoToolbox 소프트웨어 경로로 인코딩
+        return "h264_videotoolbox", ["-c:v", "h264_videotoolbox", "-pix_fmt", "yuv420p",
+                                     "-b:v", bitrate, "-allow_sw", "1"]
+    if hw:
+        log("경고: h264_videotoolbox 를 쓸 수 없어 libx264 로 인코딩합니다")
+    return "libx264", ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", preset, "-crf", str(crf)]
+
+
+def render_video(src: Path, cut_wav: Path, srt: Path | None, out_mp4: Path,
+                 keeps: list[tuple[int, int]], info: dict, work: Path, enc_args: list) -> None:
+    fps = info["fps"]
+    f = float(fps)
+    terms = [f"between(t,{(sf-0.5)/f:.6f},{(ef-0.5)/f:.6f})" for sf, ef in keeps]
+    # 홀수 해상도는 4:2:0 인코더가 거부(libx264)하거나 조용히 잘라낸다(VideoToolbox) → 짝수로 1px 크롭
+    crop = ",crop=trunc(iw/2)*2:trunc(ih/2)*2" if info["width"] % 2 or info["height"] % 2 else ""
+    script = work / "video_filter.txt"
+    script.write_text(
+        f"[0:v]setpts=PTS-STARTPTS,fps={fps.numerator}/{fps.denominator},"
+        f"select='{sum_tree(terms)}',setpts=N/FRAME_RATE/TB{crop}[v]",
+        encoding="utf-8")
+    # ffmpeg 7 부터 파일에서 옵션 값을 읽는 문법이 -/옵션 이고, 9.0 에서 -filter_complex_script 가 제거됐다
+    fc = ["-/filter_complex", script] if ffmpeg_major() >= 7 else ["-filter_complex_script", script]
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y",
+           "-i", src, "-i", cut_wav]
+    if srt:
+        cmd += ["-i", srt]
+    cmd += [*fc, "-map", "[v]", "-map", "1:a"]
+    if srt:
+        # 끄고 켤 수 있는 자막 트랙(번인 아님). 렌더하면서 같이 넣어 파일을 한 번 더 쓰지 않는다
+        cmd += ["-map", "2:s", "-c:s", "mov_text", "-metadata:s:s:0", "language=kor"]
+    # 원본 챕터는 컷 전 시간이라 맞지 않는다
+    cmd += ["-map_chapters", "-1", *enc_args]
+    # -shortest 는 마지막 프레임을 떨어뜨리므로 쓰지 않는다 (오디오/영상 길이는 이미 프레임 격자로 맞춤)
+    cmd += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_mp4]
+    log("렌더링 시작 (영상 길이에 따라 몇 분 걸립니다)")
+    subprocess.run([str(c) for c in cmd], check=True)
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +748,8 @@ def write_review(cuts: list[Cut], skipped: list[dict], path: Path) -> None:
 
 
 def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: list[dict],
-                 final_dur: float, args: argparse.Namespace, elapsed: float) -> None:
+                 final_dur: float, modes: dict, args: argparse.Namespace, encoder: str,
+                 elapsed: float) -> None:
     from collections import Counter
     by_word = Counter(normalize(w) for c in cuts for w in c.word.split(" + ") if w != "(무음)")
     removed = sum(c.end - c.start for c in cuts)
@@ -571,12 +758,14 @@ def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: li
            f"- 원본 길이: {fmt_clock(info['duration'])} → 결과: {fmt_clock(final_dur)} "
            f"(-{removed:.1f}s, {len(cuts)}곳 컷)",
            f"- 노이즈 제거: {args.denoise}, 라우드니스 정규화: {'켬' if not args.no_loudnorm else '끔'}",
-           f"- 전사 모델: {args.model}, 아/어/음 컷: {args.filler}, 습관어 컷: {args.habit}, "
-           f"무음 컷: {args.silence}, 하드웨어 인코딩: {args.hw}",
+           f"- 전사 모델: {args.model}, 아/어/음 컷: {modes['filler']}, 습관어 컷: {modes['habit']}, "
+           f"무음 컷: {modes['silence']}, 인코더: {encoder}",
            f"- 무음이 포함된 컷: {n_silence}곳",
            f"- 건너뛴 감지: {len(skipped)}건 (review.md 참고)",
            f"- 소요 시간: {elapsed/60:.1f}분", "",
            "## 잘라낸 단어별 횟수", ""]
+    if info.get("vfr"):
+        out.insert(3, f"- 가변 프레임 원본 → {float(info['fps']):.3f}fps 고정으로 출력")
     for w, n in by_word.most_common():
         out.append(f"- {w}: {n}")
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
@@ -585,6 +774,27 @@ def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: li
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+def load_cut_list(path: Path, tr: dict, fps: Fraction,
+                  total_frames: int) -> tuple[list[Cut], list[dict], dict]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("transcript_sha1") and data["transcript_sha1"] != transcript_sha1(tr):
+        sys.exit("오류: 전사가 컷 리스트를 만들 때와 달라 단어 위치가 맞지 않습니다. "
+                 "--apply-cuts 없이 다시 실행해 컷 리스트를 새로 만드세요.")
+    f = float(fps)
+    cuts = []
+    for c in data["cuts"]:
+        cut = Cut(**{k: v for k, v in c.items() if k in Cut.__dataclass_fields__})
+        # 사람이 고치는 건 초 값이다 → 프레임을 초에서 다시 계산해 렌더와 SRT 가 같은 값을 쓰게 한다
+        cut.start_frame = max(0, int(round(cut.start * f)))
+        cut.end_frame = min(total_frames, int(round(cut.end * f)))
+        if cut.end_frame <= cut.start_frame:
+            continue
+        cut.start, cut.end = cut.start_frame / f, cut.end_frame / f
+        cuts.append(cut)
+    modes = {k: data.get(k, "?") for k in ("filler", "habit", "silence")}
+    return merge_cuts(cuts, fps, 0), data.get("skipped", []), modes
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="유튜브 영상 정리: 노이즈 제거 → 필러 컷 → SRT")
     ap.add_argument("input", type=Path)
@@ -603,16 +813,19 @@ def main() -> None:
     ap.add_argument("--silence", choices=["on", "off"], default="on",
                     help="말 사이 무음 컷 (기본 on, 파라미터는 fillers.json 의 silence_*)")
     ap.add_argument("--hw", choices=["on", "off"], default="on",
-                    help="맥 하드웨어 인코딩 h264_videotoolbox (기본 on, off 면 libx264)")
+                    help="맥 하드웨어 인코딩 VideoToolbox (기본 on, off 면 libx264/libx265)")
     ap.add_argument("--review", action="store_true", help="컷 리스트/검토표까지만 만들고 렌더링은 하지 않음")
-    ap.add_argument("--apply-cuts", type=Path, help="기존 .cuts.json 으로 렌더 (전사 생략)")
+    ap.add_argument("--apply-cuts", type=Path, help="기존 .cuts.json 으로 렌더 (전사·판정 생략)")
     ap.add_argument("--embed-subs", choices=["on", "off"], default="on",
                     help="mp4 에 끄고 켤 수 있는 자막 트랙 넣기 (기본 on, 번인 아님)")
     ap.add_argument("--crf", type=int, default=18, help="--hw off 일 때 화질")
-    ap.add_argument("--vbitrate", default="12M", help="--hw on 일 때 비트레이트")
+    ap.add_argument("--vbitrate", default="auto",
+                    help="--hw on 일 때 비트레이트 (기본 auto: 해상도·프레임 수에 맞춤, 예: 20M)")
     ap.add_argument("--preset", default="medium", help="--hw off 일 때 인코딩 속도")
     ap.add_argument("--force", action="store_true", help="work/ 캐시 무시하고 전부 다시")
     args = ap.parse_args()
+    if args.review and args.apply_cuts:
+        sys.exit("오류: --review 와 --apply-cuts 는 함께 쓸 수 없습니다 (--apply-cuts 는 바로 렌더합니다)")
 
     need("ffmpeg"); need("ffprobe")
     src = args.input.resolve()
@@ -623,30 +836,38 @@ def main() -> None:
     stem = src.stem
     out_dir = args.out.resolve(); out_dir.mkdir(parents=True, exist_ok=True)
     work = ROOT / "work" / stem; work.mkdir(parents=True, exist_ok=True)
+    with RunLock(work / "run.lock"):
+        process(args, src, stem, out_dir, work, t_start)
+
+
+def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work: Path,
+            t_start: float) -> None:
     cfg = load_fillers(args.fillers)
     info = ffprobe(src)
     fps = info["fps"]
-    total_frames = int(math.floor(info["duration"] * float(fps)))
     log(f"입력: {src.name}  {fmt_clock(info['duration'])}  {info['width']}x{info['height']}  "
-        f"{float(fps):.3f}fps  {info['sample_rate']}Hz/{info['channels']}ch")
+        f"{float(fps):.3f}fps{' (가변)' if info['vfr'] else ''}  "
+        f"{info['sample_rate']}Hz/{info['channels']}ch  {info['pix_fmt']}")
 
     # 1) 오디오
-    clean_wav, asr_wav = prepare_audio(src, work, args.denoise, not args.no_loudnorm, args.force)
+    clean_wav, asr_wav, audio_key = prepare_audio(src, work, info, args.denoise,
+                                                  not args.no_loudnorm, args.force)
+    if info["duration"] <= 0:  # 길이 정보가 없는 컨테이너(일부 webm 등)
+        info["duration"] = wav_duration(clean_wav)
+    total_frames = int(round(info["duration"] * float(fps)))
 
     # 2) 전사
     tr_path = out_dir / f"{stem}.transcript.json"
-    tr = transcribe(asr_wav, tr_path, args.model, args.device, args.compute_type,
+    tr = transcribe(asr_wav, tr_path, audio_key, args.model, args.device, args.compute_type,
                     cfg.get("prompt", ""), args.force)
 
     # 3) 컷 리스트
     cuts_path = out_dir / f"{stem}.cuts.json"
-    skipped: list[dict] = []
     if args.apply_cuts:
-        data = json.loads(args.apply_cuts.read_text(encoding="utf-8"))
-        cuts = [Cut(**{k: v for k, v in c.items() if k in Cut.__dataclass_fields__}) for c in data["cuts"]]
-        cuts.sort(key=lambda c: c.start_frame)
+        cuts, skipped, modes = load_cut_list(args.apply_cuts, tr, fps, total_frames)
         log(f"컷 리스트 불러옴: {args.apply_cuts.name} ({len(cuts)}곳)")
     else:
+        modes = {"filler": args.filler, "habit": args.habit, "silence": args.silence}
         habit_mode = {"on": "conservative", "off": "off", "aggressive": "aggressive"}[args.habit]
         raw_cuts, skipped = detect_fillers(tr, cfg, habit_mode, args.filler == "on")
         rms, hop = load_rms(asr_wav)
@@ -657,50 +878,63 @@ def main() -> None:
             skipped += sil_skipped
             log(f"무음 감지: {len(sil_cuts)}곳, {sum(c.end - c.start for c in sil_cuts):.1f}s "
                 f"(건너뜀 {len(sil_skipped)}건)")
-        cuts = refine_cuts(raw_cuts, rms, hop, fps, info["duration"], cfg)
+        cuts = refine_cuts(raw_cuts, rms, hop, fps, total_frames, cfg)
         cuts_path.write_text(json.dumps(
-            {"source": str(src), "fps": f"{fps.numerator}/{fps.denominator}",
-             "filler": args.filler, "habit": args.habit, "silence": args.silence,
-             "cuts": [asdict(c) for c in cuts]}, ensure_ascii=False, indent=1), encoding="utf-8")
+            {"source": str(src), "fps": f"{fps.numerator}/{fps.denominator}", **modes,
+             "transcript_sha1": transcript_sha1(tr),
+             "cuts": [asdict(c) for c in cuts], "skipped": skipped},
+            ensure_ascii=False, indent=1), encoding="utf-8")
         write_review(cuts, skipped, out_dir / f"{stem}.review.md")
         removed = sum(c.end - c.start for c in cuts)
-        log(f"필러 {n_fillers}개 + 무음 {len(raw_cuts) - n_fillers}곳 → 병합 후 {len(cuts)}곳, 총 {removed:.1f}s 제거 예정 "
-            f"(건너뜀 {len(skipped)}건)")
+        log(f"필러 {n_fillers}개 + 무음 {len(raw_cuts) - n_fillers}곳 → 병합 후 {len(cuts)}곳, "
+            f"총 {removed:.1f}s 제거 예정 (건너뜀 {len(skipped)}건)")
         if args.review:
             log(f"--review: 검토표 {out_dir / (stem + '.review.md')} 를 확인한 뒤 "
                 f"--apply-cuts {cuts_path} 로 렌더하세요")
             return
 
-    # 4) 렌더
     keeps = keep_segments(cuts, total_frames)
+    if not keeps:
+        sys.exit("오류: 남길 구간이 없습니다 (전부 컷 대상). --silence off 등으로 다시 실행해 보세요.")
+
+    # 4) SRT — 영상과 같은 이름이어야 윈도우 기본 플레이어 등이 자동으로 불러온다
+    out_media = out_dir / (f"{stem}_clean.mp4" if info["has_video"] else f"{stem}_clean.m4a")
+    final_dur = sum(ef - sf for sf, ef in keeps) / float(fps)
+    srt_path = out_media.with_suffix(".srt")
+    srt_text = build_srt(tr, TimeRemap(cuts), final_dur, cfg["_always"])
+    srt_path.write_text(srt_text, encoding="utf-8")
+    if not srt_text:
+        log("인식된 말소리가 없어 자막이 비어 있습니다 (자막 트랙은 넣지 않음)")
+
+    # 5) 렌더
     cut_wav = work / "cut.wav"
-    n_samples = cut_audio_numpy(clean_wav, cut_wav, keeps, fps)
-    final_dur = n_samples / 48000.0
-    out_mp4 = out_dir / f"{stem}_clean.mp4"
+    n_samples, sr = cut_audio(clean_wav, cut_wav, keeps, fps)
+    final_dur = n_samples / sr
+    encoder = "aac"
     if info["has_video"]:
-        vcodec = "libx264"
-        if args.hw == "on":
-            encoders = run(["ffmpeg", "-hide_banner", "-encoders"], quiet=True).stdout
-            if "h264_videotoolbox" in encoders:
-                vcodec = "h264_videotoolbox"
-            else:
-                log("경고: h264_videotoolbox 를 쓸 수 없어 libx264 로 인코딩합니다")
-        render_video(src, cut_wav, out_mp4, keeps, fps, work, vcodec, args.crf, args.vbitrate, args.preset)
+        embed = srt_path if (args.embed_subs == "on" and srt_text) else None
+        encoders = run(["ffmpeg", "-hide_banner", "-encoders"], quiet=True).stdout
+        encoder, enc_args = video_encoder_args(info, args.hw == "on", encoders, args.crf,
+                                               args.vbitrate, args.preset)
+        try:
+            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args)
+        except subprocess.CalledProcessError:
+            if "videotoolbox" not in encoder:
+                raise
+            log(f"{encoder} 인코딩 실패 → 소프트웨어 인코더로 다시 렌더합니다")
+            encoder, enc_args = video_encoder_args(info, False, encoders, args.crf,
+                                                   args.vbitrate, args.preset)
+            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args)
+        if embed:
+            log("자막 트랙을 영상에 넣음 (번인 아님, 플레이어에서 켜고 끄기)")
     else:
-        out_mp4 = out_dir / f"{stem}_clean.m4a"
         run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", cut_wav,
-             "-c:a", "aac", "-b:a", "192k", out_mp4])
+             "-c:a", "aac", "-b:a", "192k", out_media])
 
-    # 5) SRT — 영상과 같은 이름이어야 윈도우 기본 플레이어 등이 자동으로 불러온다
-    remap = TimeRemap(cuts)
-    srt_path = out_mp4.with_suffix(".srt")
-    srt_path.write_text(build_srt(tr, remap, cfg["_always"]), encoding="utf-8")
-    if info["has_video"] and args.embed_subs == "on":
-        embed_subtitles(out_mp4, srt_path, work)
-
-    write_report(out_dir / f"{stem}.report.md", src, info, cuts, skipped, final_dur, args, time.time() - t_start)
+    write_report(out_dir / f"{stem}.report.md", src, info, cuts, skipped, final_dur, modes, args,
+                 encoder, time.time() - t_start)
     log("완료")
-    log(f"  영상: {out_mp4}")
+    log(f"  영상: {out_media}")
     log(f"  자막: {srt_path}")
     log(f"  리포트: {out_dir / (stem + '.report.md')}")
 

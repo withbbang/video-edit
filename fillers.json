@@ -1,5 +1,5 @@
 {
-  "_설명": "필러 사전. always는 무조건 컷, habit은 --habit on(기본)·aggressive 에서 무조건 컷, habit_pause_after는 기본(on)에선 뒤에 멈춤이 있을 때만, aggressive 에선 무조건 컷. 단어는 구두점·물결·말줄임표를 뗀 뒤 비교하고, '어어어'처럼 같은 글자 반복은 '어'로 봅니다.",
+  "_설명": "필러 사전. always는 무조건 컷, habit은 --habit on(기본)·aggressive 에서 무조건 컷, habit_pause_after는 기본(on)에선 뒤에 min_gap_habit_sec 이상 멈춤이 있을 때만, aggressive 에선 무조건 컷. '어떻게 보면'처럼 띄어 쓴 항목은 이어진 단어들을 붙여서 비교합니다. prompt 는 Whisper 가 필러를 빼먹지 않게 주는 예시 문장이라, 바꾸면 다음 실행 때 전사를 다시 합니다. 단어는 구두점·물결·말줄임표를 뗀 뒤 비교하고, '어어어'처럼 같은 글자 반복은 '어'로 봅니다.",
 
   "always": ["아", "어", "음", "으음", "에", "엄", "흠", "음음", "어음", "아음", "에에", "으"],
 
@@ -14,7 +14,6 @@
   "min_gap_habit_sec": 0.22,
   "max_filler_duration_sec": 1.3,
   "snap_window_sec": 0.12,
-  "merge_gap_frames": 2,
   "min_keep_frames": 3,
 
   "_무음_설명": "silence_min_sec 이상 이어지는 무음(silence_threshold_db 미만)을 찾아, 말 앞뒤로 silence_pad_sec 씩만 남기고 컷합니다. 영상 맨 앞/뒤 무음은 전부 컷. --silence off 로 끕니다.",

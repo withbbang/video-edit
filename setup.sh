@@ -15,8 +15,10 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   fi
 fi
 ffmpeg -version | head -1
-if ! ffmpeg -hide_banner -filters 2>/dev/null | grep -q arnndn; then
-  echo "경고: 이 ffmpeg 에는 arnndn 필터가 없어 노이즈 제거가 afftdn 으로 대체됩니다 (--denoise afftdn)"
+# pipefail 에서 `ffmpeg | grep -q` 는 grep 이 먼저 끝나 ffmpeg 가 SIGPIPE 로 실패한다 → 출력을 먼저 받아 둔다
+ffmpeg_filters="$(ffmpeg -hide_banner -filters 2>/dev/null || true)"
+if ! grep -q ' arnndn ' <<<"$ffmpeg_filters"; then
+  echo "경고: 이 ffmpeg 에는 arnndn 필터가 없어 노이즈 제거가 afftdn 으로 대체됩니다 (파이프라인이 자동으로 바꿈)"
 fi
 
 echo "== 2/3 Python 가상환경 (.venv)"
