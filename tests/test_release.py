@@ -60,7 +60,14 @@ def test_build_jobs_test_fetch_and_smoke(wf):
         order = [text.index(k) for k in ("pytest", f"fetch_ffmpeg.py --platform {plat}", "PyInstaller",
                                          "smoke_frozen.py")]
         assert order == sorted(order), name
-    assert "download.pytorch.org/whl/cpu" in _steps_text(wf["jobs"]["win"])
+    for name in ("mac", "win"):
+        text = _steps_text(wf["jobs"][name])
+        assert "-r requirements-dev.txt" in text, name  # pytest 는 requirements-dev.txt 에만 있다
+        assert text.index("requirements-dev.txt") < text.index("pytest -q"), name
+    win = _steps_text(wf["jobs"]["win"])
+    # CPU torch 를 먼저 깔고, 다른 설치가 끝난 뒤 CUDA 판이 아님을 확인
+    assert win.index("download.pytorch.org/whl/cpu") < win.index("requirements-dev.txt") < win.index(
+        "torch.version.cuda is None")
     assert "make_dmg.sh" in _steps_text(wf["jobs"]["mac"])
     assert "/DAppVersion=" in _steps_text(wf["jobs"]["win"])
 

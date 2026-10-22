@@ -105,7 +105,18 @@ def test_third_party_lists_gpl_sources():
     text = (ROOT / "packaging" / "THIRD_PARTY.txt").read_text(encoding="utf-8")
     for s in ff.GPL_SOURCES:
         assert s["name"] in text and s["sha256"] in text and s["url"] in text
-    assert ff.WIN_X265_PENDING in text  # 윈도우 x265 소스를 못 찾은 사실을 숨기지 않는다
+    assert "요청" not in text.split(ff.BEGIN)[1].split(ff.END)[0]  # "요청하면 드림" 이 아니라 실제 첨부
+
+
+def test_gpl_sources_cover_both_builds():
+    """윈도우 BtbN zip 이름의 FFmpeg 커밋과 GPL_SOURCES 의 FFmpeg 압축본이 같은 빌드를 가리킨다."""
+    names = [s["name"] for s in ff.GPL_SOURCES]
+    assert len(set(names)) == len(names)
+    win_zip = ff.SOURCES["win"]["archives"][0]["url"]
+    assert "-win64-gpl-" in win_zip and "shared" not in win_zip and "/latest/" not in win_zip
+    assert f"ffmpeg-{ff._WIN_FFMPEG_DESCRIBE}.tar.gz" in names
+    assert ff._WIN_FFMPEG_COMMIT.startswith(ff._WIN_FFMPEG_DESCRIBE.rsplit("-g", 1)[1])
+    assert f"x265-{ff._WIN_X265_COMMIT}.tar.gz" in names and f"FFmpeg-Builds-{ff._BTBN_COMMIT}.tar.gz" in names
 
 
 def test_fetch_sources_copies_with_release_names(tmp_path, monkeypatch):

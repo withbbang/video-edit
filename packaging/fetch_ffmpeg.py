@@ -6,13 +6,15 @@
 
 - URL 과 sha256 은 아래 SOURCES 에 고정한다. 해시가 다르면 실패.
 - 받은 실행 파일을 직접 돌려 `-filters` 에 arnndn, `-encoders` 에 필요한 인코더가 있는지 본다 (없으면 실패).
-  다른 OS 용을 받을 때(맥에서 윈도우용 등)는 돌릴 수 없으니 실행 파일 안 문자열과 빌드 README 로만 확인하고
+  다른 OS 용을 받을 때(맥에서 윈도우용 등)는 돌릴 수 없으니 실행 파일 안 문자열과 (있으면) 빌드 README 로만 확인하고
   그렇다고 알린다.
 - packaging/THIRD_PARTY.txt 의 ffmpeg 단락(BEGIN/END 표시 사이)을 SOURCES 로 다시 쓴다. 버전을 바꾸면
   이 파일을 고친 뒤 한 번 실행해 THIRD_PARTY.txt 도 같이 커밋한다 (tests/test_packaging.py 가 일치를 확인).
 
 버전 올리는 법: 맥은 https://ffmpeg.martin-riedl.de/ 의 macOS arm64 release(ffmpeg.zip, ffprobe.zip 과 .sha256),
-윈도우는 https://github.com/GyanD/codexffmpeg/releases 의 <버전>-essentials_build.zip (릴리스 페이지의 sha256).
+윈도우는 https://github.com/BtbN/FFmpeg-Builds/releases 의 월말 autobuild(오래 남는다; 매일 빌드는 2주쯤 뒤 지워짐)
+에서 ffmpeg-n<버전>-…-win64-gpl-<가지>.zip (정적. -shared 아님; 자산 digest 가 sha256). 그 태그의 커밋에서
+scripts.d/50-x264.sh·50-x265.sh 의 SCRIPT_COMMIT 과 FFmpeg 커밋(파일 이름의 g<해시>)으로 GPL_SOURCES 도 고친다.
 """
 from __future__ import annotations
 
@@ -37,7 +39,14 @@ END = "=== END ffmpeg ==="
 FFMPEG_VERSION = "9.0.2"
 FFMPEG_SOURCE = f"https://ffmpeg.org/releases/ffmpeg-{FFMPEG_VERSION}.tar.xz"
 _MAC_BASE = "https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2"
-_WIN_ZIP = "ffmpeg-9.0.2-essentials_build"
+# BtbN FFmpeg-Builds: 월말 autobuild 태그(= 빌드한 FFmpeg-Builds 커밋), release/9.0 가지의 GPL 정적 빌드
+_BTBN_TAG = "autobuild-2026-09-30-13-08"
+_BTBN_COMMIT = "6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b"
+_WIN_FFMPEG_DESCRIBE = "n9.0.2-17-g2a571b6068"
+_WIN_FFMPEG_COMMIT = "2a571b606854520cf89804d8030c8b328e621689"
+_WIN_ZIP = f"ffmpeg-{_WIN_FFMPEG_DESCRIBE}-win64-gpl-9.0"
+_X264_COMMIT = "0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee"
+_WIN_X265_COMMIT = "020d7054dbecfd3be8e62efe33ff8a305d41856e"
 
 SOURCES = {
     "mac": {
@@ -59,16 +68,17 @@ SOURCES = {
     },
     "win": {
         "title": "Windows (x64)",
-        "build": "ffmpeg 9.0.2 essentials 정적 빌드, Gyan Doshi (https://www.gyan.dev/ffmpeg/builds/)",
+        "build": f"ffmpeg {_WIN_FFMPEG_DESCRIBE} (release/9.0 가지) 정적 GPL 빌드, BtbN FFmpeg-Builds "
+                 "(https://github.com/BtbN/FFmpeg-Builds)",
         "config": "--enable-gpl --enable-version3 (libx264, libx265 포함)",
         "license": "GNU GPL v3",
-        "build_source": "FFmpeg 소스 커밋: https://github.com/FFmpeg/FFmpeg/commit/946fcce07b",
+        "build_source": f"빌드 스크립트: https://github.com/BtbN/FFmpeg-Builds/tree/{_BTBN_COMMIT}\n"
+                        "    (라이브러리별 소스 커밋은 scripts.d/*.sh 의 SCRIPT_COMMIT)",
         "archives": [
-            {"url": f"https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/{_WIN_ZIP}.zip",
-             "sha256": "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba",
+            {"url": f"https://github.com/BtbN/FFmpeg-Builds/releases/download/{_BTBN_TAG}/{_WIN_ZIP}.zip",
+             "sha256": "a0e45723c72141975f51d8666302e614711745f3102b704ca3f82c897a58d278",
              "members": {f"{_WIN_ZIP}/bin/ffmpeg.exe": "ffmpeg.exe",
-                         f"{_WIN_ZIP}/bin/ffprobe.exe": "ffprobe.exe"},
-             "readme": f"{_WIN_ZIP}/README.txt"},
+                         f"{_WIN_ZIP}/bin/ffprobe.exe": "ffprobe.exe"}},
         ],
         "encoders": ["libx264", "libx265", "aac", "mov_text"],
     },
@@ -78,27 +88,39 @@ FILTERS = ["arnndn", "loudnorm", "afftdn", "highpass"]
 
 # 정적 ffmpeg 빌드의 GPL 대응 소스. CI(.github/workflows/release.yml)가 받아 sha256 을 확인하고 매 릴리스에 첨부한다.
 # 빌드에 든 버전은 이렇게 확인했다 (버전을 올리면 다시 확인):
-# - FFmpeg: 두 빌드 모두 9.0.2 (태그 n9.0.2 = 커밋 946fcce07b, 윈도우 README 의 Source Code 와 같음).
-# - x264: 맥 빌드 스크립트는 빌드 날(2026-09-20)의 master 를 받는다 → 0480cb05 (core 165, r3223).
-#   윈도우 README 의 "x264 v0.165.3223" 도 `git rev-list --count 0480cb05` = 3223 로 같은 커밋.
-# - x265 (맥): 빌드 스크립트 version/x265 = 4.2 → bitbucket get/4.2.tar.gz (커밋 e444744c). 그 압축본의
+# - 맥 FFmpeg: 9.0.2 릴리스 (태그 n9.0.2).
+# - 맥 x264: 빌드 스크립트는 빌드 날(2026-09-20)의 master 를 받는다 → 0480cb05 (core 165, r3223).
+# - 맥 x265: 빌드 스크립트 version/x265 = 4.2 → bitbucket get/4.2.tar.gz (커밋 e444744c). 그 압축본의
 #   x265Version.txt 가 옛 값이라 실행 파일은 "4.0+1-6318f22" 로 표시된다. 아래 정식 릴리스 압축본과는
 #   x265Version.txt 한 파일만 다르다 (자동 생성 압축본은 sha256 이 바뀔 수 있어 정식 릴리스 파일을 고정).
-# - x265 (윈도우): README 에 "x265 4.3-45-g116b875" — 원 저장소에서 이 커밋을 찾지 못했다 (WIN_X265_PENDING).
-WIN_X265_PENDING = "4.3+45-g116b875"
+# - 윈도우: BtbN FFmpeg-Builds 커밋 _BTBN_COMMIT 의 addins/9.0.sh(release/9.0) + scripts.d/50-x264.sh
+#   (SCRIPT_COMMIT 0480cb05, 맥과 같음) + scripts.d/50-x265.sh (Multicorewareinc/x265 020d7054; 실행 파일도
+#   "4.3+49-020d7054"). FFmpeg 은 zip 이름의 g2a571b6068. 빌드 스크립트(소스를 고치는 sed 포함)도 함께 첨부한다.
+#   GitHub 이 만들어 주는 커밋 압축본은 두 번 받아 sha256 이 같음을 확인했다.
 GPL_SOURCES = [
     {"name": f"ffmpeg-{FFMPEG_VERSION}.tar.xz", "url": FFMPEG_SOURCE,
      "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
-     "what": "FFmpeg 9.0.2 (태그 n9.0.2, 커밋 946fcce07b) — 맥·윈도우 빌드"},
-    {"name": "x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee.tar.bz2",
-     "url": "https://code.videolan.org/videolan/x264/-/archive/0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee/"
-            "x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee.tar.bz2",
+     "what": "FFmpeg 9.0.2 (태그 n9.0.2) — 맥 빌드"},
+    {"name": f"ffmpeg-{_WIN_FFMPEG_DESCRIBE}.tar.gz",
+     "url": f"https://github.com/FFmpeg/FFmpeg/archive/{_WIN_FFMPEG_COMMIT}.tar.gz",
+     "sha256": "f02fc0809a13f37e3d4e1f74254d07e035a5ef01a6d91e727b915b1764d97540",
+     "what": f"FFmpeg {_WIN_FFMPEG_DESCRIBE} (release/9.0, 커밋 {_WIN_FFMPEG_COMMIT[:10]}) — 윈도우 빌드"},
+    {"name": f"x264-{_X264_COMMIT}.tar.bz2",
+     "url": f"https://code.videolan.org/videolan/x264/-/archive/{_X264_COMMIT}/x264-{_X264_COMMIT}.tar.bz2",
      "sha256": "f05c59f2e83d494c36307025dca2d3afc6b4d185f3a3453d06cc4fecd7094057",
      "what": "x264 core 165 r3223 (커밋 0480cb05) — 맥·윈도우 빌드"},
     {"name": "x265_4.2.tar.gz",
      "url": "https://bitbucket.org/multicoreware/x265_git/downloads/x265_4.2.tar.gz",
      "sha256": "40b1ea0453e0309f0eba934e0ddf533f8f6295966679e8894e8f1c1c8d5e1210",
      "what": "x265 4.2 (태그 4.2, 커밋 e444744c) — 맥 빌드"},
+    {"name": f"x265-{_WIN_X265_COMMIT}.tar.gz",
+     "url": f"https://github.com/Multicorewareinc/x265/archive/{_WIN_X265_COMMIT}.tar.gz",
+     "sha256": "ade2fd082d1a3d7adf89bb38eb54a5cbf6aad6c1c7ed130c89c7bf2cd626484d",
+     "what": "x265 4.3+49 (커밋 020d7054) — 윈도우 빌드"},
+    {"name": f"FFmpeg-Builds-{_BTBN_COMMIT}.tar.gz",
+     "url": f"https://github.com/BtbN/FFmpeg-Builds/archive/{_BTBN_COMMIT}.tar.gz",
+     "sha256": "81da4f7c878dc0f60e6b8d0049a112e32178e20f025d468fe4e99e77b2dfe0ec",
+     "what": "BtbN FFmpeg-Builds 빌드 스크립트 (윈도우 빌드를 만든 커밋)"},
 ]
 
 
@@ -253,10 +275,8 @@ def third_party_block() -> str:
         lines += [f"    {s['name']} — {s['what']}",
                   f"      sha256 {s['sha256']}",
                   f"      ({s['url']})"]
-    lines += [f"  윈도우 빌드의 x265 ({WIN_X265_PENDING}) 소스는 원 저장소(https://bitbucket.org/multicoreware/x265_git)",
-              "  에서 해당 커밋을 찾지 못해 아직 첨부하지 못했습니다. 필요하면 https://github.com/withbbang/video-edit/issues 로",
-              "  요청해 주세요.",
-              "  그 밖에 정적 빌드에 들어간 라이브러리와 버전은 아래 빌드 정보(맥: versions.txt, 윈도우: 받은 zip 의 README.txt)에 있습니다.",
+    lines += ["  그 밖에 정적 빌드에 들어간 라이브러리와 버전은 아래 빌드 정보(맥: versions.txt,",
+              "  윈도우: 빌드 스크립트의 scripts.d/*.sh)에 있습니다.",
               "  (FFmpeg 저장소: https://git.ffmpeg.org/ffmpeg.git , 라이선스 안내: https://ffmpeg.org/legal.html)",
               ""]
     for plat in ("mac", "win"):

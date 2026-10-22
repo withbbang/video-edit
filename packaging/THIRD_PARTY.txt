@@ -14,19 +14,26 @@ FFmpeg 9.0.2 (ffmpeg, ffprobe 실행 파일)
   LICENSE 파일(GPL-3.0)과 https://www.gnu.org/licenses/gpl-3.0.html 에 있습니다.
   아래 소스 아카이브는 이 앱의 각 GitHub 릴리스(https://github.com/withbbang/video-edit/releases)에
   설치 파일과 함께 첨부됩니다 (괄호 안은 원래 받은 곳):
-    ffmpeg-9.0.2.tar.xz — FFmpeg 9.0.2 (태그 n9.0.2, 커밋 946fcce07b) — 맥·윈도우 빌드
+    ffmpeg-9.0.2.tar.xz — FFmpeg 9.0.2 (태그 n9.0.2) — 맥 빌드
       sha256 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
       (https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz)
+    ffmpeg-n9.0.2-17-g2a571b6068.tar.gz — FFmpeg n9.0.2-17-g2a571b6068 (release/9.0, 커밋 2a571b6068) — 윈도우 빌드
+      sha256 f02fc0809a13f37e3d4e1f74254d07e035a5ef01a6d91e727b915b1764d97540
+      (https://github.com/FFmpeg/FFmpeg/archive/2a571b606854520cf89804d8030c8b328e621689.tar.gz)
     x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee.tar.bz2 — x264 core 165 r3223 (커밋 0480cb05) — 맥·윈도우 빌드
       sha256 f05c59f2e83d494c36307025dca2d3afc6b4d185f3a3453d06cc4fecd7094057
       (https://code.videolan.org/videolan/x264/-/archive/0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee/x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee.tar.bz2)
     x265_4.2.tar.gz — x265 4.2 (태그 4.2, 커밋 e444744c) — 맥 빌드
       sha256 40b1ea0453e0309f0eba934e0ddf533f8f6295966679e8894e8f1c1c8d5e1210
       (https://bitbucket.org/multicoreware/x265_git/downloads/x265_4.2.tar.gz)
-  윈도우 빌드의 x265 (4.3+45-g116b875) 소스는 원 저장소(https://bitbucket.org/multicoreware/x265_git)
-  에서 해당 커밋을 찾지 못해 아직 첨부하지 못했습니다. 필요하면 https://github.com/withbbang/video-edit/issues 로
-  요청해 주세요.
-  그 밖에 정적 빌드에 들어간 라이브러리와 버전은 아래 빌드 정보(맥: versions.txt, 윈도우: 받은 zip 의 README.txt)에 있습니다.
+    x265-020d7054dbecfd3be8e62efe33ff8a305d41856e.tar.gz — x265 4.3+49 (커밋 020d7054) — 윈도우 빌드
+      sha256 ade2fd082d1a3d7adf89bb38eb54a5cbf6aad6c1c7ed130c89c7bf2cd626484d
+      (https://github.com/Multicorewareinc/x265/archive/020d7054dbecfd3be8e62efe33ff8a305d41856e.tar.gz)
+    FFmpeg-Builds-6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b.tar.gz — BtbN FFmpeg-Builds 빌드 스크립트 (윈도우 빌드를 만든 커밋)
+      sha256 81da4f7c878dc0f60e6b8d0049a112e32178e20f025d468fe4e99e77b2dfe0ec
+      (https://github.com/BtbN/FFmpeg-Builds/archive/6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b.tar.gz)
+  그 밖에 정적 빌드에 들어간 라이브러리와 버전은 아래 빌드 정보(맥: versions.txt,
+  윈도우: 빌드 스크립트의 scripts.d/*.sh)에 있습니다.
   (FFmpeg 저장소: https://git.ffmpeg.org/ffmpeg.git , 라이선스 안내: https://ffmpeg.org/legal.html)
 
   [macOS (Apple Silicon arm64)]
@@ -41,12 +48,13 @@ FFmpeg 9.0.2 (ffmpeg, ffprobe 실행 파일)
       sha256 fcbe839537485eaee7a7a8bc5cbc0f90d53617e80943e8a5b2e31cb851197ea6
 
   [Windows (x64)]
-    빌드: ffmpeg 9.0.2 essentials 정적 빌드, Gyan Doshi (https://www.gyan.dev/ffmpeg/builds/)
+    빌드: ffmpeg n9.0.2-17-g2a571b6068 (release/9.0 가지) 정적 GPL 빌드, BtbN FFmpeg-Builds (https://github.com/BtbN/FFmpeg-Builds)
     구성: --enable-gpl --enable-version3 (libx264, libx265 포함)
     라이선스: GNU GPL v3
-    FFmpeg 소스 커밋: https://github.com/FFmpeg/FFmpeg/commit/946fcce07b
-    받은 파일: https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip
-      sha256 60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba
+    빌드 스크립트: https://github.com/BtbN/FFmpeg-Builds/tree/6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b
+    (라이브러리별 소스 커밋은 scripts.d/*.sh 의 SCRIPT_COMMIT)
+    받은 파일: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n9.0.2-17-g2a571b6068-win64-gpl-9.0.zip
+      sha256 a0e45723c72141975f51d8666302e614711745f3102b704ca3f82c897a58d278
 
 === END ffmpeg ===
 

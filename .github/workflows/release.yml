@@ -8,6 +8,8 @@
 # 자산: youtube-edit-<ver>-mac-arm64.dmg, youtube-edit-<ver>-win-x64-setup.exe (app/updates.py 가 찾는 이름),
 #       ffmpeg 정적 빌드의 GPL 대응 소스(packaging/fetch_ffmpeg.py GPL_SOURCES), SHA256SUMS.txt
 # 서드파티 액션은 모두 커밋 SHA 로 고정한다 (주석은 그 커밋의 태그).
+# 같은 태그로 다시 돌릴 때(Re-run)는 먼저 GitHub 에서 그 태그의 기존 초안 릴리스를 지운다
+# (남겨 두면 초안이 하나 더 생기거나 자산 이름이 겹쳐 실패할 수 있다).
 name: release
 
 on:
@@ -45,6 +47,8 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           architecture: arm64
+          cache: pip
+          cache-dependency-path: requirements*.txt
 
       - name: 태그와 __version__ 비교
         id: ver
@@ -53,7 +57,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements-app.txt
+          python -m pip install -r requirements.txt -r requirements-app.txt -r requirements-dev.txt
           python -c "import platform; assert platform.machine() == 'arm64', platform.machine()"
 
       - name: pytest
@@ -101,6 +105,8 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           architecture: x64
+          cache: pip
+          cache-dependency-path: requirements*.txt
 
       - name: 태그와 __version__ 비교
         id: ver
@@ -110,7 +116,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install -r requirements.txt -r requirements-app.txt
+          python -m pip install -r requirements.txt -r requirements-app.txt -r requirements-dev.txt
           python -c "import torch; assert torch.version.cuda is None, torch.__version__; print('torch', torch.__version__)"
 
       - name: pytest
@@ -164,7 +170,7 @@ jobs:
           compression-level: 0
 
   sources:
-    name: GPL 대응 소스 (ffmpeg·x264·x265)
+    name: GPL 대응 소스 (ffmpeg·x264·x265·빌드 스크립트)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -247,7 +253,5 @@ jobs:
           files: |
             dist/assets/${{ steps.ver.outputs.dmg }}
             dist/assets/${{ steps.ver.outputs.setup }}
-            dist/assets/ffmpeg-*.tar.xz
-            dist/assets/x264-*.tar.bz2
-            dist/assets/x265_*.tar.gz
+            dist/assets/*.tar.*
             dist/assets/SHA256SUMS.txt
