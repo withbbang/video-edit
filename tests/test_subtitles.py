@@ -116,3 +116,24 @@ def test_replace_text_api(tmp_path):
 def test_job_from_old_dict():
     j = Job.from_dict({"id": "a" * 12, "src": "/x/a.mp4", "status": "saved"})
     assert (j.word_edits, j.line_times, j.range_ops, j.edits_sha1) == ({}, {}, [], None)
+
+
+def test_captions_match_render_path_with_frame_snapping():
+    """앱의 자막 줄이 렌더(cuts_from_dicts + build_captions)와 같다 — 프레임 격자에 맞추면 경계가 달라지는 컷으로"""
+    from fractions import Fraction
+    import pipeline
+    cfg = {"_always": set(), "_single_only": set()}
+    cuts_json = {"fps": "15250/509", "cuts": [
+        {"start": 0.62, "end": 0.97, "word": "여러분", "reason": "filler", "context": "", "seg": 0,
+         "words_idx": [[0, 1]]},
+        {"start": 3.01, "end": 4.93, "word": "", "reason": "silence", "context": "", "seg": 0},
+        {"start": 4.94, "end": 4.941, "word": "", "reason": "silence", "context": "", "seg": 0}]}
+    fps = Fraction(15250, 509)
+    raw = [pipeline.Cut(**{k: v for k, v in c.items()}) for c in cuts_json["cuts"]]
+    snapped = pipeline.cuts_from_dicts(cuts_json["cuts"], fps, int(round(20.0 * float(fps))))
+    assert [(c.start, c.end) for c in snapped] != [(c.start, c.end) for c in raw]
+    remap = pipeline.TimeRemap(snapped)
+    expect = pipeline.build_captions(TR, remap.cut_words, remap, set(), set())
+    got = subtitles.captions(cuts_json, TR, cfg, {}, {})
+    assert [(c["key"], c["start"], c["end"], [w["key"] for w in c["words"]]) for c in got] == \
+           [(c["key"], c["start"], c["end"], [w["key"] for w in c["words"]]) for c in expect]

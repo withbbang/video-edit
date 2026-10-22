@@ -1395,15 +1395,11 @@ def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: li
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
-def load_cut_list(path: Path, tr: dict, fps: Fraction,
-                  total_frames: int) -> tuple[list[Cut], list[dict], dict]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("transcript_sha1") and data["transcript_sha1"] != transcript_sha1(tr):
-        sys.exit("오류: 전사가 컷 리스트를 만들 때와 달라 단어 위치가 맞지 않습니다. "
-                 "--apply-cuts 없이 다시 실행해 컷 리스트를 새로 만드세요.")
+def cuts_from_dicts(items: list[dict], fps: Fraction, total_frames: int) -> list[Cut]:
+    """cuts.json 의 컷 목록 → 프레임 격자에 맞춘 Cut (길이 0 은 버리고 겹치는 컷은 합침)"""
     f = float(fps)
     cuts = []
-    for c in data["cuts"]:
+    for c in items:
         cut = Cut(**{k: v for k, v in c.items() if k in Cut.__dataclass_fields__})
         # 사람이 고치는 건 초 값이다 → 프레임을 초에서 다시 계산해 렌더와 SRT 가 같은 값을 쓰게 한다
         cut.start_frame = max(0, int(round(cut.start * f)))
@@ -1412,8 +1408,18 @@ def load_cut_list(path: Path, tr: dict, fps: Fraction,
             continue
         cut.start, cut.end = cut.start_frame / f, cut.end_frame / f
         cuts.append(cut)
+    return merge_cuts(cuts, fps, 0)
+
+
+def load_cut_list(path: Path, tr: dict, fps: Fraction,
+                  total_frames: int) -> tuple[list[Cut], list[dict], dict]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("transcript_sha1") and data["transcript_sha1"] != transcript_sha1(tr):
+        sys.exit("오류: 전사가 컷 리스트를 만들 때와 달라 단어 위치가 맞지 않습니다. "
+                 "--apply-cuts 없이 다시 실행해 컷 리스트를 새로 만드세요.")
+    cuts = cuts_from_dicts(data["cuts"], fps, total_frames)
     modes = {k: data.get(k, "?") for k in ("filler", "habit", "silence")}
-    return merge_cuts(cuts, fps, 0), data.get("skipped", []), modes
+    return cuts, data.get("skipped", []), modes
 
 
 def build_parser() -> argparse.ArgumentParser:

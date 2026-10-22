@@ -370,7 +370,7 @@ class Api:
         st = self._caption_state(job_id)
         if st is None or not isinstance(find, str) or not isinstance(repl, str):
             return None
-        plan, count = subtitles._plan(st[3], find, repl)
+        plan, count = subtitles.plan_replace(st[3], find, repl)
         result = {"count": count, "keys": list(plan)}
         if apply and plan:
             def change(job: Job, tr: dict) -> bool:

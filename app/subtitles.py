@@ -37,13 +37,25 @@ def transcript_words(tr: dict) -> dict[str, str]:
             for s in tr.get("segments", []) for i, w in enumerate(s.get("words", []))}
 
 
+def _fps(cuts_json: dict):
+    from fractions import Fraction
+    try:
+        return Fraction(str(cuts_json.get("fps") or "30/1"))
+    except (ValueError, ZeroDivisionError):
+        return Fraction(30)
+
+
+def _total_frames(cuts_json: dict, transcript: dict) -> int:
+    try:
+        dur = float(transcript.get("duration") or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    return int(round(dur * float(_fps(cuts_json)))) if dur > 0 else 10 ** 9
+
+
 def captions(cuts_json: dict, transcript: dict, cfg: dict, word_edits: dict, line_times: dict) -> list[dict]:
     pl = pipeline_module()
-    cuts = []
-    for c in cuts_json.get("cuts", []):
-        cut = pl.Cut(**{k: v for k, v in c.items() if k in pl.Cut.__dataclass_fields__})
-        cuts.append(cut)
-    cuts.sort(key=lambda c: c.start)
+    cuts = pl.cuts_from_dicts(cuts_json.get("cuts", []), _fps(cuts_json), _total_frames(cuts_json, transcript))
     remap = pl.TimeRemap(cuts)
     caps = pl.build_captions(transcript, remap.cut_words, remap, cfg["_always"], cfg["_single_only"],
                              word_edits=word_edits or {})
@@ -57,7 +69,7 @@ def captions(cuts_json: dict, transcript: dict, cfg: dict, word_edits: dict, lin
     return caps
 
 
-def _plan(caps: list[dict], find: str, repl: str) -> tuple[dict[str, str], int]:
+def plan_replace(caps: list[dict], find: str, repl: str) -> tuple[dict[str, str], int]:
     needle = "".join((find or "").split())
     if not needle:
         return {}, 0
@@ -101,7 +113,7 @@ def _plan(caps: list[dict], find: str, repl: str) -> tuple[dict[str, str], int]:
 def replace_plan(caps: list[dict], find: str, repl: str) -> dict[str, str]:
     """바뀔 어절 키 → 새 글자. 한 줄 안에서 공백을 무시하고(대소문자 구분) 찾는다.
     여러 어절에 걸치면 첫 어절=앞부분+repl, 끝 어절=뒷부분, 사이=빈 글자."""
-    return _plan(caps, find, repl)[0]
+    return plan_replace(caps, find, repl)[0]
 
 
 def line_bounds(caps: list[dict], key: str) -> tuple[float, float]:
