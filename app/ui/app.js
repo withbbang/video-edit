@@ -8,7 +8,7 @@ const OPTS = [
   { key: 'filler', label: '망설임 소리', sub: '아·어·음…', choices: [['keep', '유지'], ['remove', '제거']] },
   { key: 'habit', label: '말버릇', sub: '그니까·약간·이제…', choices: [['keep', '유지'], ['some', '일부'], ['all', '모두']] },
   { key: 'silence', label: '말 없는 구간', slider: true, ends: ['안 자름', '최대한 자름'], say: silenceSay },
-  { key: 'denoise', label: '배경 잡음', slider: true, ends: ['끔', '최대 (목소리 먹먹해질 수 있음)'], say: denoiseSay },
+  { key: 'denoise', label: '배경 잡음 제거', slider: true, ends: ['끔', '최대 (목소리 먹먹해질 수 있음)'], say: denoiseSay },
 ];
 const ADV = [
   { key: 'loudnorm', label: '음량 맞추기', sub: '유튜브 기준 크기(-14 LUFS)로 맞춤', choices: [['keep', '유지'], ['match', '맞춤']] },
@@ -39,6 +39,9 @@ const S = {
   result: null, resultFor: null, resultKey: null,
   showAll: false, showAllCuts: false, changedKey: null, saveDir: '', advOpen: false, update: null,
   resultVersion: 0, drawn: null,
+  // 자막: caps 는 선택한 영상의 자막 줄(원본 초), tab 은 'cuts' | 'subs', editing 은 열린 어절 입력칸 {key}
+  tab: 'cuts', caps: null, capsFor: null, capsVersion: 0, dropped: false, lineSel: null, editing: null,
+  findKeys: new Set(), findCount: 0, scroll: {},
 };
 
 // ---- 작은 도우미 ---------------------------------------------------------
@@ -107,6 +110,8 @@ function select(id) {
   if (S.sel === id) return;
   S.sel = id; S.options = null; S.result = null; S.resultFor = null; S.resultKey = null;
   S.showAll = false; S.showAllCuts = false; S.changedKey = null;
+  S.caps = null; S.capsFor = null; S.dropped = false; S.lineSel = null; S.editing = null; S.scroll = {};
+  S.findKeys = new Set(); S.findCount = 0; findBar.find.value = ''; findBar.repl.value = '';
   player.detach();
   if (id) {
     call('get_options', id).then((o) => { if (S.sel === id && o) { S.options = o; render(); } });
@@ -131,12 +136,33 @@ function syncResult() {
 let resultSeq = 0;
 async function loadResult(id) {
   const seq = ++resultSeq;
+  loadCaptions(id);                                 // 다시 판정·되살리기로 잘린 곳이 바뀌면 자막 줄도 바뀐다
   const r = await call('get_result', id);
   if (seq !== resultSeq || S.sel !== id) return;   // 늦게 온 옛 응답은 버린다
   if (!r) { S.resultKey = null; return; }          // 다음 알림 때 다시 읽는다
   S.result = r; S.resultFor = id; S.resultVersion++;
+  if (r.edits_dropped) S.dropped = true;
   if (!r.changes) S.changedKey = null;
   render();
+}
+
+let capsSeq = 0;
+async function loadCaptions(id) {
+  const seq = ++capsSeq;
+  const r = await call('get_captions', id);
+  if (seq !== capsSeq || S.sel !== id || !r) return;
+  applyCaps(id, r);
+}
+
+// 자막 API 응답 {captions, edits_dropped} 을 받아 목록·영상 위 자막을 다시 그린다
+function applyCaps(id, r) {
+  if (S.sel !== id || !r || !Array.isArray(r.captions)) return;
+  capsSeq++;                                        // 고친 뒤의 자막이 늦게 온 옛 get_captions 에 덮이지 않게
+  S.caps = r.captions; S.capsFor = id; S.capsVersion++;
+  if (r.edits_dropped) S.dropped = true;
+  if (S.lineSel && !S.caps.some((c) => c.key === S.lineSel)) S.lineSel = null;
+  renderResult();
+  if (findBar.find.value.trim()) findPreview();
 }
 
 // ---- 그리기 --------------------------------------------------------------
@@ -262,13 +288,19 @@ function renderPrimary() {
 function renderResult(force) {
   const box = $('result');
   const j = selected();
-  const key = j ? [j.id, j.status, j.error, S.resultVersion, S.showAll, S.showAllCuts].join('|') : '';
+  const key = j ? [j.id, j.status, j.error, S.resultVersion, S.showAll, S.showAllCuts,
+    S.capsVersion, S.tab, S.lineSel, S.dropped].join('|') : '';
+  if (S.editing) return;                            // 열린 어절 입력칸을 지우지 않는다 (닫을 때 다시 그림)
   if (!force && key === S.drawn) return;
   S.drawn = key;
   if (!j) { box.replaceChildren(); return; }
   const r = S.resultFor === j.id ? S.result : null;
   box.classList.toggle('busy', !!r && BUSY.has(j.status));
   const parts = [];
+  if (r && S.dropped) {
+    parts.push(h('div', { class: 'notice' }, h('span', {}, '받아쓰기가 바뀌어 고친 자막을 지웠습니다'),
+      h('button', { type: 'button', class: 'x', title: '닫기', onclick: () => { S.dropped = false; renderResult(); } }, '✕')));
+  }
   if (j.status === 'failed') {
     parts.push(h('div', { class: 'err' }, '실패' + (j.error ? ` — ${j.error}` : '')));
   } else if (j.status === 'review' && j.error) {
@@ -276,12 +308,19 @@ function renderResult(force) {
     parts.push(h('div', { class: 'err' }, `저장 실패 — ${j.error}`));
   }
   if (r) parts.push(...resultParts(j, r));
-  // 재생기는 그대로 두고 나머지만 다시 그린다 (재생 위치·목록 스크롤 위치 유지)
+  // 재생기는 그대로 두고 나머지만 다시 그린다 (재생 위치·탭별 목록 스크롤 위치·찾기 입력칸 유지)
   const oldList = box.querySelector('.cut-list');
-  const listTop = oldList ? oldList.scrollTop : 0;
+  if (oldList) S.scroll[oldList.dataset.tab] = oldList.scrollTop;
+  const ae = document.activeElement;
+  const typing = (ae === findBar.find || ae === findBar.repl) ? [ae, ae.selectionStart, ae.selectionEnd] : null;
   box.replaceChildren(...parts);
   const newList = box.querySelector('.cut-list');
-  if (newList) newList.scrollTop = listTop;
+  if (newList) newList.scrollTop = S.scroll[newList.dataset.tab] || 0;
+  if (typing && typing[0].isConnected) {
+    typing[0].focus({ preventScroll: true });
+    try { typing[0].setSelectionRange(typing[1], typing[2]); } catch (e) { /* 무시 */ }
+  }
+  player.subKey = null;
   if (r && r.preview_url) player.attach(r);
   else if (r) player.detach();
 }
@@ -295,13 +334,13 @@ function resultParts(j, r) {
     h('span', { class: 'stat' }, `−${Math.round(Number(s.removed_sec) || 0)}초`),
     s.restored ? [' · ', h('span', { class: 'stat back' }, `${s.restored}곳 되살림`)] : []));
   // 미리보기를 못 만들어도 컷·요약은 그대로 쓸 수 있다
-  out.push(r.preview_url ? player.slot() : h('div', { class: 'err' }, '미리보기를 만들지 못했습니다'));
+  out.push(...(r.preview_url ? [player.slot(), player.sub] : [h('div', { class: 'err' }, '미리보기를 만들지 못했습니다')]));
   out.push(timeline(r));
   out.push(h('div', { class: 'legend' },
     h('b', { class: 'cut' }, '■ 잘린 곳'), ' · ', h('b', { class: 'changed' }, '■ 달라진 곳'),
     s.restored ? [' · ', h('b', { class: 'back' }, '▭ 되살린 곳')] : []));
   if (r.changes) out.push(...changeRows(r.changes));
-  out.push(...cutRows(j, r));
+  out.push(...listParts(j, r));
   if (j.status === 'saved' && r.saved_paths && r.saved_paths.length) {
     out.push(h('div', { class: 'saved-files' }, r.saved_paths.map((p) => h('div', {}, p))));
   }
@@ -351,8 +390,6 @@ const KIND = { silence: '말 없는 구간', filler: '망설임 소리', habit: 
 // 잘린 곳 목록: 하나씩 되살리거나 다시 자를 수 있다 (처리 없이 바로 반영, 저장 때 쓰임)
 function cutRows(j, r) {
   const items = r.cut_items || [];
-  if (!items.length) return [];
-  const n = items.filter((c) => c.restored).length;
   const rows = [];
   const shown = S.showAllCuts ? items : items.slice(0, ROWS_FIRST);
   const editable = HAS_RESULT.has(j.status);
@@ -368,10 +405,168 @@ function cutRows(j, r) {
   if (!S.showAllCuts && items.length > ROWS_FIRST) {
     rows.push(h('div', { class: 'opt more', onclick: () => { S.showAllCuts = true; renderResult(true); } }, h('span', {}, '+ 더 보기'), h('span')));
   }
-  // 목록만 따로 스크롤한다 (재생기·타임라인은 그대로 보이게)
-  return [h('h3', { class: 'list-title' }, `잘린 곳 ${items.length}` + (n ? ` · 되살림 ${n}` : '')),
-    h('div', { class: 'cut-list' }, rows)];
+  return rows;
 }
+
+// "잘린 곳" 자리를 탭 두 개로 나눠 쓴다. 목록만 따로 스크롤한다 (재생기·타임라인은 그대로 보이게)
+function listParts(j, r) {
+  const items = r.cut_items || [];
+  const n = items.filter((c) => c.restored).length;
+  const caps = S.capsFor === j.id ? S.caps : null;
+  if (!items.length && !(caps && caps.length)) return [];
+  const tab = (key, text) => h('button', { type: 'button', class: S.tab === key ? 'on' : null,
+    onclick: () => { if (S.tab !== key) { S.tab = key; renderResult(); } } }, text);
+  const out = [h('div', { class: 'tabs', role: 'tablist' },
+    tab('cuts', `잘린 곳 ${items.length}` + (n ? ` · 되살림 ${n}` : '')),
+    tab('subs', caps ? `자막 ${caps.length}줄` : '자막'))];
+  if (S.tab === 'subs') {
+    syncFindBar(HAS_RESULT.has(j.status));
+    out.push(findBar.el, h('div', { class: 'cut-list subs', 'data-tab': 'subs' }, (caps || []).map((c) => capRow(j, c))));
+  } else {
+    out.push(h('div', { class: 'cut-list', 'data-tab': 'cuts' }, cutRows(j, r)));
+  }
+  return out;
+}
+
+// ---- 자막 고치기 -----------------------------------------------------------
+// m:ss.s (줄 시간 편집기)
+function clock1(sec) {
+  const d = Math.max(0, Math.round((Number(sec) || 0) * 10));
+  return `${Math.floor(d / 600)}:${((d % 600) / 10).toFixed(1).padStart(4, '0')}`;
+}
+
+// 자막 탭의 한 줄: 시간(누르면 그 줄 들어보기 + 줄 시간 편집기) + 어절들
+function capRow(j, c) {
+  const sel = S.lineSel === c.key;
+  return h('div', { class: 'cap' + (sel ? ' sel' : '') + (c.timed ? ' timed' : '') },
+    h('button', { type: 'button', class: 't', title: c.timed ? '시간을 고친 줄' : null, onclick: () => {
+      player.clip(c.start, c.end, true);
+      if (S.lineSel !== c.key) { S.lineSel = c.key; renderResult(); }
+    } }, clock(c.start)),
+    h('span', { class: 'ws' }, c.words.map((w) => wordEl(w, 'list'))),
+    sel ? lineEditor(j, c) : null);
+}
+
+// 어절 하나. 자막 탭과 영상 위 자막이 같이 쓴다 (영상 위는 멈췄을 때만 고침)
+function wordEl(w, where) {
+  const j = selected();
+  const can = !!j && HAS_RESULT.has(j.status);
+  const el = h('span', { class: 'w' + (can ? ' can' : '') + (w.edited ? ' edited' : '') + (S.findKeys.has(w.key) ? ' hit' : ''),
+    'data-k': w.key, title: w.edited ? `원래: ${w.orig}` : null }, w.text);
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (where === 'over' && player.video && !player.video.paused) return;   // 재생 중엔 보기만
+    editWord(el, w);
+  });
+  return el;
+}
+
+// 그 자리를 입력칸으로: Enter·바깥 클릭 확정, Esc 취소, 빈칸 확정 = 그 어절 빼기
+function editWord(el, w) {
+  const j = selected();
+  if (!j || !HAS_RESULT.has(j.status) || S.editing) return;
+  const id = j.id;
+  S.editing = { key: w.key };
+  const input = h('input', { type: 'text', class: 'w-in', value: w.text, spellcheck: 'false', 'aria-label': '어절 고치기' });
+  const fit = () => { input.style.width = `${Math.max(2, input.value.length) + 1.5}em`; };
+  fit();
+  let done = false;
+  const finish = async (mode) => {
+    if (done) return;
+    done = true;
+    const text = mode === 'orig' ? null : input.value;
+    if (mode !== 'cancel' && (text === null || text.trim() !== w.text)) {
+      const r = await call('set_word', id, w.key, text);
+      S.editing = null;
+      if (r) { applyCaps(id, r); return; }
+    }
+    S.editing = null;
+    renderResult(true);
+  };
+  input.addEventListener('input', fit);
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); finish('ok'); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish('cancel'); }
+  });
+  input.addEventListener('blur', () => finish('ok'));
+  input.addEventListener('click', (e) => e.stopPropagation());
+  const back = w.edited ? h('button', { type: 'button', class: 'btn', onmousedown: (e) => e.preventDefault(),
+    onclick: (e) => { e.stopPropagation(); finish('orig'); } }, '원래대로') : null;
+  el.replaceWith(h('span', { class: 'w-edit' }, input, back));
+  input.focus();
+  input.select();
+}
+
+// 줄 시간 편집기: 시작·끝을 0.1초씩 또는 재생기 지금 위치로 (서버가 이웃 줄·영상 길이·최소 0.3초로 맞춘다)
+function lineEditor(j, c) {
+  const can = HAS_RESULT.has(j.status);
+  const set = (s, e) => setLineTime(j.id, c.key, s, e);
+  const now = () => (player.video ? player.video.currentTime : null);
+  const part = (label, t, which) => {
+    const go = (v) => (v === null ? null : which === 'start' ? set(v, null) : set(null, v));
+    return h('span', { class: 'lt' }, `${label} `, h('b', {}, clock1(t)),
+      h('button', { type: 'button', class: 'btn', disabled: !can, onclick: () => go(t - 0.1) }, '◀0.1'),
+      h('button', { type: 'button', class: 'btn', disabled: !can, onclick: () => go(t + 0.1) }, '0.1▶'),
+      h('button', { type: 'button', class: 'btn', disabled: !can || !player.video, onclick: () => go(now()) }, '지금 위치로'));
+  };
+  return h('div', { class: 'line-time' }, part('시작', c.start, 'start'), part('끝', c.end, 'end'),
+    h('button', { type: 'button', class: 'btn', disabled: !can || !c.timed, onclick: () => set(null, null) }, '원래대로'));
+}
+
+async function setLineTime(id, key, start, end) {
+  const r = await call('set_line_time', id, key, start, end);
+  if (r) applyCaps(id, r);
+}
+
+// 찾기 막대: 한 번 만들어 두고 다시 그릴 때 옮겨 붙인다 (입력 중인 글자·커서 유지)
+const findBar = (() => {
+  const find = h('input', { type: 'text', spellcheck: 'false', 'aria-label': '찾을 말' });
+  const repl = h('input', { type: 'text', spellcheck: 'false', 'aria-label': '바꿀 말' });
+  const n = h('span', { class: 'n' });
+  const btn = h('button', { type: 'button', class: 'btn' }, '전부 바꾸기');
+  const el = h('div', { class: 'find' }, h('span', {}, '찾기'), find, h('span', { class: 'muted' }, '→'), repl, btn, n);
+  return { find, repl, n, btn, el };
+})();
+let findTimer = 0, findSeq = 0;
+function syncFindBar(can) {
+  findBar.find.disabled = !can; findBar.repl.disabled = !can;
+  findBar.btn.disabled = !can || S.findCount <= 0;
+  findBar.n.textContent = `· ${S.findCount}곳`;
+}
+async function findPreview() {
+  const seq = ++findSeq;
+  const id = S.sel, q = findBar.find.value, rp = findBar.repl.value;
+  let keys = [], count = 0;
+  if (id && q.trim()) {
+    const r = await call('replace_text', id, q, rp, false);
+    if (seq !== findSeq || S.sel !== id) return;
+    if (r) { keys = r.keys || []; count = r.count || 0; if (r.edits_dropped && !S.dropped) { S.dropped = true; renderResult(); } }
+  }
+  S.findKeys = new Set(keys); S.findCount = count;
+  paintHits();
+}
+// 찾은 어절 강조·곳 수만 그 자리에서 고친다 (입력할 때마다 목록을 다시 만들지 않는다)
+function paintHits() {
+  const j = selected();
+  syncFindBar(!!j && HAS_RESULT.has(j.status));
+  for (const el of $('result').querySelectorAll('.w[data-k]')) el.classList.toggle('hit', S.findKeys.has(el.dataset.k));
+}
+async function applyReplace() {
+  const j = selected();
+  const q = findBar.find.value;
+  if (!j || !HAS_RESULT.has(j.status) || !q.trim() || S.findCount <= 0) return;
+  clearTimeout(findTimer);
+  findSeq++;
+  const r = await call('replace_text', j.id, q, findBar.repl.value, true);
+  if (r && r.captions) applyCaps(j.id, { captions: r.captions, edits_dropped: r.edits_dropped });
+  else findPreview();
+}
+for (const inp of [findBar.find, findBar.repl]) {
+  inp.addEventListener('input', () => { clearTimeout(findTimer); findTimer = setTimeout(findPreview, 150); });
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); applyReplace(); } });
+}
+findBar.btn.addEventListener('click', applyReplace);
 
 async function setRestored(id, c, on) {
   const r = await call('set_restored', id, c.start, c.end, on);
@@ -382,6 +577,7 @@ async function setRestored(id, c, on) {
 const player = {
   video: null, url: null, ranges: [], win: null, raf: 0, ownSeek: false,
   head: h('i', { class: 'head', style: 'left:0' }),
+  sub: h('div', { class: 'subline empty' }), subKey: null,
 
   slot() {
     if (!this.video) {
@@ -458,6 +654,18 @@ const player = {
     const d = (S.result && S.result.duration) || this.duration();
     const t = this.video ? this.video.currentTime : 0;
     this.head.style.left = d ? `${Math.min(100, (t / d) * 100)}%` : '0';
+    this.drawSub(t);
+  },
+  // 영상 아래 자막: 지금 시간의 줄 (고친 줄 시간 반영). 줄이 바뀔 때만 다시 만든다
+  drawSub(t) {
+    if (S.editing) return;
+    const caps = (S.capsFor === S.sel && S.caps) || [];
+    const line = this.video ? caps.find((c) => c.start <= t && t < c.end) : null;
+    const key = line ? `${line.key}|${S.capsVersion}` : '';
+    if (key === this.subKey) return;
+    this.subKey = key;
+    this.sub.classList.toggle('empty', !line);
+    this.sub.replaceChildren(...(line ? line.words.map((w) => wordEl(w, 'over')) : []));
   },
 };
 
