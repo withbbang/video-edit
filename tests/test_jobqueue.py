@@ -270,3 +270,101 @@ def test_set_progress(tmp_path):
     store, (a,), fx, q, changes = make(tmp_path, ("a",))
     q.set_progress(a.id, 0.4)
     assert a.progress == 0.4 and changes[-1] == (a.id, a.status)
+
+
+def test_start_all_retries_failed(tmp_path):
+    store, (a, b), fx, q, changes = make(tmp_path, ("a", "b"))
+    a.status, a.error, a.progress = Status.FAILED, "옛 오류", 0.7
+    q.start_all()
+    assert q.join(WAIT)
+    assert fx.calls == [(a.id, "analyze"), (b.id, "analyze")]
+    assert a.status == Status.REVIEW and a.error == ""
+    assert (a.id, Status.WAITING) in changes
+
+
+def test_followup_rejudge_keeps_original_prev(tmp_path):
+    store, (a,), fx, q, _ = make(tmp_path, ("a",))
+    a.status = Status.REVIEW
+    A = [{"start": 1.0, "end": 2.0}]
+    write_cuts(a, A)
+    fx.gate(a.id, "analyze")
+    first = fx.gates[(a.id, "analyze")]
+    results = iter([[{"start": 5.0, "end": 6.0}], [{"start": 7.0, "end": 7.5}]])
+
+    def side(job):
+        write_cuts(job, next(results))
+        fx.gates.pop((a.id, "analyze"), None)
+    fx.side[(a.id, "analyze")] = side
+    a.options.habit = "off"     # B
+    q.rejudge(a.id)
+    assert fx.started[(a.id, "analyze")].wait(WAIT)
+    a.options.habit = "all"     # C
+    q.rejudge(a.id)
+    first.set()
+    assert q.join(WAIT)
+    assert len(fx.calls) == 2
+    assert json.loads(Path(a.prev_cuts).read_text(encoding="utf-8"))["cuts"] == A
+    assert a.summary["removed_sec"] == 0.5
+
+
+def test_on_change_raising_does_not_stick(tmp_path):
+    store = Store(tmp_path / "state.json")
+    p = tmp_path / "a.mp4"
+    p.write_bytes(b"x")
+    a = store.add(p)
+    fx = FakeExec()
+    calls = []
+
+    def on_change(job):
+        calls.append(job.status)
+        if len(calls) == 1:
+            raise RuntimeError("UI 망가짐")
+    q = Queue(store, fx, on_change)
+    q.start_all()
+    assert q.join(WAIT)
+    assert a.status == Status.REVIEW
+    a.status = Status.REVIEW
+    calls.clear()
+    q.rejudge(a.id)          # rejudge() 안의 on_change 가 터져도 스레드는 끝난다
+    assert q.join(WAIT)
+    assert a.status == Status.REVIEW
+
+
+def test_cancel_before_on_start(tmp_path):
+    store, (a, b), fx, q, _ = make(tmp_path, ("a", "b"))
+    entered, go, cancelled = threading.Event(), threading.Event(), threading.Event()
+    order = []
+
+    def execute(job, kind, on_start):
+        order.append(job.id)
+        if job.id != a.id:
+            return RunResult(True) if write_cuts(job, []) is None else None
+        entered.set()
+        assert go.wait(WAIT)
+
+        class H:
+            def cancel(self):
+                cancelled.set()
+        on_start(H())
+        return RunResult(False, "cancelled") if cancelled.is_set() else RunResult(True)
+    q.execute = execute
+    q.start_all()
+    assert entered.wait(WAIT)
+    q.cancel(a.id)
+    go.set()
+    assert q.join(WAIT)
+    assert cancelled.is_set()
+    assert store.get(a.id) is None
+    assert order == [a.id, b.id] and b.status == Status.REVIEW
+
+
+def test_execute_raising_marks_failed_and_continues(tmp_path):
+    store, (a, b), fx, q, _ = make(tmp_path, ("a", "b"))
+
+    def boom(job):
+        raise RuntimeError("터짐")
+    fx.side[(a.id, "analyze")] = boom
+    q.start_all()
+    assert q.join(WAIT)
+    assert a.status == Status.FAILED and "터짐" in a.error
+    assert b.status == Status.REVIEW
