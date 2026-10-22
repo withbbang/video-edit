@@ -224,6 +224,7 @@ python -m venv .venv
 - `never_cut` — 절대 안 자를 단어
 - `single_only` — 한 번만 나올 때만 컷할 단어 (기본 하, 허). "하하"·"허 허"처럼 반복되면 웃음으로 보고 남긴다
 - `silence_min_sec` / `silence_pad_sec` / `silence_threshold_db` — 무음 컷 기준 (기본 0.3초 이상 무음을, 말 앞뒤로 0.08초씩 남기고 컷. -40dB 미만을 무음으로 봄)
+- `silence_auto` / `silence_auto_margin_db` / `silence_auto_max_db` — 무음 기준 자동 맞춤 (기본 켬). 말 사이에도 차·바람 소리가 깔린 야외 영상은 -40dB 아래로 안 내려가 무음이 거의 안 잡히므로, 영상마다 말 없는 틈의 배경 소리를 재서 배경 +5dB 를 무음 기준으로 쓴다 (-40dB ~ -30dB 사이). 조용한 실내 영상은 그대로
 - `untranscribed_min_sec` — Whisper 가 전사하지 않은 목소리 기준 (기본 0.2초). 필러 컷 바로 옆이면 늘인 필러("이제 에~")로 보고 같이 컷, 그 밖은 review.md 에 "(전사 누락)"으로 표시만 한다. 0 이면 끔
 - `silence_bridge_sec` / `silence_bridge_max_db` — 무음 사이에 낀 짧고 작은 소리(기본 0.3초 이하, -30dB 미만: 숨소리·입소리)는 무음으로 쳐서 조각이 남지 않게 한다
 - `prompt` — Whisper 가 필러를 전사에서 빼먹지 않도록 주는 예시 문장 (30초 구간마다 다시 적용). 필러를 추가하면 여기에도 넣어주면 좋다. 바꾸면 다음 실행 때 전사를 다시 한다

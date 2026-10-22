@@ -613,6 +613,31 @@ def quiet_mask(rms: list[float], hop: float, cfg: dict):
     return np.convolve(np.asarray(rms), np.ones(k) / k, mode="same") < thr
 
 
+def auto_silence(tr: dict, rms: list[float], hop: float, cfg: dict) -> dict:
+    """영상마다 무음 기준을 배경 소리에 맞춘다. 말 없는 틈(단어 앞뒤 0.1초 밖)의 하위 20% 크기를 배경 바닥으로 보고
+    바닥 + silence_auto_margin_db 를 무음 기준으로 쓴다. 단 silence_threshold_db 보다 내리지 않고(조용한 실내는 그대로),
+    silence_auto_max_db 와 말소리 중간값 - 6dB 보다 올리지 않는다. 무음 잇기 기준도 무음 기준 + 10dB 까지 같이 올린다.
+    틈이 2초 미만이면 바닥을 믿을 수 없어 그대로 둔다. → cfg 에 덮어쓸 값 (silence_noise_floor_db 는 기록용)"""
+    import numpy as np
+    base = float(cfg.get("silence_threshold_db", -40))
+    bridge = float(cfg.get("silence_bridge_max_db", -30))
+    out = {"silence_threshold_db": base, "silence_bridge_max_db": bridge}
+    if not cfg.get("silence_auto", False) or not rms:
+        return out
+    k = max(1, int(round(0.05 / hop)))  # quiet_mask 와 같은 50ms 이동평균
+    db = 20 * np.log10(np.maximum(np.convolve(np.asarray(rms), np.ones(k) / k, mode="same"), 1e-9))
+    gap = np.ones(len(db), dtype=bool)
+    for _, _, w in all_words(tr):
+        gap[max(0, int((w["start"] - 0.1) / hop)):max(0, int(math.ceil((w["end"] + 0.1) / hop)))] = False
+    if gap.sum() * hop < 2.0 or gap.all():
+        return out
+    floor = float(np.percentile(db[gap], 20))
+    cap = min(float(cfg.get("silence_auto_max_db", -30)), float(np.median(db[~gap])) - 6)
+    thr = round(max(base, min(floor + float(cfg.get("silence_auto_margin_db", 5)), cap)), 1)
+    return {"silence_threshold_db": thr, "silence_bridge_max_db": max(bridge, thr + 10),
+            "silence_noise_floor_db": round(floor, 1)}
+
+
 def runs(mask) -> list[tuple[int, int]]:
     """True 가 이어지는 [시작, 끝) 프레임 구간들"""
     import numpy as np
@@ -1414,6 +1439,13 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     tr_path = out_dir / f"{stem}.transcript.json"
     tr = transcribe(asr_wav, tr_path, audio_key, args.model, args.device, args.compute_type,
                     cfg.get("prompt", ""), args.force, args.work_root / ".whisper_probe.json")
+    rms, hop = load_rms(asr_wav)
+    if not args.apply_cuts:
+        base_db = float(cfg.get("silence_threshold_db", -40))
+        cfg.update(auto_silence(tr, rms, hop, cfg))
+        if cfg["silence_threshold_db"] != base_db:
+            log(f"무음 기준: 배경 소리 {cfg['silence_noise_floor_db']:.1f}dB → {cfg['silence_threshold_db']:.1f}dB "
+                f"(기본 {base_db:.0f}dB)")
     # 필러 시간 보정은 사전(단어 목록)에 따라 대상이 달라진다 → 사전이 바뀌면 원래 시간으로 되돌려 다시 한다
     align_key = {"v": ALIGN_VERSION, "words": sorted(cfg["_always"] | cfg["_habit"] | cfg["_pause_after"]),
                  "never": sorted(cfg["_never"]), "silence": [cfg.get("silence_threshold_db", -40),
@@ -1423,7 +1455,6 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         for _, _, w in all_words(tr):
             if "whisper" in w:
                 w["start"], w["end"] = w.pop("whisper")
-        rms, hop = load_rms(asr_wav)
         n, align_failed = ctc_fix_fillers(tr, asr_wav, rms, hop, cfg, args.ctc_model)
         if n or align_failed:
             log(f"필러 시간 보정: {n}곳 (실패 {len(align_failed)}곳)")
@@ -1440,7 +1471,6 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         modes = {"filler": args.filler, "habit": args.habit, "silence": args.silence}
         habit_mode = {"on": "conservative", "off": "off", "aggressive": "aggressive"}[args.habit]
         raw_cuts, skipped = detect_fillers(tr, cfg, habit_mode, args.filler == "on")
-        rms, hop = load_rms(asr_wav)
         suspects = find_suspect_words(tr, quiet_mask(rms, hop, cfg), hop, cfg)
         skipped += tr.get("align_failed", [])
         aw = all_words(tr)

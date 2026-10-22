@@ -25,6 +25,10 @@
 
   "_무음_설명": "silence_min_sec 이상 이어지는 무음(silence_threshold_db 미만)을 찾아, 말 앞뒤로 silence_pad_sec 씩만 남기고 컷합니다. 영상 맨 앞/뒤 무음은 전부 컷. --silence off 로 끕니다.",
   "silence_threshold_db": -40,
+  "_무음_자동_설명": "silence_auto 가 true 면 영상마다 말 없는 틈의 배경 소리(하위 20%)를 재서, 배경 + silence_auto_margin_db 를 무음 기준으로 씁니다. silence_threshold_db 보다 내리지 않고(조용한 실내는 그대로) silence_auto_max_db 와 말소리보다 6dB 아래를 넘지 않습니다. 야외처럼 배경 소리가 깔린 영상에서 무음이 안 잡히는 것을 막습니다. 무음 잇기 기준(silence_bridge_max_db)도 무음 기준 + 10dB 까지 같이 올립니다.",
+  "silence_auto": true,
+  "silence_auto_margin_db": 5,
+  "silence_auto_max_db": -30,
   "silence_min_sec": 0.3,
   "silence_pad_sec": 0.08,
   "_무음_이음_설명": "무음 사이에 낀 silence_bridge_sec 이하, silence_bridge_max_db 미만의 작은 소리(숨소리·입소리)는 무음으로 쳐서 한 번에 컷합니다. 단어가 걸쳐 있으면 잇지 않습니다 (자리가 의심스러운 단어는 무시).",
