@@ -1096,10 +1096,10 @@ def build_captions(tr: dict, cut_words: set, remap: TimeRemap, always_fillers: s
 
     caps = []
     for g in groups:
-        ws = [x for x in g if x["text"]]   # 글자를 비운 어절은 빠진다
+        ws = [x for x in g if x["text"]]   # 글자를 비운 어절은 빠진다 (줄 key 는 원래 첫 어절이라 안 바뀐다)
         if not ws or not " ".join(x["text"] for x in ws).strip():
             continue
-        caps.append({"key": ws[0]["key"], "start": ws[0]["start"], "end": ws[-1]["end"], "words": ws})
+        caps.append({"key": g[0]["key"], "start": ws[0]["start"], "end": ws[-1]["end"], "words": ws})
     return caps
 
 

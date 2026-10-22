@@ -11,6 +11,9 @@ def _tr():
                 (" 긴문장을", 6.0, 6.4), (" 이어서", 6.5, 6.9)]),
         seg(2, [(" 말씀", 9.0, 9.4), (" 드리면", 9.5, 9.9), (" 그니까", 10.0, 10.4),
                 (" 끝입니다", 10.5, 11.0), (" 감사", 11.1, 11.5)]),
+        # 컷으로 안 사라지는 0.7초 넘는 멈춤(11.5 -> 12.5) 뒤, 5초 넘게 이어지는 줄
+        seg(3, [(" 가나", 12.5, 13.5), (" 다라", 13.6, 14.6), (" 마바", 14.7, 15.7),
+                (" 사아", 15.8, 16.8), (" 자차", 16.9, 17.9), (" 카타", 18.0, 19.0)]),
     ]}
 
 
@@ -24,9 +27,9 @@ def _cuts():
 
 
 FILLERS = {"어"}
-FINAL = 8.0
+FINAL = 30.0
 # 리팩터링 전 build_srt 가 낸 출력을 그대로 박아 둔 값
-EXPECTED = '1\n00:00:00,000 --> 00:00:01,750\n안녕하세요 여러분 오늘은.\n\n2\n00:00:01,850 --> 00:00:04,950\n영상을 만들어 보겠습니다 정말정말정말 긴문장을\n\n3\n00:00:05,050 --> 00:00:07,700\n이어서 말씀 드리면 끝입니다 감사\n\n'
+EXPECTED = '1\n00:00:00,000 --> 00:00:01,750\n안녕하세요 여러분 오늘은.\n\n2\n00:00:01,850 --> 00:00:04,950\n영상을 만들어 보겠습니다 정말정말정말 긴문장을\n\n3\n00:00:05,050 --> 00:00:07,700\n이어서 말씀 드리면 끝입니다 감사\n\n4\n00:00:08,700 --> 00:00:13,000\n가나 다라 마바 사아\n\n5\n00:00:13,100 --> 00:00:15,200\n자차 카타\n\n'
 
 
 def _caps(**kw):
@@ -76,3 +79,14 @@ def test_line_time_fixed():
     assert blocks[1][1] == f"{pipeline.fmt_srt_time(remap(2.0))} --> {pipeline.fmt_srt_time(remap(4.0))}"
     prev_end = blocks[0][1].split(" --> ")[1]
     assert prev_end <= pipeline.fmt_srt_time(remap(2.0) - 0.05)
+
+
+def test_line_key_stable_when_first_word_emptied():
+    remap = pipeline.TimeRemap(_cuts())
+    before = _caps()
+    first = before[0]["key"]
+    caps = _caps(word_edits={first: ""})
+    assert [c["key"] for c in caps] == [c["key"] for c in before]
+    assert first not in [w["key"] for w in caps[0]["words"]]
+    srt = pipeline.captions_to_srt(caps, remap, FINAL, {first: [0.0, 1.0]})
+    assert srt.split("\n")[1] == f"{pipeline.fmt_srt_time(remap(0.0))} --> {pipeline.fmt_srt_time(remap(1.0))}"
