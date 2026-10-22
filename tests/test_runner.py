@@ -78,7 +78,7 @@ def test_render_command(tmp_path):
     assert cmd[cmd.index("--apply-cuts") + 1] == str(jd / "out" / "강의 03 (최종).cuts.json")
     assert cmd[cmd.index("--media-out") + 1] == str(tmp_path / "save")
     assert cmd[cmd.index("--out") + 1] == str(jd / "out")
-    assert "--render-denoise" in cmd and "--fillers" not in cmd
+    assert cmd[cmd.index("--denoise-level") + 1] == "50" and "--render-denoise" not in cmd and "--fillers" not in cmd
 
 
 def test_fillers_used_when_present(tmp_path):

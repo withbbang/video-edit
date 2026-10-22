@@ -23,7 +23,7 @@ from typing import Callable, Protocol
 
 from . import __version__, diff, models, paths, runner, subtitles, updates
 from .jobqueue import ANALYZE, RENDER
-from .options import FAST_KEYS, JobOptions
+from .options import FAST_KEYS, LEVEL_KEYS, JobOptions, parse_level
 from .progress import ANALYZE_WEIGHTS, RENDER_WEIGHTS
 from .runner import RunResult
 from .store import Job, Status, Store
@@ -34,8 +34,8 @@ MEDIA_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".mts", ".m4a", "
 ALLOWED = {
     "filler": ("keep", "remove"),
     "habit": ("keep", "some", "all"),
-    "silence": ("keep", "remove"),
-    "denoise": ("keep", "remove"),
+    "silence": range(101),   # 0~100 슬라이더 (parse_level 로 자름)
+    "denoise": range(101),
     "loudnorm": ("keep", "match"),
     "subs": ("omit", "embed"),
     "quality": ("low", "auto", "high"),
@@ -48,6 +48,25 @@ Push = Callable[[str, dict], None]
 class Dialogs(Protocol):
     def open_files(self) -> list[str] | None: ...
     def choose_folder(self) -> str | None: ...
+
+
+def _union(cuts: list[dict]) -> list[list[float]]:
+    """컷 구간을 겹치거나 맞닿은 것끼리 합친다 (요약의 컷 수·잘린 초)."""
+    merged: list[list[float]] = []
+    for a, b in sorted((float(c["start"]), float(c["end"])) for c in cuts):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return merged
+
+
+def _preview_url(url: str, preview: Path) -> str | None:
+    """미리보기 주소 끝에 파일 수정 시각을 붙인다 — 다시 만들면 주소가 바뀌어 재생기가 새로 불러온다. 없으면 None."""
+    try:
+        return f"{url}?v={preview.stat().st_mtime_ns}" if preview.is_file() else None
+    except OSError:
+        return None
 
 
 def job_view(job: Job) -> dict:
@@ -270,10 +289,12 @@ class Api:
             job = self._job(job_id)
             return job.options.to_dict() if job else None
 
-    def set_option(self, job_id: str, key: str, value: str) -> dict | None:
+    def set_option(self, job_id: str, key: str, value) -> dict | None:
         """{"options": 지금 옵션, "accepted": 반영 여부}. 처리·저장 중엔 바꾸지 않는다 (화면이 막는다).
-        없는 영상이면 None, 잘못된 key·value 는 ValueError."""
-        if key not in ALLOWED or value not in ALLOWED[key]:
+        없는 영상이면 None, 잘못된 key·value 는 ValueError. silence·denoise 는 0~100 숫자(범위 밖은 자름)."""
+        if key in LEVEL_KEYS:
+            value = parse_level(value)
+        elif key not in ALLOWED or not isinstance(value, str) or value not in ALLOWED[key]:
             raise ValueError(f"잘못된 옵션: {key}={value!r}")
         rejudge = changed_status = False
         with self._queue.lock:
@@ -557,20 +578,19 @@ class Api:
         if (restored or ops) and cur is not None:
             # 되살린 곳은 미리보기에서 건너뛰지 않고 요약에서도 뺀다 (저장도 같은 목록으로 한다)
             kept = diff.effective_cuts(cur, restored, ops, transcript)["cuts"]
-            merged: list[list[float]] = []
-            for a, b in sorted((float(c["start"]), float(c["end"])) for c in kept):
-                if merged and a <= merged[-1][1]:
-                    merged[-1][1] = max(merged[-1][1], b)
-                else:
-                    merged.append([a, b])
+            merged = _union(kept)
             removed = sum(b - a for a, b in merged)
             orig = float((summary or {}).get("orig_sec") or duration)
             summary = {**(summary or {}), "cuts": len(merged), "removed_sec": removed,
                        "final_sec": max(orig - removed, 0.0), "restored": sum(1 for c in cur["cuts"] if diff.is_restored(c, restored))}
             cur = {**cur, "cuts": kept}
+        if summary is not None or cur is not None:
+            # 말 없는 구간 슬라이더 설명의 {곳}곳 · −{초}초 (요약과 같은 컷 목록에서, 겹치면 합쳐서)
+            sil = _union([c for c in (cur or {}).get("cuts", []) if diff._is_silence(c)])
+            summary = {**(summary or {}), "silence_cuts": len(sil), "silence_sec": sum(b - a for a, b in sil)}
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "cut_items": items,
                   "changes": changes,
-                  "preview_url": f"{self._preview_base}/{job_id}/preview.mp4" if preview.is_file() else None,
+                  "preview_url": _preview_url(f"{self._preview_base}/{job_id}/preview.mp4", preview),
                   "duration": duration}
         if dropped:
             result["edits_dropped"] = True

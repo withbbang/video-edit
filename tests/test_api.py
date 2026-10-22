@@ -177,7 +177,7 @@ def test_set_fast_option_triggers_rejudge(tmp_path):
 def test_set_fast_option_on_saved_rejudges(tmp_path):
     a, store, q, _ = make(tmp_path)
     job = add_job(tmp_path, a, store, status=Status.SAVED)
-    a.set_option(job.id, "silence", "keep")
+    a.set_option(job.id, "silence", 0)
     assert ("rejudge", job.id) in q.calls
 
 
@@ -193,7 +193,7 @@ def test_set_render_option_does_not_rejudge(tmp_path):
 def test_set_render_option_on_saved_goes_back_to_review(tmp_path):
     a, store, q, push = make(tmp_path)
     job = add_job(tmp_path, a, store, status=Status.SAVED)
-    a.set_option(job.id, "denoise", "keep")
+    a.set_option(job.id, "loudnorm", "keep")
     assert job.status == Status.REVIEW
     assert not [c for c in q.calls if c[0] == "rejudge"]
     assert push.of("job")[-1]["status"] == Status.REVIEW
@@ -222,6 +222,32 @@ def test_set_option_validates(tmp_path, key, value):
     job = add_job(tmp_path, a, store)
     with pytest.raises(ValueError):
         a.set_option(job.id, key, value)
+
+
+def test_set_option_slider_rejudges(tmp_path):
+    a, store, q, _ = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    r = a.set_option(job.id, "denoise", 80)
+    assert r["accepted"] is True and r["options"]["denoise"] == 80
+    assert ("rejudge", job.id) in q.calls
+    assert Store.load(store.path).jobs[0].options.denoise == 80
+    q.calls.clear()
+    a.set_option(job.id, "denoise", "80")      # 같은 값(숫자 문자열) → 다시 판정 안 함
+    assert not q.calls
+    a.set_option(job.id, "silence", 70.0)
+    assert job.options.silence == 70 and isinstance(job.options.silence, int)
+    assert ("rejudge", job.id) in q.calls
+
+
+def test_set_option_rejects_out_of_range(tmp_path):
+    a, store, q, _ = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    for bad in ("abc", "", None, True, "keep"):
+        with pytest.raises(ValueError):
+            a.set_option(job.id, "silence", bad)
+    assert job.options.silence == 50 and not q.calls
+    assert a.set_option(job.id, "silence", 150)["options"]["silence"] == 100
+    assert a.set_option(job.id, "denoise", -1)["options"]["denoise"] == 0
 
 
 def test_get_options_and_unknown_job(tmp_path):
@@ -262,13 +288,14 @@ def test_get_result_without_prev(tmp_path):
     job.summary = {"orig_sec": 10.0, "final_sec": 9.0, "cuts": 2, "removed_sec": 1.0}
     write_out(job, "a.cuts.json", {"cuts": [{"start": 5, "end": 5.5}, {"start": 1, "end": 1.5}]})
     write_out(job, "a.transcript.json", {"duration": 10.0, "segments": []})
-    (paths.job_dir(Path(job.src)) / "preview.mp4").write_bytes(b"v")
+    preview = paths.job_dir(Path(job.src)) / "preview.mp4"
+    preview.write_bytes(b"v")
     r = a.get_result(job.id)
     assert r["cuts"] == [[1, 1.5], [5, 5.5]]
     assert r["changes"] is None
     assert r["duration"] == 10.0
-    assert r["summary"] == job.summary
-    assert r["preview_url"] == f"http://127.0.0.1:9999/jobs/{job.id}/preview.mp4"
+    assert r["summary"] == {**job.summary, "silence_cuts": 0, "silence_sec": 0.0}
+    assert r["preview_url"] == f"http://127.0.0.1:9999/jobs/{job.id}/preview.mp4?v={preview.stat().st_mtime_ns}"
     assert "saved_paths" not in r
     json.dumps(r)
 
@@ -280,7 +307,8 @@ def test_get_result_without_preview_still_usable(tmp_path):
     job.summary = {"orig_sec": 10.0, "final_sec": 9.5, "cuts": 1, "removed_sec": 0.5}
     write_out(job, "a.cuts.json", {"cuts": [{"start": 1, "end": 1.5}]})
     r = a.get_result(job.id)
-    assert r["preview_url"] is None and r["cuts"] == [[1, 1.5]] and r["summary"] == job.summary
+    assert r["preview_url"] is None and r["cuts"] == [[1, 1.5]]
+    assert r["summary"] == {**job.summary, "silence_cuts": 0, "silence_sec": 0.0}
 
 
 def test_get_result_with_prev_compares(tmp_path):
@@ -293,6 +321,40 @@ def test_get_result_with_prev_compares(tmp_path):
         {"words": [{"word": " 그", "start": 1.0, "end": 1.2}]}]})
     r = a.get_result(job.id)
     assert r["changes"]["rows"] == [{"word": "그", "kind": "added", "start": 1.0, "end": 1.2}]
+
+
+def test_preview_url_has_version(tmp_path):
+    """미리보기를 새로 만들면 주소가 바뀐다 — 같은 주소면 재생기가 다시 안 불러옴."""
+    import os
+    a, store, *_ = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    preview = paths.job_dir(Path(job.src)) / "preview.mp4"
+    preview.parent.mkdir(parents=True, exist_ok=True)
+    preview.write_bytes(b"v")
+    os.utime(preview, ns=(1_000_000_000, 1_000_000_000))
+    u1 = a.get_result(job.id)["preview_url"]
+    assert u1 == f"http://127.0.0.1:9999/jobs/{job.id}/preview.mp4?v=1000000000"
+    os.utime(preview, ns=(2_000_000_000, 2_000_000_000))
+    assert a.get_result(job.id)["preview_url"] != u1
+
+
+def test_get_result_silence_summary(tmp_path):
+    """말 없는 구간 슬라이더 설명의 곳·초 — silence/gap 컷만, 겹치면 합쳐서, 되살린 곳은 뺀다."""
+    a, store, *_ = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    job.summary = {"orig_sec": 20.0, "final_sec": 15.0, "cuts": 4, "removed_sec": 5.0}
+    write_out(job, "a.cuts.json", {"cuts": [
+        {"start": 1.0, "end": 2.0, "word": "(무음)", "reason": "silence"},
+        {"start": 1.5, "end": 3.0, "word": "(무음)", "reason": "gap"},
+        {"start": 5.0, "end": 5.5, "word": "(무음)", "reason": "silence + gap"},
+        {"start": 8.0, "end": 8.4, "word": "어", "reason": "filler", "words_idx": [[0, 0]]},
+    ]})
+    s = a.get_result(job.id)["summary"]
+    assert s["silence_cuts"] == 2 and s["silence_sec"] == pytest.approx(2.5)
+    assert s["cuts"] == 4   # 나머지 요약은 그대로
+    job.range_ops.append({"op": "restore", "start": 5.0, "end": 5.5})
+    s = a.get_result(job.id)["summary"]
+    assert s["silence_cuts"] == 1 and s["silence_sec"] == pytest.approx(2.0)
 
 
 def test_get_result_missing_files(tmp_path):

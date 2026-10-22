@@ -7,16 +7,29 @@ const api = () => window.pywebview.api;
 const OPTS = [
   { key: 'filler', label: '망설임 소리', sub: '아·어·음…', choices: [['keep', '유지'], ['remove', '제거']] },
   { key: 'habit', label: '말버릇', sub: '그니까·약간·이제…', choices: [['keep', '유지'], ['some', '일부'], ['all', '모두']] },
-  { key: 'silence', label: '말 없는 구간', choices: [['keep', '유지'], ['remove', '제거']] },
-  { key: 'denoise', label: '배경 잡음', choices: [['keep', '유지'], ['remove', '제거']] },
+  { key: 'silence', label: '말 없는 구간', slider: true, ends: ['안 자름', '최대한 자름'], say: silenceSay },
+  { key: 'denoise', label: '배경 잡음', slider: true, ends: ['끔', '최대 (목소리 먹먹해질 수 있음)'], say: denoiseSay },
 ];
 const ADV = [
   { key: 'loudnorm', label: '음량 맞추기', sub: '유튜브 기준 크기(-14 LUFS)로 맞춤', choices: [['keep', '유지'], ['match', '맞춤']] },
   { key: 'subs', label: '영상 안 자막', sub: 'mp4 안에 켜고 끄는 자막 트랙. SRT 파일은 항상 만듦', choices: [['omit', '빼기'], ['embed', '넣기']] },
   { key: 'quality', label: '화질', sub: '자동: 1080p30 8Mbps · 4K30 약 32Mbps', choices: [['low', '작게'], ['auto', '자동'], ['high', '높게']] },
 ];
-const DEFAULTS = { filler: 'remove', habit: 'some', silence: 'remove', denoise: 'remove', loudnorm: 'match', subs: 'embed', quality: 'auto' };
-const FAST = new Set(['filler', 'habit', 'silence']);
+const DEFAULTS = { filler: 'remove', habit: 'some', silence: 50, denoise: 50, loudnorm: 'match', subs: 'embed', quality: 'auto' };
+const FAST = new Set(['filler', 'habit', 'silence', 'denoise']);
+
+// 슬라이더 설명 한 줄. st: 지금 결과의 말 없는 구간 {곳, 초} (결과가 없으면 null)
+function silenceSay(v, st) {
+  const tail = st ? ` · ${st.n}곳 · −${st.sec}초` : '';
+  if (v <= 0) return '말 없는 구간을 자르지 않습니다';
+  if (v <= 50) return `조용히 말 없는 구간 중 ${(1.0 - 0.7 * v / 50).toFixed(1)}초 이상만 자름${tail}`;
+  if (v < 100) return `조금 시끄러운 말 없는 구간도 자름 (0.3초 이상)${tail}`;
+  return `말 없는 구간은 소리가 있어도 전부 자름${tail}`;
+}
+function denoiseSay(v) {
+  if (v <= 0) return '원래 소리 그대로';
+  return v <= 50 ? '목소리를 살리며 가볍게 지움' : '계속 깔리는 소리·튀는 소리까지 세게 지움';
+}
 const BUSY = new Set(['processing', 'saving']);
 const HAS_RESULT = new Set(['review', 'saved']);
 const ROWS_FIRST = 5;
@@ -183,17 +196,47 @@ function segRow(def, value, disabled, onPick, changed) {
         onclick: () => onPick(def.key, v) }, text))));
 }
 
-// 선택한 영상·옵션·바쁜 상태 등이 바뀔 때만 다시 만든다
+function silenceStats() {
+  const j = selected();
+  const s = j && S.resultFor === j.id && S.result && S.result.summary;
+  if (!s || typeof s.silence_cuts !== 'number') return null;
+  return { n: s.silence_cuts, sec: Math.round(Number(s.silence_sec) || 0) };
+}
+
+// 0~100 슬라이더: 끄는 동안(input)엔 숫자·설명만, 손을 떼면(change) 옵션을 바꾼다
+let sliderShows = [];
+function sliderRow(def, value, disabled, _onPick, changed) {
+  const num = h('span', { class: 'val' });
+  const say = h('div', { class: 'say' });
+  const input = h('input', { type: 'range', min: 0, max: 100, step: 1, value, disabled: disabled || null, 'aria-label': def.label });
+  const show = () => {
+    num.textContent = input.value;
+    const t = def.say(Number(input.value), silenceStats());
+    if (say.textContent !== t) say.textContent = t;
+  };
+  input.addEventListener('input', show);
+  input.addEventListener('change', () => { show(); setOption(def.key, Number(input.value)); });
+  sliderShows.push(show);
+  show();
+  return h('div', { class: 'opt slider' + (disabled ? ' disabled' : '') + (changed ? ' changed' : '') },
+    h('div', { class: 'top' }, h('span', {}, def.label), num),
+    input,
+    h('div', { class: 'ends' }, h('span', {}, def.ends[0]), h('span', {}, def.ends[1])),
+    say);
+}
+
+// 선택한 영상·옵션·바쁜 상태 등이 바뀔 때만 다시 만든다 (슬라이더 설명의 곳·초는 결과가 바뀌면 그 자리에서 고친다)
 let optionsDrawn = null;
 function renderOptions(force) {
   const j = selected();
   const o = S.options || DEFAULTS;
   const disabled = !j || !S.options || BUSY.has(j.status) || j.status === 'missing';
   const key = JSON.stringify([j && j.id, j && j.name, o, disabled, S.changedKey, S.advOpen, S.saveDir]);
-  if (!force && key === optionsDrawn) return;
+  if (!force && key === optionsDrawn) { for (const show of sliderShows) show(); return; }
   optionsDrawn = key;
   $('opt-title').textContent = j ? `${j.name} 옵션` : '';
-  $('options').replaceChildren(...OPTS.map((d) => segRow(d, o[d.key], disabled, setOption, S.changedKey === d.key)));
+  sliderShows = [];
+  $('options').replaceChildren(...OPTS.map((d) => (d.slider ? sliderRow : segRow)(d, o[d.key], disabled, setOption, S.changedKey === d.key)));
   $('adv-arrow').textContent = S.advOpen ? '▾' : '▸';
   $('adv').hidden = !S.advOpen;
   $('adv').replaceChildren(
@@ -357,7 +400,18 @@ const player = {
   },
   attach(r) {
     const v = this.slot();
-    if (this.url !== r.preview_url) { this.url = r.preview_url; v.src = r.preview_url; }
+    if (this.url !== r.preview_url) {
+      // 다시 만든 미리보기(잡음 세기 등)는 듣던 자리에서 이어서 재생한다
+      const keep = this.url ? { t: v.currentTime, play: !v.paused } : null;
+      this.url = r.preview_url; v.src = r.preview_url;
+      if (keep) {
+        v.addEventListener('loadedmetadata', () => {
+          if (this.video !== v || this.url !== r.preview_url) return;
+          if (keep.t > 0) this.move(Math.min(keep.t, this.duration() || keep.t));
+          if (keep.play) v.play().catch(() => {});
+        }, { once: true });
+      }
+    }
     this.ranges = merge(r.cuts || []);
     this.drawHead();
   },

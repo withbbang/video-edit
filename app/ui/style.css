@@ -130,3 +130,14 @@ video { display: block; width: 100%; max-height: 42vh; background: #000; border-
 .stat.back, .legend .back { color: var(--restored); }
 .tl u { position: absolute; top: 0; height: 100%; min-width: 1px; border: 1px dashed var(--restored);
   box-sizing: border-box; text-decoration: none; }
+
+/* 0~100 슬라이더 (말 없는 구간·배경 잡음) */
+.opt.slider { display: block; }
+.opt.slider .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.opt.slider .val { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
+.opt.slider input[type=range] { display: block; width: 100%; margin: 6px 0 2px; accent-color: var(--accent); cursor: pointer; }
+.opt.slider .ends { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 11px; }
+.opt.slider .ends span:last-child { text-align: right; }
+.opt.slider .say { color: var(--muted); font-size: 12px; margin-top: 3px; word-break: keep-all; }
+.opt.slider.disabled input[type=range], .opt.slider.disabled .val { opacity: .5; }
+.opt.slider.disabled input[type=range] { cursor: default; }

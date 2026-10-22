@@ -60,7 +60,7 @@ def test_cut_again(tmp_path):
     a.set_restored(job.id, 3.0, 3.4, True)
     a.set_restored(job.id, 3.02, 3.38, False)
     assert job.restored == []
-    assert a.get_result(job.id)["summary"] == job.summary
+    assert a.get_result(job.id)["summary"] == {**job.summary, "silence_cuts": 2, "silence_sec": 1.5}
 
 
 def test_restore_refused_while_busy_or_unknown(tmp_path):

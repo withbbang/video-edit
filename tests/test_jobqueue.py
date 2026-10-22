@@ -236,6 +236,36 @@ def test_repeated_rejudge_runs_one_followup(tmp_path):
     assert a.status == Status.REVIEW
 
 
+def test_slider_burst_rejudges_once_more(tmp_path):
+    """슬라이더를 빠르게 세 번 움직임 → 판정은 두 번, 후속 실행은 마지막 값으로."""
+    from app.options import analysis_args
+    store, (a,), fx, q, _ = make(tmp_path, ("a",))
+    a.status = Status.REVIEW
+    write_cuts(a, [])
+    fx.gate(a.id, "analyze")
+    seen = []
+    first = fx.gates[(a.id, "analyze")]
+
+    def side(job):
+        seen.append(analysis_args(job.options))
+        write_cuts(job, [])
+        fx.gates.pop((a.id, "analyze"), None)
+    fx.side[(a.id, "analyze")] = side
+    a.options.silence = 60
+    q.rejudge(a.id)
+    assert fx.started[(a.id, "analyze")].wait(WAIT)
+    for level in (70, 80):
+        a.options.silence = level
+        a.options.denoise = level
+        q.rejudge(a.id)
+    first.set()
+    assert q.join(WAIT)
+    assert fx.calls == [(a.id, "analyze")] * 2
+    last = seen[-1]
+    assert last[last.index("--silence-level") + 1] == "80" and last[last.index("--denoise-level") + 1] == "80"
+    assert a.status == Status.REVIEW
+
+
 def test_cancel_waiting_removes(tmp_path):
     store, (a, b), fx, q, _ = make(tmp_path, ("a", "b"))
     fx.gate(a.id, "analyze")
