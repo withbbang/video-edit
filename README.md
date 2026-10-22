@@ -7,10 +7,12 @@
 
 터미널 없이 창에 영상을 끌어다 놓으면 됩니다. 설치 파일은 [Releases](https://github.com/withbbang/video-edit/releases) 에서 받습니다.
 
-| 운영체제 | 파일 |
-| --- | --- |
-| macOS — **Apple Silicon(M1 이후) 전용** (인텔 맥 미지원) | `youtube-edit-<버전>-mac-arm64.dmg` |
-| Windows 10/11 (64비트) | `youtube-edit-<버전>-win-x64-setup.exe` |
+| 운영체제 | 파일 | 크기 |
+| --- | --- | --- |
+| macOS — **Apple Silicon(M1 이후) 전용** (인텔 맥 미지원) | `youtube-edit-<버전>-mac-arm64.dmg` | 약 300MB |
+| Windows 10/11 (64비트) | `youtube-edit-<버전>-win-x64-setup.exe` | 약 270MB |
+
+아직 공개된 정식 버전은 없고 시험 빌드(rc)만 있습니다. 정식 버전이 공개되면 Releases 에 올라갑니다.
 
 ### 맥에서 처음 열 때
 
@@ -33,7 +35,10 @@
 
 처음 켜면 음성 인식 모델(약 2.8GB)을 한 번 내려받습니다 (`모델 내려받는 중`). 인터넷 연결이 필요하고,
 실패하면 `모델 내려받기 실패` 와 `인터넷 연결을 확인해 주시기 바랍니다` 가 뜨니 `다시 시도` 를 누릅니다.
-받은 모델은 데이터 폴더에 남아 다음부터는 필요 없습니다.
+받은 모델은 데이터 폴더에 남아 다음부터는 필요 없습니다. 받다가 끊기면 받은 곳부터 이어 받습니다.
+
+윈도우에서 NVIDIA 그래픽카드가 있으면 GPU 용 라이브러리(약 1.3GB)를 함께 받아 자동으로 GPU 로 처리합니다.
+그래픽카드가 없거나 GPU 준비에 실패하면 알림 없이 CPU 로 처리합니다 (느리지만 결과는 같습니다).
 
 ### 쓰는 법
 
@@ -240,8 +245,12 @@ python -m venv .venv
 ```bash
 .venv/bin/python -m pip install -r requirements-app.txt -r requirements-dev.txt
 .venv/bin/python -m app            # 앱 실행
-.venv/bin/python -m pytest         # 테스트
+.venv/bin/python -m pytest         # 테스트 (실제 모델로 끝까지 도는 e2e 는 기본으로 건너뜀)
+YTEDIT_E2E_MODELS=<모델 받은 데이터 폴더> .venv/bin/python -m pytest tests/test_e2e_app.py   # e2e
 ```
+
+테스트는 CI 에서 윈도우로도 돕니다. 경로는 `as_posix()` 로, 출력은 `\r\n` 을 맞춰 비교하고,
+`sys.platform` 에 따라 갈리는 코드는 테스트에서 플랫폼을 고정합니다. CI 의 pytest 단계엔 ffmpeg 가 없습니다.
 
 윈도우는 `.venv\Scripts\python` 을 씁니다. 구조: `app/`(창·큐·모델·업데이트), `packaging/`(PyInstaller·dmg·Inno Setup),
 `.github/workflows/release.yml`(릴리스), `tests/`.
@@ -253,10 +262,17 @@ python -m venv .venv
 .venv/bin/pyinstaller --noconfirm packaging/youtube-edit.spec
 bash packaging/macos/make_dmg.sh dist/youtube-edit.app dist/youtube-edit.dmg        # 맥
 iscc packaging/windows/installer.iss                                                 # 윈도우 (Inno Setup, CI 참고)
+python packaging/smoke_frozen.py dist/youtube-edit.app/Contents/MacOS/youtube-edit  # 묶은 앱 확인
 ```
+
+묶은 앱의 진입점은 `packaging/launcher.py` 입니다. ffmpeg(맥 Martin Riedl, 윈도우 BtbN 정적 GPL 빌드)는
+`packaging/fetch_ffmpeg.py` 에 URL·sha256 으로 고정돼 있고, 바꾸면 `packaging/THIRD_PARTY.txt` 도 다시 만들어야 합니다
+(CI 가 달라졌는지 확인합니다).
 
 ### 릴리스
 
 `app/__init__.py` 의 `__version__` 을 올린 뒤 `v<버전>` 태그를 push 하면 CI 가 맥·윈도우 파일을 빌드해 **초안(draft)** 릴리스를 만듭니다
 (`v0.1.0-rc1` 처럼 접미사를 붙이면 prerelease). GitHub 에서 본문(바뀐 점)과 파일을 확인하고 직접 공개하면 그때부터 앱의 업데이트 확인에 잡힙니다.
 같은 태그로 다시 돌릴 땐 먼저 기존 초안을 지웁니다. 본문 틀은 `packaging/release_notes.md`.
+CI 결과는 `gh run list`, 실패 원인은 `gh run view <id> --log-failed` 로 봅니다. 초안 릴리스 주소는 `untagged-…` 로 보이니
+`gh release view <태그>` 로 찾습니다.
