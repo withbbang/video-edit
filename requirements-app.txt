@@ -1,0 +1,7 @@
+# 데스크톱 앱 (app/) 실행·묶기용. 파이프라인 의존성은 requirements.txt
+-r requirements.txt
+pywebview>=5.3,<6
+pyinstaller>=6.10
+# app/manifest.json 의 cuda_win(cuBLAS 12 · cuDNN 9) 과 맞춘 버전. 올리면 manifest 의 CUDA 휠도 같이 확인한다.
+# (CLI 용 requirements.txt 는 묶지 않는다)
+ctranslate2==4.8.3

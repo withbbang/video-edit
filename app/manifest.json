@@ -1,0 +1,24 @@
+{
+  "models": [
+    {"key": "whisper", "repo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+     "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf", "bytes": 1621665983,
+     "files": [
+       {"name": "config.json", "size": 2263, "sha256": "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e"},
+       {"name": "model.bin", "size": 1617884929, "sha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"},
+       {"name": "preprocessor_config.json", "size": 340, "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"},
+       {"name": "tokenizer.json", "size": 2710337, "sha256": "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd"},
+       {"name": "vocabulary.json", "size": 1068114, "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"}]},
+    {"key": "ctc", "repo": "kresnik/wav2vec2-large-xlsr-korean",
+     "revision": "629c9a3501c10ba128bf3fa1eebb12af3be03f61", "bytes": 1266768803,
+     "files": [
+       {"name": "config.json", "size": 2313, "sha256": "51dc5f213d247606740afc690711e9880349d2e2ff29c922c657e2116b660ffa"},
+       {"name": "model.safetensors", "size": 1266747952, "sha256": "29be111b9247cfc2c72f125c1b1f50021ecfded8f0d947bbfb7e31dc7f0ddd07"},
+       {"name": "preprocessor_config.json", "size": 214, "sha256": "60ca5a31e13f69ee2fbf147504c8676db5f6398fd7a6b12294341dff838edfcf"},
+       {"name": "tokenizer_config.json", "size": 161, "sha256": "739a1c535c79132847eba6488d1160638450012037d9114ea2f9b01bcd64cbb1"},
+       {"name": "vocab.json", "size": 18163, "sha256": "4db1411162e9603b3b555a7dbc08807256b885ea0beb60ab110b283c338cfc85"}]}
+  ],
+  "cuda_win": [
+    {"name": "nvidia-cublas-cu12", "version": "12.8.4.1", "url": "https://files.pythonhosted.org/packages/70/61/7d7b3c70186fb651d0fbd35b01dbfc8e755f69fd58f817f3d0f642df20c3/nvidia_cublas_cu12-12.8.4.1-py3-none-win_amd64.whl", "sha256": "47e9b82132fa8d2b4944e708049229601448aaad7e6f296f630f2d1a32de35af", "size": 567544208},
+    {"name": "nvidia-cudnn-cu12", "version": "9.10.2.21", "url": "https://files.pythonhosted.org/packages/3d/90/0bd6e586701b3a890fd38aa71c387dab4883d619d6e5ad912ccbd05bfd67/nvidia_cudnn_cu12-9.10.2.21-py3-none-win_amd64.whl", "sha256": "c6288de7d63e6cf62988f0923f96dc339cea362decb1bf5b3141883392a7d65e", "size": 692992268}
+  ]
+}

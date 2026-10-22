@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import wave
 from dataclasses import dataclass, asdict
@@ -56,8 +57,47 @@ PUNCT_RE = re.compile(r"[\s\.\,\!\?\~\…\·\'\"\-\…\(\)\[\]「」『』、。
 # ---------------------------------------------------------------------------
 # 유틸
 # ---------------------------------------------------------------------------
+PROGRESS = False  # --progress-json: 데스크톱 앱이 읽는 @progress 줄을 낼지
+
+
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def progress(stage: str, frac: float) -> None:
+    """앱이 진행 막대를 그리도록 stdout 에 한 줄씩 낸다. stage: audio|transcribe|align|judge|preview|render"""
+    if PROGRESS:
+        print("@progress " + json.dumps({"stage": stage, "frac": round(min(1.0, max(0.0, frac)), 4)}), flush=True)
+
+
+def ffmpeg_with_progress(cmd: list, total_sec: float, stage: str) -> None:
+    """ffmpeg 를 돌리며 out_time_us / total_sec 을 진행률로 낸다. 실패하면 CalledProcessError.
+    --progress-json 이 꺼져 있으면 예전처럼 ffmpeg 출력을 터미널에 그대로 둔다."""
+    cmd = [str(c) for c in cmd]
+    if not PROGRESS:
+        subprocess.run(cmd, check=True)
+        return
+    # -progress 는 전역 옵션이라 맨 앞에. -stats 는 사람이 보는 줄이라 뺀다
+    cmd = [cmd[0], "-progress", "pipe:1", "-nostats", *[c for c in cmd[1:] if c != "-stats"]]
+    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as err:
+        # stderr 를 파이프로 받으면 stdout 을 읽는 동안 가득 차 멈출 수 있다 → 임시 파일로
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True)
+        last = -1.0
+        for line in p.stdout:
+            k, _, v = line.strip().partition("=")
+            if k == "out_time_us" and v.lstrip("-").isdigit() and total_sec > 0:
+                frac = min(1.0, max(0.0, int(v) / 1e6 / total_sec))
+                if frac - last >= 0.01:
+                    progress(stage, frac)
+                    last = frac
+        code = p.wait()
+        if code != 0:
+            err.seek(0)
+            log(f"명령 실패 (exit {code}): {Path(cmd[0]).name}")
+            for l in err.read().strip().splitlines()[-15:]:
+                log("  " + l)
+            raise subprocess.CalledProcessError(code, cmd)
+    progress(stage, 1.0)
 
 
 def run(cmd: list, cwd: Path | None = None, quiet: bool = False) -> subprocess.CompletedProcess:
@@ -235,12 +275,8 @@ def audio_filter_chain(denoise: str, loudnorm: bool, model_rel: str, offset: flo
     return ",".join(chain)
 
 
-def prepare_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: bool,
-                  force: bool) -> tuple[Path, Path, dict]:
-    clean = work / "clean.wav"   # 48k, 스테레오 이하 — 최종 영상에 들어갈 오디오
-    asr = work / "asr.wav"       # 16k mono — 전사/무음 분석용
-    meta = work / "audio.meta.json"
-
+def audio_settings(info: dict, denoise: str, loudnorm: bool) -> tuple[str, list]:
+    """(ffmpeg 오디오 필터 체인, 다운믹스 인자). 분석용·렌더용 오디오가 같은 규칙을 쓴다."""
     if denoise == "rnnoise" and not (MODELS_DIR / "sh.rnnn").exists():
         log("경고: models/sh.rnnn 이 없어 afftdn 으로 대체합니다")
         denoise = "afftdn"
@@ -253,16 +289,33 @@ def prepare_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: boo
     af = audio_filter_chain(denoise, loudnorm, model_rel, offset)
     # 3채널 이상 WAV 는 WAVE_FORMAT_EXTENSIBLE 헤더라 파이썬 wave 모듈이 못 읽는다 → 스테레오로 다운믹스
     ac = ["-ac", "2"] if info["channels"] > 2 else []
+    return af, ac
+
+
+def cached_meta(meta: Path, key: dict, outputs: list[Path], force: bool) -> bool:
+    if force or not meta.exists() or not all(p.exists() for p in outputs):
+        return False
+    try:
+        return json.loads(meta.read_text(encoding="utf-8")) == key
+    except json.JSONDecodeError:
+        return False
+
+
+def prepare_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: bool,
+                  force: bool) -> tuple[Path, Path, dict]:
+    clean = work / "clean.wav"   # 48k, 스테레오 이하 — 최종 영상에 들어갈 오디오
+    asr = work / "asr.wav"       # 16k mono — 전사/무음 분석용
+    meta = work / "audio.meta.json"
+    af, ac = audio_settings(info, denoise, loudnorm)
+    offset = info["audio_offset"] if info["has_video"] else 0.0
     # 필터 체인 문자열 자체를 키에 넣어 처리 방식이 바뀌면 캐시도 자동으로 무효가 되게 한다
     key = {"v": CACHE_VERSION, "src": source_sig(src), "filter": af, "ac": ac}
 
-    if clean.exists() and asr.exists() and meta.exists() and not force:
-        try:
-            if json.loads(meta.read_text(encoding="utf-8")) == key:
-                log("오디오 정리 결과 재사용 (work/ 에 이미 있음)")
-                return clean, asr, key
-        except json.JSONDecodeError:
-            pass
+    if cached_meta(meta, key, [clean, asr], force):
+        log("오디오 정리 결과 재사용 (work/ 에 이미 있음)")
+        progress("audio", 1.0)
+        return clean, asr, key
+    if meta.exists() and not force:
         log("원본이나 오디오 설정이 바뀌어 오디오를 다시 정리합니다")
 
     if abs(offset) > 0.001:
@@ -276,7 +329,26 @@ def prepare_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: boo
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", clean,
          "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", asr], cwd=ROOT)
     meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
+    progress("audio", 1.0)
     return clean, asr, key
+
+
+def prepare_render_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: bool,
+                         force: bool) -> Path:
+    """렌더에만 쓰는 오디오. 분석(전사·무음)은 기본 설정 오디오로 해서 캐시를 살리고,
+    사용자가 고른 배경 잡음/음량 설정은 여기서만 적용한다. 캐시 방식은 prepare_audio 와 같다."""
+    out, meta = work / "render.wav", work / "render.meta.json"
+    af, ac = audio_settings(info, denoise, loudnorm)
+    key = {"v": CACHE_VERSION, "src": source_sig(src), "filter": af, "ac": ac}
+    if cached_meta(meta, key, [out], force):
+        log("렌더용 오디오 재사용 (work/render.wav)")
+        return out
+    log(f"렌더용 오디오 정리: {af}")
+    meta.unlink(missing_ok=True)
+    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src,
+         "-vn", "-af", af, "-ar", "48000", *ac, "-c:a", "pcm_s16le", out], cwd=ROOT)
+    meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
+    return out
 
 
 def wav_duration(path: Path) -> float:
@@ -306,13 +378,12 @@ WIN_CRASH_CODES = {3221225477, -1073741819,   # 0xC0000005 접근 위반
                    3221226505, -1073740791}   # 0xC0000409 (CUDA/cuDNN 로드 실패 때 흔함)
 
 
-def probe_whisper_windows(model_name: str, device: str, compute_type: str, threads: int) -> None:
+def probe_whisper_windows(model_name: str, device: str, compute_type: str, threads: int, marker: Path) -> None:
     """일부 Windows PC 에선 ctranslate2 4.5+ 가 모델 로드·첫 전사에서 파이썬 오류 없이 프로세스째 죽는다.
     본 프로세스에서 죽으면 사용자는 원인을 알 수 없으니, 처음 한 번 별도 프로세스로 로드+짧은 전사를 해 보고
     죽으면 고치는 방법을 알려 준다. 성공하면 work/ 에 기록해 ctranslate2 버전·설정이 같으면 다시 하지 않는다."""
     from importlib.metadata import version
     key = {"ctranslate2": version("ctranslate2"), "model": model_name, "device": device, "compute_type": compute_type}
-    marker = ROOT / "work" / ".whisper_probe.json"
     try:
         if json.loads(marker.read_text(encoding="utf-8")) == key:
             return
@@ -344,33 +415,45 @@ def probe_whisper_windows(model_name: str, device: str, compute_type: str, threa
                  "  winget install Microsoft.VCRedist.2015+.x64")
 
 
-def load_whisper(model_name: str, device: str, compute_type: str):
+def use_cuda_dir(is_windows: bool = os.name == "nt") -> None:
+    """앱이 받아 둔 CUDA DLL 폴더(환경변수 YTEDIT_CUDA_DIR)를 윈도우 DLL 검색 경로에 더한다.
+    PATH 에도 앞에 붙여 probe 하위 프로세스가 같은 DLL 을 찾게 한다. 변수가 없으면 아무것도 안 한다 (CLI)."""
+    d = os.environ.get("YTEDIT_CUDA_DIR")
+    if not (is_windows and d and os.path.isdir(d)):
+        return
+    os.add_dll_directory(d)
+    os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+
+
+def load_whisper(model_name: str, device: str, compute_type: str, probe_marker: Path):
+    use_cuda_dir()
     try:
         from faster_whisper import WhisperModel
     except ImportError:
         sys.exit("오류: faster-whisper 가 설치되지 않았습니다. ./setup.sh 를 먼저 실행하세요.")
     threads = perf_cores()
     if os.name == "nt":
-        probe_whisper_windows(model_name, device, compute_type, threads)
+        probe_whisper_windows(model_name, device, compute_type, threads, probe_marker)
     log(f"Whisper 모델 로드: {model_name} (device={device}, compute={compute_type}, threads={threads})")
     return WhisperModel(model_name, device=device, compute_type=compute_type, cpu_threads=threads)
 
 
 def transcribe(asr_wav: Path, out_json: Path, audio_key: dict, model_name: str, device: str,
-               compute_type: str, prompt: str, force: bool) -> dict:
+               compute_type: str, prompt: str, force: bool, probe_marker: Path) -> dict:
     key = {"audio": audio_key, "model": model_name, "compute_type": compute_type, "hotwords": prompt}
     if out_json.exists() and not force:
         try:
             cached = json.loads(out_json.read_text(encoding="utf-8"))
             if cached.get("cache_key") == key:
                 log(f"전사 결과 재사용: {out_json.name}")
+                progress("transcribe", 1.0)
                 return cached
         except json.JSONDecodeError:
             pass
         log("원본·오디오·모델·프롬프트 중 바뀐 것이 있어 전사를 다시 합니다")
 
     log("  처음 한 번은 모델 다운로드(1~3GB)로 시간이 걸립니다")
-    model = load_whisper(model_name, device, compute_type)
+    model = load_whisper(model_name, device, compute_type, probe_marker)
 
     log("전사 시작 (한국어, 단어 타임스탬프, 필러 보존 프롬프트)")
     segments_iter, info = model.transcribe(str(asr_wav), **whisper_options(prompt))
@@ -381,12 +464,15 @@ def transcribe(asr_wav: Path, out_json: Path, audio_key: dict, model_name: str, 
                   "prob": float(w.probability)} for w in (seg.words or [])]
         segments.append({"id": i, "start": float(seg.start), "end": float(seg.end),
                          "text": seg.text.strip(), "words": words})
+        if info.duration:
+            progress("transcribe", seg.end / info.duration)
         if i % 20 == 0:
             log(f"  … {fmt_clock(seg.end)} 까지 전사 ({time.time()-t0:.0f}s)")
     result = {"language": info.language, "duration": float(info.duration), "model": model_name,
               "cache_key": key, "segments": segments}
     out_json.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     log(f"전사 완료: {len(segments)} 세그먼트, {sum(len(s['words']) for s in segments)} 단어")
+    progress("transcribe", 1.0)
     return result
 
 
@@ -556,13 +642,13 @@ CTC_MODEL = "kresnik/wav2vec2-large-xlsr-korean"  # 한글 음절 단위 CTC 모
 class CtcAligner:
     """wav2vec2 CTC 강제 정렬. 텍스트를 알 때 글자마다 소리가 난 프레임을 찾는다.
     긴 구간에선 이 모델도 헤매므로 필러 주변 몇 초짜리 창에만 쓴다."""
-    def __init__(self):
+    def __init__(self, model_id: str):
         import torch
         from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
-        log(f"정렬 모델 로드: {CTC_MODEL} (처음 한 번은 약 1.2GB 다운로드)")
+        log(f"정렬 모델 로드: {model_id} (처음 한 번은 약 1.2GB 다운로드)")
         self.torch = torch
-        self.proc = Wav2Vec2Processor.from_pretrained(CTC_MODEL)
-        self.model = Wav2Vec2ForCTC.from_pretrained(CTC_MODEL).eval()
+        self.proc = Wav2Vec2Processor.from_pretrained(model_id)
+        self.model = Wav2Vec2ForCTC.from_pretrained(model_id).eval()
         self.vocab = self.proc.tokenizer.get_vocab()
         self.blank = self.proc.tokenizer.pad_token_id
 
@@ -640,7 +726,8 @@ def filler_needs_ctc(k: int, words: list, cfg: dict, quiet, hop: float, suspects
     return None
 
 
-def ctc_fix_fillers(tr: dict, asr_wav: Path, rms: list[float], hop: float, cfg: dict) -> tuple[int, list[dict]]:
+def ctc_fix_fillers(tr: dict, asr_wav: Path, rms: list[float], hop: float, cfg: dict,
+                    ctc_model: str = CTC_MODEL) -> tuple[int, list[dict]]:
     """시간이 의심스러운 필러만 주변 몇 초를 CTC 로 정렬해 필러와 이웃 단어의 시간을 바로잡는다 (tr 을 직접 고침).
     정렬이 그럴듯할 때만 쓴다: 모든 글자가 소리 나는 곳에 있고, 필러가 Whisper 위치에서 0.3초 안에 있어야 한다."""
     import numpy as np
@@ -658,7 +745,7 @@ def ctc_fix_fillers(tr: dict, asr_wav: Path, rms: list[float], hop: float, cfg: 
     if not todo:
         return 0, []
     try:
-        aligner = CtcAligner()
+        aligner = CtcAligner(ctc_model)
     except ImportError:
         log("경고: torch/transformers 가 없어 필러 시간 보정을 건너뜁니다 (./setup.sh 로 설치). 해당 필러는 review.md 참고")
         return 0, [{"start": words[k][2]["start"], "end": words[k][2]["end"], "word": words[k][2]["word"].strip(),
@@ -1034,9 +1121,9 @@ def sum_tree(terms: list[str]) -> str:
     return f"({sum_tree(terms[:mid])}+{sum_tree(terms[mid:])})"
 
 
-def auto_bitrate(info: dict) -> str:
-    # 유튜브 권장치 기준: 1080p30 8M, 1080p60 12M, 4K30 ≈32M, 4K60 ≈48M
-    bps = 8e6 * (info["width"] * info["height"]) / (1920 * 1080)
+def auto_bitrate(info: dict, scale: float = 1.0) -> str:
+    # 유튜브 권장치 기준: 1080p30 8M, 1080p60 12M, 4K30 ≈32M, 4K60 ≈48M. scale: 앱의 화질 단계(--vbitrate-scale)
+    bps = 8e6 * (info["width"] * info["height"]) / (1920 * 1080) * scale
     if float(info["fps"]) > 31:
         bps *= 1.5
     if info["high_bit"]:
@@ -1045,11 +1132,14 @@ def auto_bitrate(info: dict) -> str:
 
 
 def video_encoder_args(info: dict, hw: bool, encoders: str, crf: int, vbitrate: str,
-                       preset: str) -> tuple[str, list]:
+                       preset: str, vbitrate_scale: float = 1.0) -> tuple[str, list]:
     def has(name: str) -> bool:
         return re.search(rf"\s{name}\s", encoders) is not None
 
-    bitrate = auto_bitrate(info) if vbitrate == "auto" else vbitrate
+    bitrate = auto_bitrate(info, vbitrate_scale) if vbitrate == "auto" else vbitrate
+    if vbitrate == "auto" and vbitrate_scale > 0 and vbitrate_scale != 1.0:
+        # 소프트웨어 인코더는 비트레이트 대신 CRF 를 쓴다 → 배율을 CRF 차이로 (CRF 6 ≈ 비트레이트 2배)
+        crf -= round(6 * math.log2(vbitrate_scale))
     color = []
     for opt, key in (("-color_primaries", "color_primaries"), ("-color_trc", "color_transfer"),
                      ("-colorspace", "color_space")):
@@ -1101,7 +1191,64 @@ def render_video(src: Path, cut_wav: Path, srt: Path | None, out_mp4: Path,
     # -shortest 는 마지막 프레임을 떨어뜨리므로 쓰지 않는다 (오디오/영상 길이는 이미 프레임 격자로 맞춤)
     cmd += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_mp4]
     log("렌더링 시작 (영상 길이에 따라 몇 분 걸립니다)")
-    subprocess.run([str(c) for c in cmd], check=True)
+    ffmpeg_with_progress(cmd, sum(ef - sf for sf, ef in keeps) / f, "render")
+
+
+def make_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out: Path, work: Path,
+                 hw: bool, force: bool) -> None:
+    """앱 플레이어용 미리보기 사본. 컷을 적용하지 않은 원본 타임라인 그대로라 앱이 컷 구간을 직접 건너뛴다.
+    원본·clean.wav 가 같으면 다시 만들지 않는다 (옵션을 바꿔 다시 판정할 때 몇 초 안에 끝나야 함)."""
+    meta = work / "preview.meta.json"
+    key = {"v": 1, "src": source_sig(src), "audio": audio_key, "out": str(out)}
+    if cached_meta(meta, key, [out], force):
+        log(f"미리보기 사본 재사용: {out}")
+        progress("preview", 1.0)
+        return
+    out.parent.mkdir(parents=True, exist_ok=True)
+    meta.unlink(missing_ok=True)
+    tmp = out.with_name(out.stem + ".part" + out.suffix)  # 중간에 끊긴 파일이 완성본으로 보이지 않게
+    base = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    audio = ["-c:a", "aac", "-b:a", "128k", "-map_chapters", "-1", "-movflags", "+faststart"]
+    log(f"미리보기 사본 만들기: {out}")
+    if not info["has_video"]:
+        ffmpeg_with_progress([*base, "-i", clean_wav, "-map", "0:a", *audio, tmp], info["duration"], "preview")
+    else:
+        # 긴 변 1280 이하, 짝수 크기. 회전 메타데이터는 ffmpeg 가 먼저 적용하므로 식으로 계산한다
+        vf = ("setpts=PTS-STARTPTS,"
+              "scale=w='if(gte(iw,ih),trunc(min(1280,iw)/2)*2,-2)':h='if(gte(iw,ih),-2,trunc(min(1280,ih)/2)*2)'")
+        encoders = run(["ffmpeg", "-hide_banner", "-encoders"], quiet=True).stdout
+        choices = []
+        if hw and re.search(r"\sh264_videotoolbox\s", encoders):
+            choices.append(["-c:v", "h264_videotoolbox", "-b:v", "3M", "-allow_sw", "1"])
+        choices.append(["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"])
+        for i, venc in enumerate(choices):
+            cmd = [*base, "-i", src, "-i", clean_wav, "-map", "0:v:0", "-map", "1:a",
+                   "-vf", vf, *venc, "-pix_fmt", "yuv420p", *audio, tmp]
+            try:
+                ffmpeg_with_progress(cmd, info["duration"], "preview")
+                break
+            except subprocess.CalledProcessError:
+                if i == len(choices) - 1:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                log("미리보기 하드웨어 인코딩 실패 → libx264 로 다시 만듭니다")
+    os.replace(tmp, out)
+    meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
+
+
+def try_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out: Path, work: Path,
+                hw: bool, force: bool) -> bool:
+    """--preview 용. 미리보기는 앱 재생기용 덤이라, 못 만들어도 컷 리스트·전사는 쓸 수 있으니 분석을 실패로
+    만들지 않는다. 실패하면 (옛 것과 섞이지 않게) 미리보기 파일을 지우고 False."""
+    try:
+        make_preview(src, clean_wav, audio_key, info, out, work, hw, force)
+        return True
+    except (subprocess.CalledProcessError, OSError) as e:
+        log(f"미리보기를 만들지 못했습니다 (분석 결과는 그대로 씀): {e}")
+        for f in (out, out.with_name(out.stem + ".part" + out.suffix)):
+            f.unlink(missing_ok=True)
+        progress("preview", 1.0)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -1122,6 +1269,15 @@ def write_review(cuts: list[Cut], skipped: list[dict], path: Path) -> None:
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
+def render_audio_note(args: argparse.Namespace) -> str:
+    d = getattr(args, "render_denoise", "same")
+    l = getattr(args, "render_loudnorm", "same")
+    if d == "same" and l == "same":
+        return ""
+    loud = (not args.no_loudnorm) if l == "same" else l == "on"
+    return f" (결과 영상 오디오: 노이즈 제거 {args.denoise if d == 'same' else d}, 라우드니스 {'켬' if loud else '끔'})"
+
+
 def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: list[dict],
                  final_dur: float, modes: dict, args: argparse.Namespace, encoder: str,
                  elapsed: float) -> None:
@@ -1133,7 +1289,8 @@ def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: li
     out = [f"# {src.name} 처리 리포트", "",
            f"- 원본 길이: {fmt_clock(info['duration'])} → 결과: {fmt_clock(final_dur)} "
            f"(-{removed:.1f}s, {len(cuts)}곳 컷)",
-           f"- 노이즈 제거: {args.denoise}, 라우드니스 정규화: {'켬' if not args.no_loudnorm else '끔'}",
+           f"- 노이즈 제거: {args.denoise}, 라우드니스 정규화: {'켬' if not args.no_loudnorm else '끔'}"
+           + render_audio_note(args),
            f"- 전사 모델: {args.model}, 아/어/음 컷: {modes['filler']}, 습관어 컷: {modes['habit']}, "
            f"무음 컷: {modes['silence']}, 인코더: {encoder}",
            f"- 무음이 포함된 컷: {n_silence}곳",
@@ -1172,7 +1329,7 @@ def load_cut_list(path: Path, tr: dict, fps: Fraction,
     return merge_cuts(cuts, fps, 0), data.get("skipped", []), modes
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="유튜브 영상 정리: 노이즈 제거 → 필러 컷 → SRT")
     ap.add_argument("input", type=Path)
     ap.add_argument("--out", type=Path, default=ROOT / "output")
@@ -1200,7 +1357,27 @@ def main() -> None:
                     help="--hw on 일 때 비트레이트 (기본 auto: 해상도·프레임 수에 맞춤, 예: 20M)")
     ap.add_argument("--preset", default="medium", help="--hw off 일 때 인코딩 속도")
     ap.add_argument("--force", action="store_true", help="work/ 캐시 무시하고 전부 다시")
-    args = ap.parse_args()
+    ap.add_argument("--work-root", type=Path, default=ROOT / "work", help="작업 캐시 폴더 (기본 work/)")
+    ap.add_argument("--media-out", type=Path, default=None,
+                    help="_clean.mp4/.m4a 와 _clean.srt 를 둘 폴더 (기본 --out). 나머지 산출물은 --out")
+    ap.add_argument("--ctc-model", default=CTC_MODEL, help="필러 시간 보정용 정렬 모델 (허브 ID 또는 로컬 폴더)")
+    ap.add_argument("--progress-json", action="store_true",
+                    help='stdout 에 @progress {"stage": …, "frac": 0~1} 줄을 함께 냄 (데스크톱 앱용)')
+    ap.add_argument("--render-denoise", choices=["same", "rnnoise", "afftdn", "none"], default="same",
+                    help="결과 영상 오디오의 노이즈 제거 (기본 same: --denoise 와 같음). 분석은 --denoise 오디오로")
+    ap.add_argument("--render-loudnorm", choices=["same", "on", "off"], default="same",
+                    help="결과 영상 오디오의 라우드니스 정규화 (기본 same: --no-loudnorm 를 따름)")
+    ap.add_argument("--preview", type=Path, default=None,
+                    help="판정 뒤 컷 적용 전 원본 타임라인의 미리보기 사본(긴 변 1280, H.264)을 이 경로에 만듦")
+    ap.add_argument("--vbitrate-scale", type=float, default=1.0,
+                    help="--vbitrate auto 일 때 자동 비트레이트에 곱할 배율 (기본 1.0)")
+    return ap
+
+
+def main() -> None:
+    global PROGRESS
+    args = build_parser().parse_args()
+    PROGRESS = args.progress_json
     if args.review and args.apply_cuts:
         sys.exit("오류: --review 와 --apply-cuts 는 함께 쓸 수 없습니다 (--apply-cuts 는 바로 렌더합니다)")
 
@@ -1212,7 +1389,7 @@ def main() -> None:
 
     stem = src.stem
     out_dir = args.out.resolve(); out_dir.mkdir(parents=True, exist_ok=True)
-    work = ROOT / "work" / stem; work.mkdir(parents=True, exist_ok=True)
+    work = args.work_root.resolve() / stem; work.mkdir(parents=True, exist_ok=True)
     with RunLock(work / "run.lock"):
         process(args, src, stem, out_dir, work, t_start)
 
@@ -1236,7 +1413,7 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     # 2) 전사
     tr_path = out_dir / f"{stem}.transcript.json"
     tr = transcribe(asr_wav, tr_path, audio_key, args.model, args.device, args.compute_type,
-                    cfg.get("prompt", ""), args.force)
+                    cfg.get("prompt", ""), args.force, args.work_root / ".whisper_probe.json")
     # 필러 시간 보정은 사전(단어 목록)에 따라 대상이 달라진다 → 사전이 바뀌면 원래 시간으로 되돌려 다시 한다
     align_key = {"v": ALIGN_VERSION, "words": sorted(cfg["_always"] | cfg["_habit"] | cfg["_pause_after"]),
                  "never": sorted(cfg["_never"]), "silence": [cfg.get("silence_threshold_db", -40),
@@ -1247,11 +1424,12 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
             if "whisper" in w:
                 w["start"], w["end"] = w.pop("whisper")
         rms, hop = load_rms(asr_wav)
-        n, align_failed = ctc_fix_fillers(tr, asr_wav, rms, hop, cfg)
+        n, align_failed = ctc_fix_fillers(tr, asr_wav, rms, hop, cfg, args.ctc_model)
         if n or align_failed:
             log(f"필러 시간 보정: {n}곳 (실패 {len(align_failed)}곳)")
         tr["align"], tr["align_failed"] = align_key, align_failed
         tr_path.write_text(json.dumps(tr, ensure_ascii=False, indent=1), encoding="utf-8")
+    progress("align", 1.0)
 
     # 3) 컷 리스트
     cuts_path = out_dir / f"{stem}.cuts.json"
@@ -1295,17 +1473,21 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         removed = sum(c.end - c.start for c in cuts)
         log(f"필러 {n_fillers}개 + 무음 {len(raw_cuts) - n_fillers}곳 → 병합 후 {len(cuts)}곳, "
             f"총 {removed:.1f}s 제거 예정 (건너뜀 {len(skipped)}건)")
-        if args.review:
-            log(f"--review: 검토표 {out_dir / (stem + '.review.md')} 를 확인한 뒤 "
-                f"--apply-cuts {cuts_path} 로 렌더하세요")
-            return
+    progress("judge", 1.0)
+    if args.preview:
+        try_preview(src, clean_wav, audio_key, info, args.preview.resolve(), work, args.hw == "on", args.force)
+    if args.review:
+        log(f"--review: 검토표 {out_dir / (stem + '.review.md')} 를 확인한 뒤 "
+            f"--apply-cuts {cuts_path} 로 렌더하세요")
+        return
 
     keeps = keep_segments(cuts, total_frames)
     if not keeps:
         sys.exit("오류: 남길 구간이 없습니다 (전부 컷 대상). --silence off 등으로 다시 실행해 보세요.")
 
     # 4) SRT — 영상과 같은 이름이어야 윈도우 기본 플레이어 등이 자동으로 불러온다
-    out_media = out_dir / (f"{stem}_clean.mp4" if info["has_video"] else f"{stem}_clean.m4a")
+    media_dir = (args.media_out or out_dir).resolve(); media_dir.mkdir(parents=True, exist_ok=True)
+    out_media = media_dir / (f"{stem}_clean.mp4" if info["has_video"] else f"{stem}_clean.m4a")
     final_dur = sum(ef - sf for sf, ef in keeps) / float(fps)
     srt_path = out_media.with_suffix(".srt")
     srt_text = build_srt(tr, TimeRemap(cuts), final_dur, cfg["_always"], cfg["_single_only"])
@@ -1314,15 +1496,20 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         log("인식된 말소리가 없어 자막이 비어 있습니다 (자막 트랙은 넣지 않음)")
 
     # 5) 렌더
+    render_wav = clean_wav
+    r_denoise = args.denoise if args.render_denoise == "same" else args.render_denoise
+    r_loud = (not args.no_loudnorm) if args.render_loudnorm == "same" else args.render_loudnorm == "on"
+    if (r_denoise, r_loud) != (args.denoise, not args.no_loudnorm):
+        render_wav = prepare_render_audio(src, work, info, r_denoise, r_loud, args.force)
     cut_wav = work / "cut.wav"
-    n_samples, sr = cut_audio(clean_wav, cut_wav, keeps, fps)
+    n_samples, sr = cut_audio(render_wav, cut_wav, keeps, fps)
     final_dur = n_samples / sr
     encoder = "aac"
     if info["has_video"]:
         embed = srt_path if (args.embed_subs == "on" and srt_text) else None
         encoders = run(["ffmpeg", "-hide_banner", "-encoders"], quiet=True).stdout
         encoder, enc_args = video_encoder_args(info, args.hw == "on", encoders, args.crf,
-                                               args.vbitrate, args.preset)
+                                               args.vbitrate, args.preset, args.vbitrate_scale)
         try:
             render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args)
         except subprocess.CalledProcessError:
@@ -1330,13 +1517,17 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
                 raise
             log(f"{encoder} 인코딩 실패 → 소프트웨어 인코더로 다시 렌더합니다")
             encoder, enc_args = video_encoder_args(info, False, encoders, args.crf,
-                                                   args.vbitrate, args.preset)
+                                                   args.vbitrate, args.preset, args.vbitrate_scale)
             render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args)
         if embed:
             log("자막 트랙을 영상에 넣음 (번인 아님, 플레이어에서 켜고 끄기)")
     else:
-        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", cut_wav,
-             "-c:a", "aac", "-b:a", "192k", out_media])
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", cut_wav,
+               "-c:a", "aac", "-b:a", "192k", out_media]
+        if PROGRESS:
+            ffmpeg_with_progress(cmd, final_dur, "render")
+        else:
+            run(cmd)
 
     write_report(out_dir / f"{stem}.report.md", src, info, cuts, skipped, final_dur, modes, args,
                  encoder, time.time() - t_start)
