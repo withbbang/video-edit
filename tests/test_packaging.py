@@ -99,3 +99,27 @@ def test_fetch_success_moves_into_dest(monkeypatch, tmp_path):
     files = ff.fetch("win", dest, tmp_path / "cache")
     assert sorted(p.name for p in dest.iterdir()) == ["ffmpeg.exe", "ffprobe.exe"]
     assert all(f.parent == dest for f in files)
+
+
+def test_third_party_lists_gpl_sources():
+    text = (ROOT / "packaging" / "THIRD_PARTY.txt").read_text(encoding="utf-8")
+    for s in ff.GPL_SOURCES:
+        assert s["name"] in text and s["sha256"] in text and s["url"] in text
+    assert ff.WIN_X265_PENDING in text  # 윈도우 x265 소스를 못 찾은 사실을 숨기지 않는다
+
+
+def test_fetch_sources_copies_with_release_names(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_download(url, sha256, cache):
+        calls.append((url, sha256))
+        p = cache / f"{sha256[:16]}-x"
+        cache.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(url.encode())
+        return p
+
+    monkeypatch.setattr(ff, "download", fake_download)
+    files = ff.fetch_sources(tmp_path / "out", tmp_path / "cache")
+    assert [f.name for f in files] == [s["name"] for s in ff.GPL_SOURCES]
+    assert calls == [(s["url"], s["sha256"]) for s in ff.GPL_SOURCES]
+    assert files[0].read_bytes() == ff.GPL_SOURCES[0]["url"].encode()

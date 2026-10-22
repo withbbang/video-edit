@@ -2,6 +2,7 @@
 
     python packaging/fetch_ffmpeg.py --platform mac --dest packaging/bin
     python packaging/fetch_ffmpeg.py --platform win --dest packaging/bin
+    python packaging/fetch_ffmpeg.py --sources dist/sources     # GPL 대응 소스 아카이브 (릴리스에 첨부)
 
 - URL 과 sha256 은 아래 SOURCES 에 고정한다. 해시가 다르면 실패.
 - 받은 실행 파일을 직접 돌려 `-filters` 에 arnndn, `-encoders` 에 필요한 인코더가 있는지 본다 (없으면 실패).
@@ -44,7 +45,8 @@ SOURCES = {
         "build": "ffmpeg 9.0.2 정적 빌드, Martin Riedl (https://ffmpeg.martin-riedl.de/)",
         "config": "--enable-gpl --enable-version3 (libx264, libx265, VideoToolbox 포함)",
         "license": "GNU GPL v3 (--enable-gpl --enable-version3)",
-        "build_source": "빌드 스크립트: https://git.martin-riedl.de/ffmpeg/build-script",
+        "build_source": "빌드 스크립트: https://git.martin-riedl.de/ffmpeg/build-script\n"
+                        f"    라이브러리 버전: {_MAC_BASE}/versions.txt",
         "archives": [
             {"url": f"{_MAC_BASE}/ffmpeg.zip",
              "sha256": "c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924",
@@ -73,6 +75,31 @@ SOURCES = {
 }
 
 FILTERS = ["arnndn", "loudnorm", "afftdn", "highpass"]
+
+# 정적 ffmpeg 빌드의 GPL 대응 소스. CI(.github/workflows/release.yml)가 받아 sha256 을 확인하고 매 릴리스에 첨부한다.
+# 빌드에 든 버전은 이렇게 확인했다 (버전을 올리면 다시 확인):
+# - FFmpeg: 두 빌드 모두 9.0.2 (태그 n9.0.2 = 커밋 946fcce07b, 윈도우 README 의 Source Code 와 같음).
+# - x264: 맥 빌드 스크립트는 빌드 날(2026-09-20)의 master 를 받는다 → 0480cb05 (core 165, r3223).
+#   윈도우 README 의 "x264 v0.165.3223" 도 `git rev-list --count 0480cb05` = 3223 로 같은 커밋.
+# - x265 (맥): 빌드 스크립트 version/x265 = 4.2 → bitbucket get/4.2.tar.gz (커밋 e444744c). 그 압축본의
+#   x265Version.txt 가 옛 값이라 실행 파일은 "4.0+1-6318f22" 로 표시된다. 아래 정식 릴리스 압축본과는
+#   x265Version.txt 한 파일만 다르다 (자동 생성 압축본은 sha256 이 바뀔 수 있어 정식 릴리스 파일을 고정).
+# - x265 (윈도우): README 에 "x265 4.3-45-g116b875" — 원 저장소에서 이 커밋을 찾지 못했다 (WIN_X265_PENDING).
+WIN_X265_PENDING = "4.3+45-g116b875"
+GPL_SOURCES = [
+    {"name": f"ffmpeg-{FFMPEG_VERSION}.tar.xz", "url": FFMPEG_SOURCE,
+     "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
+     "what": "FFmpeg 9.0.2 (태그 n9.0.2, 커밋 946fcce07b) — 맥·윈도우 빌드"},
+    {"name": "x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee.tar.bz2",
+     "url": "https://code.videolan.org/videolan/x264/-/archive/0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee/"
+            "x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee.tar.bz2",
+     "sha256": "f05c59f2e83d494c36307025dca2d3afc6b4d185f3a3453d06cc4fecd7094057",
+     "what": "x264 core 165 r3223 (커밋 0480cb05) — 맥·윈도우 빌드"},
+    {"name": "x265_4.2.tar.gz",
+     "url": "https://bitbucket.org/multicoreware/x265_git/downloads/x265_4.2.tar.gz",
+     "sha256": "40b1ea0453e0309f0eba934e0ddf533f8f6295966679e8894e8f1c1c8d5e1210",
+     "what": "x265 4.2 (태그 4.2, 커밋 e444744c) — 맥 빌드"},
+]
 
 
 class FetchError(RuntimeError):
@@ -202,17 +229,36 @@ def fetch(plat: str, dest: Path, cache: Path = DEFAULT_CACHE) -> list[Path]:
     return files
 
 
+def fetch_sources(dest: Path, cache: Path = DEFAULT_CACHE) -> list[Path]:
+    """GPL_SOURCES 를 받아(sha256 확인) dest 에 원래 이름으로 복사한다."""
+    dest.mkdir(parents=True, exist_ok=True)
+    out = []
+    for s in GPL_SOURCES:
+        got = download(s["url"], s["sha256"], cache)
+        target = dest / s["name"]
+        shutil.copyfile(got, target)
+        out.append(target)
+    return out
+
+
 def third_party_block() -> str:
     lines = [BEGIN, "",
              f"FFmpeg {FFMPEG_VERSION} (ffmpeg, ffprobe 실행 파일)",
              "  이 프로그램은 FFmpeg 프로젝트(https://ffmpeg.org/)의 ffmpeg/ffprobe 를 별도 실행 파일로 함께 배포합니다.",
              "  이 FFmpeg 빌드는 GNU General Public License 버전 3 으로 배포됩니다. 라이선스 전문은 함께 들어 있는",
              "  LICENSE 파일(GPL-3.0)과 https://www.gnu.org/licenses/gpl-3.0.html 에 있습니다.",
-             "  대응 소스 코드(FFmpeg 와 정적 빌드에 들어간 x264·x265 등 라이브러리의 소스 아카이브)는 이 앱의",
-             "  각 GitHub 릴리스(https://github.com/withbbang/video-edit/releases)에 함께 첨부됩니다.",
-             f"  FFmpeg 소스 코드 원본: {FFMPEG_SOURCE}",
-             "  (FFmpeg 저장소: https://git.ffmpeg.org/ffmpeg.git , 라이선스 안내: https://ffmpeg.org/legal.html)",
-             ""]
+             "  아래 소스 아카이브는 이 앱의 각 GitHub 릴리스(https://github.com/withbbang/video-edit/releases)에",
+             "  설치 파일과 함께 첨부됩니다 (괄호 안은 원래 받은 곳):"]
+    for s in GPL_SOURCES:
+        lines += [f"    {s['name']} — {s['what']}",
+                  f"      sha256 {s['sha256']}",
+                  f"      ({s['url']})"]
+    lines += [f"  윈도우 빌드의 x265 ({WIN_X265_PENDING}) 소스는 원 저장소(https://bitbucket.org/multicoreware/x265_git)",
+              "  에서 해당 커밋을 찾지 못해 아직 첨부하지 못했습니다. 필요하면 https://github.com/withbbang/video-edit/issues 로",
+              "  요청해 주세요.",
+              "  그 밖에 정적 빌드에 들어간 라이브러리와 버전은 아래 빌드 정보(맥: versions.txt, 윈도우: 받은 zip 의 README.txt)에 있습니다.",
+              "  (FFmpeg 저장소: https://git.ffmpeg.org/ffmpeg.git , 라이선스 안내: https://ffmpeg.org/legal.html)",
+              ""]
     for plat in ("mac", "win"):
         s = SOURCES[plat]
         lines += [f"  [{s['title']}]",
@@ -244,11 +290,24 @@ def update_third_party(path: Path = THIRD_PARTY) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--platform", choices=sorted(SOURCES), required=True)
+    ap.add_argument("--platform", choices=sorted(SOURCES))
+    ap.add_argument("--sources", type=Path, metavar="DIR",
+                    help="ffmpeg 대신 GPL 대응 소스 아카이브(GPL_SOURCES)를 받아 DIR 에 둔다")
     ap.add_argument("--dest", type=Path, default=HERE / "bin")
     ap.add_argument("--third-party", type=Path, default=THIRD_PARTY)
     ap.add_argument("--cache", type=Path, default=DEFAULT_CACHE, help="받은 zip 보관 폴더")
     a = ap.parse_args(argv)
+    if a.sources is not None:
+        try:
+            files = fetch_sources(a.sources, a.cache)
+        except (FetchError, OSError) as e:
+            print(f"오류: {e}", file=sys.stderr)
+            return 1
+        for f in files:
+            print(f"  {f} ({f.stat().st_size / 1e6:.1f} MB)")
+        return 0
+    if a.platform is None:
+        ap.error("--platform 또는 --sources 가 필요합니다")
     try:
         files = fetch(a.platform, a.dest, a.cache)
         changed = update_third_party(a.third_party)

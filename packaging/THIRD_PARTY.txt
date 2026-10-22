@@ -12,9 +12,21 @@ FFmpeg 9.0.2 (ffmpeg, ffprobe 실행 파일)
   이 프로그램은 FFmpeg 프로젝트(https://ffmpeg.org/)의 ffmpeg/ffprobe 를 별도 실행 파일로 함께 배포합니다.
   이 FFmpeg 빌드는 GNU General Public License 버전 3 으로 배포됩니다. 라이선스 전문은 함께 들어 있는
   LICENSE 파일(GPL-3.0)과 https://www.gnu.org/licenses/gpl-3.0.html 에 있습니다.
-  대응 소스 코드(FFmpeg 와 정적 빌드에 들어간 x264·x265 등 라이브러리의 소스 아카이브)는 이 앱의
-  각 GitHub 릴리스(https://github.com/withbbang/video-edit/releases)에 함께 첨부됩니다.
-  FFmpeg 소스 코드 원본: https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+  아래 소스 아카이브는 이 앱의 각 GitHub 릴리스(https://github.com/withbbang/video-edit/releases)에
+  설치 파일과 함께 첨부됩니다 (괄호 안은 원래 받은 곳):
+    ffmpeg-9.0.2.tar.xz — FFmpeg 9.0.2 (태그 n9.0.2, 커밋 946fcce07b) — 맥·윈도우 빌드
+      sha256 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+      (https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz)
+    x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee.tar.bz2 — x264 core 165 r3223 (커밋 0480cb05) — 맥·윈도우 빌드
+      sha256 f05c59f2e83d494c36307025dca2d3afc6b4d185f3a3453d06cc4fecd7094057
+      (https://code.videolan.org/videolan/x264/-/archive/0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee/x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee.tar.bz2)
+    x265_4.2.tar.gz — x265 4.2 (태그 4.2, 커밋 e444744c) — 맥 빌드
+      sha256 40b1ea0453e0309f0eba934e0ddf533f8f6295966679e8894e8f1c1c8d5e1210
+      (https://bitbucket.org/multicoreware/x265_git/downloads/x265_4.2.tar.gz)
+  윈도우 빌드의 x265 (4.3+45-g116b875) 소스는 원 저장소(https://bitbucket.org/multicoreware/x265_git)
+  에서 해당 커밋을 찾지 못해 아직 첨부하지 못했습니다. 필요하면 https://github.com/withbbang/video-edit/issues 로
+  요청해 주세요.
+  그 밖에 정적 빌드에 들어간 라이브러리와 버전은 아래 빌드 정보(맥: versions.txt, 윈도우: 받은 zip 의 README.txt)에 있습니다.
   (FFmpeg 저장소: https://git.ffmpeg.org/ffmpeg.git , 라이선스 안내: https://ffmpeg.org/legal.html)
 
   [macOS (Apple Silicon arm64)]
@@ -22,6 +34,7 @@ FFmpeg 9.0.2 (ffmpeg, ffprobe 실행 파일)
     구성: --enable-gpl --enable-version3 (libx264, libx265, VideoToolbox 포함)
     라이선스: GNU GPL v3 (--enable-gpl --enable-version3)
     빌드 스크립트: https://git.martin-riedl.de/ffmpeg/build-script
+    라이브러리 버전: https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/versions.txt
     받은 파일: https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffmpeg.zip
       sha256 c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924
     받은 파일: https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffprobe.zip

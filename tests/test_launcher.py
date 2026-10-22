@@ -1,5 +1,6 @@
 """packaging/launcher.py: 묶은 앱에서 처리 안 된 예외는 traceback 을 stderr 에 쓰고 종료 코드 1.
 창 없는 윈도우 실행 파일이 메시지 창을 띄워 숨은 하위 프로세스가 멈추지 않게 (probe_whisper_windows 가 기대하는 형식)."""
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,12 +16,16 @@ sys.path.insert(0, {str(ROOT)!r})
 """
 
 
-def _run(body: str, argv: list[str]) -> subprocess.CompletedProcess:
+def _run(body: str, argv: list[str], data_dir: Path | None = None) -> subprocess.CompletedProcess:
     code = PRELUDE + body + f"""
 sys.argv = {["youtube-edit"] + argv!r}
 runpy.run_path({str(ROOT / "packaging" / "launcher.py")!r}, run_name="__main__")
 """
-    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, cwd=ROOT)
+    env = dict(os.environ)
+    if data_dir is not None:
+        env["YTEDIT_DATA_DIR"] = str(data_dir)
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, cwd=ROOT,
+                          env=env, encoding="utf-8")
 
 
 def test_dash_c_exception_exits_1_with_traceback():
@@ -45,3 +50,38 @@ sys.modules["pipeline"] = fake
     r = _run(fake, ["--pipeline", "in.mp4"])
     assert r.returncode == 1
     assert "Traceback" in r.stderr and "RuntimeError: pipeline crashed" in r.stderr
+
+
+# 창 모드에서 터지는 경우: app.window.run 을 예외를 던지는 가짜로 바꾼다
+FAKE_WINDOW = """
+import app
+fake = types.ModuleType("app.window")
+def _boom():
+    raise RuntimeError("창 열기 실패")
+fake.run = _boom
+app.window = fake
+sys.modules["app.window"] = fake
+"""
+
+
+def test_gui_crash_appends_to_crash_log(tmp_path):
+    for _ in range(2):
+        r = _run(FAKE_WINDOW, [], data_dir=tmp_path)
+        assert r.returncode == 1 and "RuntimeError: 창 열기 실패" in r.stderr
+    log = (tmp_path / "logs" / "crash.log").read_text(encoding="utf-8")
+    assert log.count("Traceback") == 2 and log.count("RuntimeError: 창 열기 실패") == 2
+    heads = [l for l in log.splitlines() if l.startswith("=== ")]
+    assert len(heads) == 2 and all("youtube-edit" in h and h[4:8].isdigit() for h in heads)
+
+
+def test_subprocess_modes_do_not_write_crash_log(tmp_path):
+    r = _run("", ["-c", "raise ValueError('boom')"], data_dir=tmp_path)
+    assert r.returncode == 1
+    assert not (tmp_path / "logs" / "crash.log").exists()
+
+
+def test_crash_log_failure_keeps_exit_code(tmp_path):
+    blocker = tmp_path / "logs"
+    blocker.write_text("폴더 자리에 파일", encoding="utf-8")  # logs 폴더를 만들 수 없게
+    r = _run(FAKE_WINDOW, [], data_dir=tmp_path)
+    assert r.returncode == 1 and "RuntimeError: 창 열기 실패" in r.stderr
