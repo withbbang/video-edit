@@ -1236,6 +1236,21 @@ def make_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out: P
     meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
 
 
+def try_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out: Path, work: Path,
+                hw: bool, force: bool) -> bool:
+    """--preview 용. 미리보기는 앱 재생기용 덤이라, 못 만들어도 컷 리스트·전사는 쓸 수 있으니 분석을 실패로
+    만들지 않는다. 실패하면 (옛 것과 섞이지 않게) 미리보기 파일을 지우고 False."""
+    try:
+        make_preview(src, clean_wav, audio_key, info, out, work, hw, force)
+        return True
+    except (subprocess.CalledProcessError, OSError) as e:
+        log(f"미리보기를 만들지 못했습니다 (분석 결과는 그대로 씀): {e}")
+        for f in (out, out.with_name(out.stem + ".part" + out.suffix)):
+            f.unlink(missing_ok=True)
+        progress("preview", 1.0)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # 리포트
 # ---------------------------------------------------------------------------
@@ -1460,7 +1475,7 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
             f"총 {removed:.1f}s 제거 예정 (건너뜀 {len(skipped)}건)")
     progress("judge", 1.0)
     if args.preview:
-        make_preview(src, clean_wav, audio_key, info, args.preview.resolve(), work, args.hw == "on", args.force)
+        try_preview(src, clean_wav, audio_key, info, args.preview.resolve(), work, args.hw == "on", args.force)
     if args.review:
         log(f"--review: 검토표 {out_dir / (stem + '.review.md')} 를 확인한 뒤 "
             f"--apply-cuts {cuts_path} 로 렌더하세요")

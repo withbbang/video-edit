@@ -134,3 +134,16 @@ def test_fetch_sources_copies_with_release_names(tmp_path, monkeypatch):
     assert [f.name for f in files] == [s["name"] for s in ff.GPL_SOURCES]
     assert calls == [(s["url"], s["sha256"]) for s in ff.GPL_SOURCES]
     assert files[0].read_bytes() == ff.GPL_SOURCES[0]["url"].encode()
+
+
+def test_app_pins_ctranslate2_to_cuda_manifest():
+    """앱 빌드는 manifest 의 CUDA 휠(cuBLAS 12 · cuDNN 9)과 맞춘 ctranslate2 로 묶는다. CLI 는 묶지 않는다 (final-review M10)."""
+    import re
+    app_req = (ROOT / "requirements-app.txt").read_text(encoding="utf-8")
+    cli_req = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    assert re.search(r"^ctranslate2==4\.8\.3$", app_req, re.M)
+    assert "ctranslate2" not in cli_req
+    import json
+    man = json.loads((ROOT / "app" / "manifest.json").read_text(encoding="utf-8"))
+    assert {w["name"] for w in man["cuda_win"]} == {"nvidia-cublas-cu12", "nvidia-cudnn-cu12"}
+    assert next(w for w in man["cuda_win"] if w["name"] == "nvidia-cudnn-cu12")["version"].startswith("9.")

@@ -202,6 +202,23 @@ def test_build_wires_api(tmp_path):
     assert store.path == tmp_path / "state.json"
 
 
+def test_build_prunes_caches_of_removed_jobs(tmp_path, monkeypatch):
+    """켤 때 목록에 없는 영상의 캐시 폴더를 지운다 (final-review I4)."""
+    from app import paths
+    from app.store import Store
+    monkeypatch.setenv("YTEDIT_DATA_DIR", str(tmp_path))
+    src = tmp_path / "a.mp4"
+    src.write_bytes(b"x")
+    s = Store(tmp_path / "state.json")
+    job = s.add(src)
+    s.save()
+    keep, orphan = paths.job_dir(src), tmp_path / "jobs" / "fedcba987654"
+    for d in (keep, orphan):
+        (d / "work").mkdir(parents=True)
+    window.build(tmp_path, lambda e, d: None, None, "http://h:1")
+    assert keep.is_dir() and not orphan.exists() and keep.name == job.id
+
+
 def test_ui_index_exists():
     assert window.ui_index().is_file()
     assert sys.modules["app.window"] is window

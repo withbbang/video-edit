@@ -74,6 +74,12 @@ def download(url: str, dest_dir: Path) -> Path:
     part = dest_dir / (name + ".part")
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
+        for old in dest_dir.iterdir():   # 예전에 받은 설치 파일(과 받다 만 .part)은 지운다
+            if old.is_file():
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
         req = urllib.request.Request(url, headers=_headers())
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r, open(part, "wb") as f:
             while chunk := r.read(1 << 20):

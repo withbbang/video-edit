@@ -263,6 +263,17 @@ def cuda_ready(manifest: dict, root: Path) -> bool:
     return (cuda_dir(manifest, root) / COMPLETE).exists()
 
 
+def gpu_undecided(settings: dict, manifest: dict, root: Path) -> bool:
+    """윈도우에서 prepare 를 다시 돌려야 하는가: 지금 manifest 로 GPU 를 아직 안 정했거나(첫 실행이 CUDA 받기·시험
+    도중 끊김, 업데이트로 manifest 가 바뀜), GPU 로 정했는데 그 CUDA 폴더가 다 갖춰지지 않았을 때."""
+    if not _is_windows():
+        return False
+    gpu = settings.get("gpu") or {}
+    if gpu.get("key") != manifest_hash(manifest):
+        return True
+    return bool(gpu.get("ok")) and not cuda_ready(manifest, root)
+
+
 def pipeline_env(manifest: dict, root: Path, settings: dict) -> dict:
     """파이프라인 하위 프로세스에 더할 환경변수 (runner.build_env(extra=...))."""
     if _is_windows() and _gpu_ok(settings, manifest):
@@ -366,7 +377,7 @@ def prepare(manifest: dict, root: Path, settings: dict, on_progress: Progress) -
     모델 받기 실패만 DownloadError 로 올린다 (화면의 다시 시도). CUDA 받기·GPU 시험 실패는 올리지 않고
     settings["gpu"] = {"key", "ok": False} 로 기록해 CPU 로 간다. settings 를 바꿀 수 있으니 호출한 쪽이 저장한다."""
     key = manifest_hash(manifest)
-    decide_gpu = _is_windows() and (settings.get("gpu") or {}).get("key") != key
+    decide_gpu = gpu_undecided(settings, manifest, root)
     nvidia = decide_gpu and has_nvidia()
     todo = status(manifest, root)
     files = _model_files(manifest, root, todo)

@@ -125,3 +125,18 @@ def test_open_file(monkeypatch):
     monkeypatch.setattr(updates.os, "startfile", lambda p: calls.append(("sf", p)), raising=False)
     updates.open_file(Path("C:/a.exe"))
     assert calls[-1][0] == "sf"
+
+
+def test_download_removes_older_installers(monkeypatch, tmp_path):
+    """새 설치 파일을 받기 전에 예전에 받은 것(과 받다 만 .part)을 지운다 (final-review M4)."""
+    class R(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    d = tmp_path / "updates"
+    d.mkdir()
+    (d / "youtube-edit-0.9.0-mac-arm64.dmg").write_bytes(b"old")
+    (d / "youtube-edit-0.9.5-mac-arm64.dmg.part").write_bytes(b"half")
+    monkeypatch.setattr(updates.urllib.request, "urlopen", lambda req, timeout=None: R(b"new"))
+    p = updates.download("https://x/youtube-edit-1.0.0-mac-arm64.dmg", d)
+    assert sorted(x.name for x in d.iterdir()) == [p.name] and p.read_bytes() == b"new"

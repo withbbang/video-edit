@@ -37,6 +37,10 @@ class FakeQueue:
     def set_progress(self, job_id, value):
         self.calls.append(("set_progress", job_id, value))
 
+    def shutdown(self, timeout=3.0):
+        self.calls.append(("shutdown",))
+        return True
+
 
 class FakeDialogs:
     def __init__(self, files=None, folder=None):
@@ -258,6 +262,7 @@ def test_get_result_without_prev(tmp_path):
     job.summary = {"orig_sec": 10.0, "final_sec": 9.0, "cuts": 2, "removed_sec": 1.0}
     write_out(job, "a.cuts.json", {"cuts": [{"start": 5, "end": 5.5}, {"start": 1, "end": 1.5}]})
     write_out(job, "a.transcript.json", {"duration": 10.0, "segments": []})
+    (paths.job_dir(Path(job.src)) / "preview.mp4").write_bytes(b"v")
     r = a.get_result(job.id)
     assert r["cuts"] == [[1, 1.5], [5, 5.5]]
     assert r["changes"] is None
@@ -266,6 +271,16 @@ def test_get_result_without_prev(tmp_path):
     assert r["preview_url"] == f"http://127.0.0.1:9999/jobs/{job.id}/preview.mp4"
     assert "saved_paths" not in r
     json.dumps(r)
+
+
+def test_get_result_without_preview_still_usable(tmp_path):
+    """미리보기를 못 만들었어도 결과(컷·요약)는 쓸 수 있고 preview_url 만 None (final-review M8)."""
+    a, store, *_ = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    job.summary = {"orig_sec": 10.0, "final_sec": 9.5, "cuts": 1, "removed_sec": 0.5}
+    write_out(job, "a.cuts.json", {"cuts": [{"start": 1, "end": 1.5}]})
+    r = a.get_result(job.id)
+    assert r["preview_url"] is None and r["cuts"] == [[1, 1.5]] and r["summary"] == job.summary
 
 
 def test_get_result_with_prev_compares(tmp_path):
@@ -443,8 +458,8 @@ def test_pipeline_command_analyze_and_render(tmp_path, monkeypatch):
     jd = paths.job_dir(Path(job.src))
     assert (jd / "out").is_dir() and (jd / "work").is_dir()
     cmd, weights, env = pipeline_command(job, RENDER, store, MANIFEST, tmp_path / "data")
-    assert cmd[cmd.index("--media-out") + 1] == str(tmp_path / "saved")
-    assert (tmp_path / "saved").is_dir()
+    assert cmd[cmd.index("--media-out") + 1] == str(jd / "media")   # 저장 폴더가 아니라 임시 폴더에 렌더
+    assert (tmp_path / "saved").is_dir() and (jd / "media").is_dir()
     assert weights is api_mod.RENDER_WEIGHTS
 
 
@@ -521,3 +536,145 @@ def test_save_notifies_outside_queue_lock(tmp_path):
     assert q.join(5)
     assert seen[0] == (Status.SAVING, True)
     assert all(free for _, free in seen)
+
+
+# ---- 저장은 임시 폴더에 렌더하고 성공했을 때만 옮긴다 (final-review I1) ----
+
+def _render_setup(tmp_path, monkeypatch, behaviour):
+    store = Store(tmp_path / "s.json")
+    save = tmp_path / "saved"
+    store.settings["save_dir"] = str(save)
+    job = _job(tmp_path, store)
+    save.mkdir()
+    (save / "a_clean.mp4").write_bytes(b"GOOD-OLD")      # 전에 저장한 좋은 파일
+    (save / "a_clean.srt").write_text("old srt", encoding="utf-8")
+
+    def fake_run(cmd, weights, on_progress, env=None, on_start=None):
+        media = Path(cmd[cmd.index("--media-out") + 1])
+        (media / "a_clean.srt").write_text("new srt", encoding="utf-8")
+        (media / "a_clean.mp4").write_bytes(b"TRUNC")     # 렌더 도중
+        return behaviour(media)
+
+    monkeypatch.setattr(api_mod.runner, "run", fake_run)
+    execute = make_execute(store, MANIFEST, tmp_path / "data", lambda: FakeQueue())
+    return job, save, execute
+
+
+@pytest.mark.parametrize("result", [RunResult(False, "cancelled"), RunResult(False, "오류: 디스크 가득")])
+def test_cancelled_or_failed_save_leaves_save_dir_untouched(tmp_path, monkeypatch, result):
+    job, save, execute = _render_setup(tmp_path, monkeypatch, lambda media: result)
+    assert execute(job, RENDER, lambda h: None) == result
+    assert sorted(p.name for p in save.iterdir()) == ["a_clean.mp4", "a_clean.srt"]
+    assert (save / "a_clean.mp4").read_bytes() == b"GOOD-OLD"
+    assert (save / "a_clean.srt").read_text(encoding="utf-8") == "old srt"
+    assert not api_mod.media_dir(job).exists()
+
+
+def test_successful_save_replaces_files(tmp_path, monkeypatch):
+    def ok(media):
+        (media / "a_clean.mp4").write_bytes(b"FULL")
+        return RunResult(True)
+    job, save, execute = _render_setup(tmp_path, monkeypatch, ok)
+    assert execute(job, RENDER, lambda h: None) == RunResult(True)
+    assert sorted(p.name for p in save.iterdir()) == ["a_clean.mp4", "a_clean.srt"]   # 숨김 임시 파일 없음
+    assert (save / "a_clean.mp4").read_bytes() == b"FULL"
+    assert (save / "a_clean.srt").read_text(encoding="utf-8") == "new srt"
+    assert not api_mod.media_dir(job).exists()
+
+
+def test_publish_failure_keeps_old_files_and_cleans_temps(tmp_path, monkeypatch):
+    job, save, execute = _render_setup(tmp_path, monkeypatch, lambda media: RunResult(True))
+    real = api_mod.shutil.move
+    n = []
+
+    def flaky(src, dst):
+        n.append(src)
+        if len(n) == 2:
+            raise OSError("디스크 가득")
+        return real(src, dst)
+    monkeypatch.setattr(api_mod.shutil, "move", flaky)
+    r = execute(job, RENDER, lambda h: None)
+    assert not r.ok and "디스크 가득" in r.error
+    assert sorted(p.name for p in save.iterdir()) == ["a_clean.mp4", "a_clean.srt"]
+    assert (save / "a_clean.mp4").read_bytes() == b"GOOD-OLD"
+
+
+def test_publish_media_across_volumes(tmp_path, monkeypatch):
+    """다른 볼륨이면 rename 이 실패하므로 복사한 뒤 바꾼다."""
+    media, save = tmp_path / "m", tmp_path / "s"
+    media.mkdir()
+    (media / "x_clean.mp4").write_bytes(b"v")
+    real_rename = api_mod.os.rename
+
+    def no_cross(src, dst):
+        if str(src).startswith(str(media)):
+            raise OSError(18, "Invalid cross-device link")
+        return real_rename(src, dst)
+    monkeypatch.setattr(api_mod.os, "rename", no_cross)
+    assert api_mod.publish_media(media, save) == [save / "x_clean.mp4"]
+    assert (save / "x_clean.mp4").read_bytes() == b"v" and [p.name for p in save.iterdir()] == ["x_clean.mp4"]
+
+
+# ---- 옵션을 바꾸면 달라진 곳 초기화 (final-review M1, 스펙 3.3) ----
+
+@pytest.mark.parametrize("status", [Status.REVIEW, Status.SAVED])
+def test_render_option_change_clears_changes(tmp_path, status):
+    a, store, q, push = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=status)
+    write_out(job, "a.cuts.json", {"cuts": []})
+    job.prev_cuts = str(write_out(job, "prev.cuts.json", {"cuts": [{"start": 1, "end": 2}]}))
+    assert a.get_result(job.id)["changes"] is not None
+    assert a.set_option(job.id, "quality", "high")["accepted"]
+    assert job.prev_cuts is None and a.get_result(job.id)["changes"] is None
+    assert Store.load(store.path).get(job.id).prev_cuts is None
+
+
+# ---- 원본이 돌아오면 목록 새로고침 때 되돌린다 (final-review I5) ----
+
+def test_list_jobs_restores_missing_job(tmp_path):
+    a, store, *_ = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.MISSING)
+    job.before_missing = Status.FAILED
+    job.options.habit = "all"
+    src = Path(job.src)
+    src.unlink()
+    assert a.list_jobs()[0]["status"] == Status.MISSING
+    src.write_bytes(b"x")
+    assert a.list_jobs()[0]["status"] == Status.FAILED
+    assert Store.load(store.path).get(job.id).status == Status.FAILED
+    assert a.get_options(job.id)["habit"] == "all"
+
+
+# ---- 윈도우 GPU 결정이 남았으면 모델이 다 있어도 준비를 다시 (final-review I2) ----
+
+def test_model_status_not_ready_when_windows_gpu_undecided(tmp_path, monkeypatch):
+    a, store, *_ = make(tmp_path)
+    for key, rev in (("whisper", "r1"), ("ctc", "r2")):
+        d = tmp_path / "data" / "models" / key / rev
+        d.mkdir(parents=True)
+        (d / models.COMPLETE).write_text(rev)
+    assert a.model_status()["ready"]
+    monkeypatch.setattr(models.sys, "platform", "win32")
+    st = a.model_status()
+    assert st == {"ready": False, "missing": [], "downloading": False}
+    store.settings["gpu"] = {"key": models.manifest_hash(MANIFEST), "ok": False}
+    assert a.model_status()["ready"]
+
+
+# ---- 처리 중이면 업데이트 설치 전에 묻는다 (final-review M5) ----
+
+@pytest.mark.parametrize("status", [Status.PROCESSING, Status.SAVING])
+def test_install_update_asks_when_busy(tmp_path, monkeypatch, status):
+    a, store, q, push = make(tmp_path)
+    add_job(tmp_path, a, store, status=status)
+    monkeypatch.setattr(api_mod.updates, "check", lambda current: dict(INFO))
+    order = []
+    monkeypatch.setattr(api_mod.updates, "download", lambda url, dest: Path(dest) / "y.dmg")
+    monkeypatch.setattr(api_mod.updates, "open_file", lambda p: order.append("open"))
+    a.check_update()
+    assert a.install_update() == {"started": False, "confirm": True}
+    assert a._update_thread is None and order == []
+    q.shutdown = lambda timeout=3.0: order.append("shutdown") or True
+    assert a.install_update(True) == {"started": True}
+    a._update_thread.join(5)
+    assert order == ["shutdown", "open"]

@@ -124,3 +124,24 @@ def test_app_end_to_end(tmp_path, monkeypatch):
     assert abs(float(video["duration"]) - float(audio["duration"])) <= den / num + 1e-3
     assert video.get("tags", {}).get("encoder")
     assert subs and subs[0].get("tags", {}).get("language") == "kor"
+
+    # 저장 도중 ✕ (final-review I1·I4): 저장 폴더엔 잘린 파일도 숨김 임시 파일도 남지 않고 전에 저장한 파일은 그대로,
+    # 목록에서 빠진 영상의 캐시 폴더도 지운다
+    from app import paths as app_paths
+    before = {p.name: p.read_bytes() for p in save_dir.iterdir()}
+    assert api.set_option(job_id, "quality", "high")["accepted"]
+    assert api.save(job_id)["status"] == "saving"
+    end = time.monotonic() + 60
+    while time.monotonic() < end:
+        job = next(j for j in api.list_jobs() if j["id"] == job_id)
+        assert job["status"] == "saving", f"멈추기 전에 끝남: {job}"
+        if job["progress"] >= 0.1:      # 렌더(ffmpeg)가 돌기 시작
+            break
+        time.sleep(0.05)
+    api.remove_job(job_id)
+    end = time.monotonic() + 30
+    while any(j["id"] == job_id for j in api.list_jobs()) and time.monotonic() < end:
+        time.sleep(0.1)
+    assert not any(j["id"] == job_id for j in api.list_jobs())
+    assert {p.name: p.read_bytes() for p in save_dir.iterdir()} == before
+    assert not app_paths.job_dir(src).exists()

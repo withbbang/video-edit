@@ -33,3 +33,23 @@ def test_scale_applies_to_software_crf():
         return a[a.index("-crf") + 1]
     assert (crf(0.6), crf(1.0), crf(1.5)) == ("22", "18", "14")
     assert crf(0.6, vbitrate="20M") == "18"   # 비트레이트를 직접 정하면 배율 무시
+
+
+def test_preview_failure_does_not_fail_analysis(tmp_path, monkeypatch, capsys):
+    """--preview 실패는 분석을 멈추지 않고 미리보기 파일만 지운다 (final-review M8)."""
+    import subprocess
+    out = tmp_path / "preview.mp4"
+    out.write_bytes(b"old")                               # 옛 미리보기가 섞이지 않게 지운다
+    out.with_name("preview.part.mp4").write_bytes(b"half")
+
+    def boom(*a, **k):
+        raise subprocess.CalledProcessError(1, ["ffmpeg"])
+    monkeypatch.setattr(pipeline, "make_preview", boom)
+    monkeypatch.setattr(pipeline, "PROGRESS", True)
+    args = (tmp_path / "s.mp4", tmp_path / "c.wav", {}, {}, out, tmp_path, False, False)
+    assert pipeline.try_preview(*args) is False
+    assert not out.exists() and not out.with_name("preview.part.mp4").exists()
+    text = capsys.readouterr().out
+    assert "미리보기를 만들지 못했습니다" in text and '"stage": "preview"' in text.replace("'", '"')
+    monkeypatch.setattr(pipeline, "make_preview", lambda *a, **k: None)
+    assert pipeline.try_preview(*args) is True

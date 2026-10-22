@@ -4,12 +4,16 @@
   "job"     Job 화면용 dict (job_view) — 대기열의 on_change 에 make_on_change(push) 를 넘긴다
   "models"  {"done", "total"} 진행 · {"ready": True} 완료 · {"error": True} 실패
   "update"  {"error": "..."} 설치 파일 받기/열기 실패 · {"opened": True} 열기 성공
+
+저장(렌더)은 영상 캐시 폴더의 media/ 에 만든 뒤, 성공했을 때만 저장 폴더로 옮긴다 (publish_media) —
+멈추거나 실패한 저장이 저장 폴더에 잘린 파일을 남기거나 전에 저장한 파일을 지우지 않게.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -69,9 +73,36 @@ class _Throttle:
 # ---------------------------------------------------------------------------
 # 실행 (Queue 의 execute)
 # ---------------------------------------------------------------------------
-def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_root: Path
-                     ) -> tuple[list[str], dict, dict]:
-    """(명령, 진행 가중치, 더할 환경변수). 필요한 폴더를 만든다."""
+def media_dir(job: Job) -> Path:
+    """저장(렌더) 결과를 먼저 만드는 임시 폴더."""
+    return paths.job_dir(Path(job.src)) / "media"
+
+
+def publish_media(media: Path, save_dir: Path) -> list[Path]:
+    """media 폴더의 결과 파일을 저장 폴더로 옮긴다. 모두 저장 폴더 안 숨김 임시 이름(.<이름>.part)으로 먼저
+    옮기고(다른 볼륨이면 복사) 다 옮긴 뒤에 최종 이름으로 바꾼다. 도중에 실패하면 임시 파일을 지우고 예외를 올린다
+    (같은 이름의 이전 파일은 그대로 남는다)."""
+    save_dir.mkdir(parents=True, exist_ok=True)
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for f in sorted(p for p in Path(media).iterdir() if p.is_file()):
+            tmp = save_dir / f".{f.name}.part"
+            tmp.unlink(missing_ok=True)
+            staged.append((tmp, save_dir / f.name))
+            shutil.move(str(f), str(tmp))
+        for tmp, final in staged:
+            os.replace(tmp, final)
+    except BaseException:
+        for tmp, _ in staged:
+            tmp.unlink(missing_ok=True)
+        raise
+    return [final for _, final in staged]
+
+
+def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_root: Path,
+                     save_dir: Path | None = None) -> tuple[list[str], dict, dict]:
+    """(명령, 진행 가중치, 더할 환경변수). 필요한 폴더를 만든다. 렌더는 media_dir(job) 에 결과를 쓴다
+    (저장 폴더로 옮기는 건 make_execute)."""
     model = models.paths(manifest, data_root)
     device = models.device(store.settings, manifest)
     jd = paths.job_dir(Path(job.src))
@@ -80,9 +111,12 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
         (jd / "work").mkdir(parents=True, exist_ok=True)
         cmd, weights = runner.analyze_command(job, model, device), ANALYZE_WEIGHTS
     elif kind == RENDER:
-        save_dir = Path(store.settings["save_dir"])
+        save_dir = Path(save_dir or store.settings["save_dir"])
         save_dir.mkdir(parents=True, exist_ok=True)
-        cmd, weights = runner.render_command(job, model, device, save_dir), RENDER_WEIGHTS
+        media = media_dir(job)
+        shutil.rmtree(media, ignore_errors=True)   # 지난번에 멈춘 저장의 찌꺼기
+        media.mkdir(parents=True, exist_ok=True)
+        cmd, weights = runner.render_command(job, model, device, media), RENDER_WEIGHTS
     else:
         raise ValueError(f"알 수 없는 작업 종류: {kind}")
     if device == "cuda":
@@ -94,14 +128,27 @@ def make_execute(store: Store, manifest: dict, data_root: Path, queue_getter: Ca
     """Queue(execute=...) 에 넘긴다. queue_getter 는 Queue 를 만든 뒤에 돌려줄 수 있게 함수로 받는다.
     진행률은 queue.set_progress 로 넘기고(그게 on_change → push("job") 로 이어진다) 작업마다 초당 5번까지만."""
     def execute(job: Job, kind: str, on_start) -> RunResult:
-        cmd, weights, env = pipeline_command(job, kind, store, manifest, data_root)
+        save_dir = Path(store.settings["save_dir"]) if kind == RENDER else None
+        cmd, weights, env = pipeline_command(job, kind, store, manifest, data_root, save_dir)
         throttle = _Throttle()
 
         def on_progress(p: float) -> None:
             if throttle.ready():
                 queue_getter().set_progress(job.id, p)
 
-        return runner.run(cmd, weights, on_progress, env=env, on_start=on_start)
+        if kind != RENDER:
+            return runner.run(cmd, weights, on_progress, env=env, on_start=on_start)
+        try:
+            result = runner.run(cmd, weights, on_progress, env=env, on_start=on_start)
+            if result.ok:
+                try:
+                    publish_media(media_dir(job), save_dir)
+                except OSError as e:
+                    log.exception("저장 폴더로 옮기기 실패: %s", job.id)
+                    result = RunResult(False, f"저장 폴더에 파일을 옮기지 못했습니다: {e}")
+            return result
+        finally:
+            shutil.rmtree(media_dir(job), ignore_errors=True)
     return execute
 
 
@@ -135,7 +182,10 @@ class Api:
     # ---- 목록 ----------------------------------------------------------------
 
     def list_jobs(self) -> list[dict]:
+        """원본 없음 영상의 원본이 다시 생겼으면 그 전 상태로 되돌려 돌려준다."""
         with self._queue.lock:
+            if self._store.refresh_missing(mark_new=False):
+                self._store.save()
             return [job_view(j) for j in self._store.jobs]
 
     def add_files(self, paths_: list[str]) -> list[dict]:
@@ -205,9 +255,11 @@ class Api:
                 setattr(job.options, key, value)
                 if key in FAST_KEYS:
                     rejudge = job.status in (Status.REVIEW, Status.SAVED)
-                elif job.status == Status.SAVED:
-                    job.status = Status.REVIEW
-                    changed_status = True
+                else:
+                    job.prev_cuts = None   # "달라진 곳" 은 다음 옵션 변경 때 초기화 (스펙 3.3)
+                    if job.status == Status.SAVED:
+                        job.status = Status.REVIEW
+                        changed_status = True
                 self._store.save()
             opts = job.options.to_dict()
             view = job_view(job)
@@ -239,8 +291,11 @@ class Api:
             duration = float((transcript or {}).get("duration") or (summary or {}).get("orig_sec") or 0)
         except (TypeError, ValueError):
             pass
+        # 미리보기를 못 만들었으면(분석은 성공) None — 화면은 재생기 대신 안내를 보여 준다
+        preview = paths.job_dir(src) / "preview.mp4"
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "changes": changes,
-                  "preview_url": f"{self._preview_base}/{job_id}/preview.mp4", "duration": duration}
+                  "preview_url": f"{self._preview_base}/{job_id}/preview.mp4" if preview.is_file() else None,
+                  "duration": duration}
         if status == Status.SAVED:
             names = [f"{src.stem}_clean.mp4", f"{src.stem}_clean.m4a", f"{src.stem}_clean.srt"]
             result["saved_paths"] = [str(save_dir / n) for n in names if (save_dir / n).is_file()]
@@ -270,8 +325,12 @@ class Api:
         return bool(t and t.is_alive())
 
     def model_status(self) -> dict:
+        """ready 가 False 면 화면이 덮개를 띄우고 download_models(→ models.prepare)를 부른다. 모델이 다 있어도
+        윈도우에서 GPU 를 아직 안 정했거나 그 CUDA 폴더가 덜 갖춰졌으면 prepare 를 다시 돌려야 하므로 False."""
         missing = [m["key"] for m in models.status(self._manifest, self._data_root)]
-        return {"ready": not missing, "missing": missing, "downloading": self._downloading()}
+        with self._queue.lock:
+            gpu = models.gpu_undecided(self._store.settings, self._manifest, self._data_root)
+        return {"ready": not missing and not gpu, "missing": missing, "downloading": self._downloading()}
 
     def download_models(self) -> dict:
         """스레드에서 모델(과 윈도우 GPU)을 준비한다. 이미 받는 중이면 {"started": False}."""
@@ -321,8 +380,16 @@ class Api:
             self._store.settings["dismissed_version"] = version
             self._store.save()
 
-    def install_update(self) -> dict:
-        """마지막으로 찾은 새 버전 설치 파일을 받아 연다 (스레드). 실패는 push("update", {"error"})."""
+    def _busy(self) -> bool:
+        with self._queue.lock:
+            return any(j.status in (Status.PROCESSING, Status.SAVING) for j in self._store.jobs)
+
+    def install_update(self, force: bool = False) -> dict:
+        """마지막으로 찾은 새 버전 설치 파일을 받아 연다 (스레드). 실패는 push("update", {"error"}).
+        처리·저장 중인 영상이 있으면 열지 않고 {"started": False, "confirm": True} — 화면이 물어본 뒤
+        force=True 로 다시 부르면 설치 파일을 열기 직전에 대기열을 멈춘다 (멈춘 영상은 대기로 저장)."""
+        if not force and self._busy():
+            return {"started": False, "confirm": True}
         info = self._update or updates.check(__version__)
         if not info:
             return {"started": False}
@@ -330,14 +397,16 @@ class Api:
             t = self._update_thread
             if t and t.is_alive():
                 return {"started": False}
-            self._update_thread = threading.Thread(target=self._install_update, args=(info["url"],),
+            self._update_thread = threading.Thread(target=self._install_update, args=(info["url"], force),
                                                    daemon=True, name="update-download")
             self._update_thread.start()
         return {"started": True}
 
-    def _install_update(self, url: str) -> None:
+    def _install_update(self, url: str, stop_queue: bool = False) -> None:
         try:
             path = updates.download(url, self._data_root / "updates")
+            if stop_queue:
+                self._queue.shutdown()
             updates.open_file(path)
         except Exception as e:  # noqa: BLE001
             log.exception("업데이트 설치 파일 받기 실패")

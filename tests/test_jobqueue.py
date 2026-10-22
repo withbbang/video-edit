@@ -142,13 +142,19 @@ def test_missing_cuts_after_success_fails_readably(tmp_path):
     assert b.status == Status.REVIEW
 
 
-def test_render_failure_marks_failed(tmp_path):
+def test_render_failure_returns_to_review_with_error(tmp_path):
+    """저장 실패는 실패가 아니라 결과를 둔 채 확인 대기 + 오류 (final-review M2). 저장을 바로 다시 할 수 있다."""
     store, (a,), fx, q, _ = make(tmp_path, ("a",))
-    a.status = Status.REVIEW
+    a.status, a.summary = Status.SAVED, {"cuts": 1}
     fx.results[(a.id, "render")] = RunResult(False, "디스크 가득")
     q.request_save(a.id)
     assert q.join(WAIT)
-    assert a.status == Status.FAILED and a.error == "디스크 가득"
+    assert a.status == Status.REVIEW and a.error == "디스크 가득" and a.summary == {"cuts": 1}
+    assert Store.load(store.path).get(a.id).status == Status.REVIEW
+    fx.results.pop((a.id, "render"))
+    q.request_save(a.id)
+    assert q.join(WAIT)
+    assert a.status == Status.SAVED and a.error == ""
 
 
 def test_rejudge_keeps_prev_cuts(tmp_path):
@@ -526,3 +532,40 @@ def test_shutdown_timeout_still_saves_waiting(tmp_path):
     release.set()
     assert q.join(WAIT)
     assert store.get(a.id) is a and a.status == Status.WAITING
+
+
+# ---- 목록에서 빼면 캐시도 지운다 (final-review I4) ----
+
+def test_cancel_waiting_deletes_job_dir(tmp_path):
+    store, (a, b), fx, q, _ = make(tmp_path, ("a", "b"))
+    da, db = (paths.job_dir(Path(j.src)) for j in (a, b))
+    for d in (da, db):
+        (d / "work").mkdir(parents=True)
+        (d / "work" / "clean.wav").write_bytes(b"x")
+    q.cancel(a.id)
+    assert not da.exists() and db.is_dir()
+
+
+def test_cancel_running_deletes_job_dir_after_process_stops(tmp_path):
+    store, (a,), fx, q, _ = make(tmp_path, ("a",))
+    fx.gate(a.id, "analyze")
+    jd = paths.job_dir(Path(a.src))
+    q.start_all()
+    assert fx.started[(a.id, "analyze")].wait(WAIT)
+    (jd / "work").mkdir(parents=True)
+    q.cancel(a.id)
+    assert q.join(WAIT)
+    assert store.get(a.id) is None and not jd.exists()
+
+
+# ---- 원본 없음은 영구가 아니다 (final-review I5) ----
+
+def test_start_all_rechecks_missing_sources(tmp_path):
+    store, (a, b), fx, q, changes = make(tmp_path, ("a", "b"))
+    a.status, a.before_missing = Status.MISSING, Status.WAITING   # 원본이 돌아옴
+    Path(b.src).unlink()                                          # 실행 중에 원본이 사라짐
+    q.start_all()
+    assert q.join(WAIT)
+    assert fx.calls == [(a.id, "analyze")]
+    assert a.status == Status.REVIEW and b.status == Status.MISSING
+    assert (b.id, Status.MISSING) in changes

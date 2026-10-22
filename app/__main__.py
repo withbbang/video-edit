@@ -24,12 +24,24 @@ def _use_bundled_ffmpeg() -> None:
         os.environ["PATH"] = os.pathsep.join([str(d)] + [p for p in parts if p])
 
 
+def _utf8_stdio() -> None:
+    """파이프라인·-c 하위 프로세스의 출력을 UTF-8 로. 묶은 윈도우 앱은 PYTHONIOENCODING 을 따르지 않아
+    파이프로 나가는 출력이 cp949 가 되고, 앱(runner.run 은 UTF-8 로 읽음)에서 `오류:` 줄이 깨진다."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: list[str] | None = None):
     argv = list(sys.argv if argv is None else argv)
     rest = argv[1:]
     from . import paths
 
     if rest[:1] == ["--pipeline"]:
+        _utf8_stdio()
         _use_bundled_ffmpeg()
         if getattr(sys, "frozen", False):
             sys.dont_write_bytecode = True  # 앱 폴더(.app 안) 에 __pycache__ 를 쓰지 않는다
@@ -40,6 +52,7 @@ def main(argv: list[str] | None = None):
         sys.argv = [argv[0]] + rest[1:]
         return pipeline.main()
     if rest[:1] == ["-c"] and len(rest) >= 2 and getattr(sys, "frozen", False):
+        _utf8_stdio()
         _use_bundled_ffmpeg()
         sys.argv = ["-c"] + rest[2:]
         exec(compile(rest[1], "<string>", "exec"), {"__name__": "__main__", "__builtins__": __builtins__})

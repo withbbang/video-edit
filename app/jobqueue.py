@@ -57,16 +57,20 @@ class Queue:
     # ---- 공개 API ----------------------------------------------------------
 
     def start_all(self) -> None:
-        """대기(waiting)·실패(failed) 영상을 목록 순서로 분석 대기열에 넣는다. 실패한 것은 대기로 되돌린다."""
+        """대기(waiting)·실패(failed) 영상을 목록 순서로 분석 대기열에 넣는다. 실패한 것은 대기로 되돌린다.
+        넣기 전에 원본을 다시 확인한다 (사라진 것은 원본 없음, 다시 생긴 것은 그 전 상태로)."""
         retried = []
         with self.lock:
             queued = {jid for jid, _ in self._items}
+            busy = queued | set(self._rejudging) | ({self._current} if self._current else set())
+            retried += self.store.refresh_missing(skip=busy)
             for job in self.store.jobs:
                 if job.id in queued or job.id == self._current or job.id in self._rejudging:
                     continue
                 if job.status == Status.FAILED:
                     job.status, job.error, job.progress = Status.WAITING, "", 0.0
-                    retried.append(job)
+                    if not any(r is job for r in retried):
+                        retried.append(job)
                 if job.status == Status.WAITING:
                     self._items.append((job.id, ANALYZE))
             if retried:
@@ -125,8 +129,7 @@ class Queue:
                 handle = self._handles.get(job_id)
             else:
                 self._items = deque(i for i in self._items if i[0] != job_id)
-                self.store.remove(job_id)
-                self._save()
+                self._drop(job)
                 self._cv.notify_all()
         if running:
             if handle:
@@ -264,10 +267,18 @@ class Queue:
         self._cancel.discard(job_id)
         self._cv.notify_all()
 
+    def _drop(self, job: Job) -> None:
+        """lock 안에서 부른다. 목록에서 빼고 그 영상의 캐시 폴더(<data>/jobs/<id>)를 지운다.
+        실행 중인 프로세스가 끝난 뒤에만 부른다."""
+        self.store.remove(job.id)
+        self._save()
+        shutil.rmtree(paths.job_dir(Path(job.src)), ignore_errors=True)
+
     def _fail_if_running(self, job: Job, msg: str) -> None:
-        """lock 안에서 부른다. 처리 중으로 남은 영상을 실패로 돌린다."""
+        """lock 안에서 부른다. 처리 중으로 남은 영상을 실패로 돌린다 (저장 중이던 것은 확인 대기 + 오류)."""
         if job.status in (Status.PROCESSING, Status.SAVING) and self.store.get(job.id) is job:
-            job.status, job.error = Status.FAILED, msg
+            status = Status.REVIEW if job.status == Status.SAVING else Status.FAILED
+            job.status, job.error = status, msg
             self._save()
 
     def _finish_safe(self, job: Job, kind: str, result: RunResult) -> None:
@@ -296,10 +307,12 @@ class Queue:
             return
         if job.id in self._cancel or (not result.ok and result.error == CANCELLED):
             self._cancel.discard(job.id)
-            self.store.remove(job.id)
-            self._save()
+            self._drop(job)
             return
-        if not result.ok:
+        if not result.ok and kind == RENDER:
+            # 저장 실패: 결과 화면은 그대로 두고 오류를 보여 준다 (저장을 바로 다시 누를 수 있게)
+            self._set(job, Status.REVIEW, progress=1.0, error=result.error or "저장하지 못했습니다")
+        elif not result.ok:
             self._set(job, Status.FAILED, error=result.error or "처리에 실패했습니다")
         elif kind == RENDER:
             self._set(job, Status.SAVED, progress=1.0, error="")

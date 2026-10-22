@@ -18,7 +18,7 @@ from pathlib import Path
 from . import api as api_mod
 from . import models, paths
 from .jobqueue import Queue
-from .store import Store
+from .store import Store, prune_job_dirs
 
 log = logging.getLogger(__name__)
 
@@ -237,6 +237,7 @@ def build(data_root: Path, push, dialogs, preview_base: str):
     """Store·Queue·Api 를 만든다 (창 없이도 쓸 수 있게 분리)."""
     data_root = Path(data_root)
     store = Store.load(data_root / "state.json")
+    prune_job_dirs(store, data_root / "jobs")   # 목록에서 빠진 영상의 캐시를 지운다
     manifest = models.load_manifest()
     queue = None
     execute = api_mod.make_execute(store, manifest, data_root, lambda: queue)

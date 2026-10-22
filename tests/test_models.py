@@ -461,3 +461,39 @@ def test_pipeline_uses_cuda_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("YTEDIT_CUDA_DIR")
     pipeline.use_cuda_dir(is_windows=True)
     assert added == []
+
+
+# ---- GPU 결정이 끊겼거나 manifest 가 바뀌면 다시 (final-review I2) ----
+
+def test_gpu_undecided_conditions(tmp_path, monkeypatch):
+    man = cuda_manifest()
+    key = models.manifest_hash(man)
+    monkeypatch.setattr(models.sys, "platform", "darwin")
+    assert not models.gpu_undecided({"gpu": None}, man, tmp_path)          # 맥은 상관없음
+    monkeypatch.setattr(models.sys, "platform", "win32")
+    assert models.gpu_undecided({"gpu": None}, man, tmp_path)              # 모델 다 받은 뒤 CUDA 단계에서 끊김
+    assert models.gpu_undecided({"gpu": {"key": "old", "ok": True}}, man, tmp_path)   # 업데이트로 manifest 바뀜
+    assert not models.gpu_undecided({"gpu": {"key": key, "ok": False}}, man, tmp_path)  # CPU 로 정함
+    assert models.gpu_undecided({"gpu": {"key": key, "ok": True}}, man, tmp_path)   # CUDA 폴더가 덜 갖춰짐
+    d = models.cuda_dir(man, tmp_path)
+    d.mkdir(parents=True)
+    (d / models.COMPLETE).write_text("x")
+    assert not models.gpu_undecided({"gpu": {"key": key, "ok": True}}, man, tmp_path)
+
+
+def test_prepare_redecides_after_manifest_change_and_cleans_old_cuda(tmp_path, monkeypatch):
+    man = cuda_manifest()
+    monkeypatch.setattr(models, "_urlopen", full_server(man))
+    calls = win_gpu(monkeypatch)
+    old = tmp_path / "cuda" / "0123456789ab"
+    old.mkdir(parents=True)
+    settings = {"gpu": {"key": "old-manifest", "ok": True}}
+    models.prepare(man, tmp_path, settings, lambda d, t: None)
+    assert calls == {"nvidia": 1, "probe": 1}
+    assert settings["gpu"] == {"key": models.manifest_hash(man), "ok": True}
+    assert not old.exists() and models.cuda_ready(man, tmp_path)
+    # GPU 로 정했는데 CUDA 폴더가 사라졌으면 다시 받고 다시 시험한다
+    import shutil
+    shutil.rmtree(models.cuda_dir(man, tmp_path))
+    models.prepare(man, tmp_path, settings, lambda d, t: None)
+    assert calls == {"nvidia": 2, "probe": 2} and models.cuda_ready(man, tmp_path)

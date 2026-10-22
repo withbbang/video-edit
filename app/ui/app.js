@@ -165,7 +165,7 @@ function renderQueue() {
     const text = statusText(j);
     if (r.st.textContent !== text) r.st.textContent = text;
     r.st.className = `st ${j.status}`;
-    r.st.title = j.status === 'failed' ? (j.error || '') : '';
+    r.st.title = (j.status === 'failed' || j.status === 'review') ? (j.error || '') : '';
     r.mini.hidden = !BUSY.has(j.status);
     r.bar.style.transform = `scaleX(${pct(j.progress) / 100})`;
   }
@@ -228,11 +228,15 @@ function renderResult(force) {
   const parts = [];
   if (j.status === 'failed') {
     parts.push(h('div', { class: 'err' }, '실패' + (j.error ? ` — ${j.error}` : '')));
+  } else if (j.status === 'review' && j.error) {
+    // 저장 실패는 결과를 그대로 두고 이유만 보여 준다 (저장을 바로 다시 누를 수 있다)
+    parts.push(h('div', { class: 'err' }, `저장 실패 — ${j.error}`));
   }
   if (r) parts.push(...resultParts(j, r));
   // 재생기는 그대로 두고 나머지만 다시 그린다 (재생 위치 유지)
   box.replaceChildren(...parts);
-  if (r) player.attach(r);
+  if (r && r.preview_url) player.attach(r);
+  else if (r) player.detach();
 }
 
 function resultParts(j, r) {
@@ -242,7 +246,8 @@ function resultParts(j, r) {
     h('b', { class: 'stat' }, `${clock(s.orig_sec)} → ${clock(s.final_sec)}`), ' · ',
     h('span', { class: 'stat' }, `${s.cuts || 0}곳 잘림`), ' · ',
     h('span', { class: 'stat' }, `−${Math.round(Number(s.removed_sec) || 0)}초`)));
-  out.push(player.slot());
+  // 미리보기를 못 만들어도 컷·요약은 그대로 쓸 수 있다
+  out.push(r.preview_url ? player.slot() : h('div', { class: 'err' }, '미리보기를 만들지 못했습니다'));
   out.push(timeline(r));
   out.push(h('div', { class: 'legend' },
     h('b', { class: 'cut' }, '■ 잘린 곳'), ' · ', h('b', { class: 'changed' }, '■ 달라진 곳')));
@@ -396,6 +401,7 @@ async function setOption(key, value) {
   if (!res || S.sel !== j.id) return;
   S.options = res.options;
   if (res.accepted && FAST.has(key) && HAS_RESULT.has(j.status)) { S.changedKey = key; S.showAll = false; }
+  else if (res.accepted && HAS_RESULT.has(j.status)) { S.changedKey = null; loadResult(j.id); }  // 달라진 곳 초기화
   render();
   refresh();
 }
@@ -480,8 +486,12 @@ function wire() {
   $('cover-retry').addEventListener('click', startDownload);
   $('up-notes').addEventListener('click', () => { $('up-body').hidden = !$('up-body').hidden; });
   $('up-get').addEventListener('click', async () => {
-    $('up-state').textContent = '받는 중…';
-    const r = await call('install_update');
+    let r = await call('install_update');
+    if (r && r.confirm) {
+      if (!window.confirm('처리 중인 영상이 있습니다. 멈추고 업데이트할까요?')) return;
+      $('up-state').textContent = '받는 중…';
+      r = await call('install_update', true);
+    } else if (r && r.started) $('up-state').textContent = '받는 중…';
     if (!r || !r.started) $('up-state').textContent = '받지 못했습니다';
   });
   $('up-close').addEventListener('click', () => {
