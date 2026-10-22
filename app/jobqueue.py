@@ -106,7 +106,7 @@ class Queue:
                 return
             self._rejudging[job_id] = False
             try:
-                self._prepare_rejudge(job, copy_prev=True)
+                self._prepare_rejudge(job)
                 threading.Thread(target=self._rejudge_loop, args=(job_id,), daemon=True,
                                  name=f"rejudge-{job_id}").start()
             except BaseException:
@@ -324,17 +324,8 @@ class Queue:
                 return
             self._set(job, Status.REVIEW, progress=1.0, error="", summary=summary)
 
-    def _prepare_rejudge(self, job: Job, copy_prev: bool) -> None:
-        """lock 안에서 부른다. 재판정 묶음의 첫 실행만 현재 cuts.json 을 prev.cuts.json 으로 복사한다
-        (후속 실행은 사용자가 마지막으로 본 결과를 비교 기준으로 남기려고 덮어쓰지 않는다)."""
-        if copy_prev:
-            out = _out_dir(job)
-            prev = out / "prev.cuts.json"
-            try:
-                shutil.copyfile(out / f"{Path(job.src).stem}.cuts.json", prev)
-                job.prev_cuts = str(prev)
-            except OSError:
-                pass
+    def _prepare_rejudge(self, job: Job) -> None:
+        """lock 안에서 부른다."""
         self._set(job, Status.PROCESSING, progress=0.0, error="")
 
     def _rejudge_loop(self, job_id: str) -> None:
@@ -350,7 +341,7 @@ class Queue:
                         self._handles.pop(job_id, None)
                         self._rejudging[job_id] = False
                         try:
-                            self._prepare_rejudge(job, copy_prev=False)
+                            self._prepare_rejudge(job)
                         except Exception as e:  # noqa: BLE001
                             log.exception("재판정 준비 실패: %s", job_id)
                             job.status, job.error = Status.FAILED, f"다시 판정하지 못했습니다: {e}"

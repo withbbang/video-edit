@@ -87,7 +87,7 @@ def test_app_end_to_end(tmp_path, monkeypatch):
 
     r = api.get_result(job_id)
     assert r["cuts"], "컷이 비었음"
-    assert r["duration"] > 0 and r["changes"] is None
+    assert r["duration"] > 0
     assert r["preview_url"] == f"{base}/{job_id}/preview.mp4"
     resp, body = _range_get(r["preview_url"], "bytes=0-1023")
     assert resp.status == 206 and len(body) == 1024
@@ -96,9 +96,7 @@ def test_app_end_to_end(tmp_path, monkeypatch):
     res = api.set_option(job_id, "habit", "all")
     assert res["accepted"] and res["options"]["habit"] == "all"
     _wait(api, job_id, {"review"})
-    r = api.get_result(job_id)
-    assert r["changes"] is not None
-    print("변화", json.dumps(r["changes"], ensure_ascii=False)[:400])
+    assert api.get_result(job_id)["cuts"]
 
     dialogs.folder = str(save_dir)
     assert api.set_save_dir() == str(save_dir)
@@ -109,7 +107,6 @@ def test_app_end_to_end(tmp_path, monkeypatch):
     names = sorted(p.name for p in save_dir.iterdir())
     assert names == [f"{stem}_clean.mp4", f"{stem}_clean.srt"]
     assert sorted(Path(p).name for p in r["saved_paths"]) == names
-    assert api.get_result(job_id)["changes"] is None    # 저장하면 달라진 곳 초기화
 
     out = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
                           "stream=codec_type,duration,r_frame_rate:stream_tags=encoder,language",

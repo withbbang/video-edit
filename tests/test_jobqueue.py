@@ -157,7 +157,7 @@ def test_render_failure_returns_to_review_with_error(tmp_path):
     assert a.status == Status.SAVED and a.error == ""
 
 
-def test_rejudge_keeps_prev_cuts(tmp_path):
+def test_rejudge_updates_summary(tmp_path):
     store, (a,), fx, q, _ = make(tmp_path, ("a",))
     a.status = Status.REVIEW
     old = [{"start": 1.0, "end": 2.0}]
@@ -166,8 +166,6 @@ def test_rejudge_keeps_prev_cuts(tmp_path):
     q.rejudge(a.id)
     assert q.join(WAIT)
     assert a.status == Status.REVIEW
-    assert a.prev_cuts == str(paths.job_dir(Path(a.src)) / "out" / "prev.cuts.json")
-    assert json.loads(Path(a.prev_cuts).read_text(encoding="utf-8"))["cuts"] == old
     assert a.summary["cuts"] == 1 and abs(a.summary["removed_sec"] - 0.25) < 1e-9
 
 
@@ -339,7 +337,6 @@ def test_followup_rejudge_keeps_original_prev(tmp_path):
     first.set()
     assert q.join(WAIT)
     assert len(fx.calls) == 2
-    assert json.loads(Path(a.prev_cuts).read_text(encoding="utf-8"))["cuts"] == A
     assert a.summary["removed_sec"] == 0.5
 
 

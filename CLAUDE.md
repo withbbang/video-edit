@@ -135,7 +135,8 @@ tests/                pytest (requirements-dev.txt)
   51~100 비율 1.0 까지 + afftdn 추가. 분석 오디오·전사는 그대로. `--preview` 와 쓰면 미리보기 소리만 다시 만들고 preview_video.mp4 는 캐시 재사용),
   `--subs-edits <json>`(앱의 자막 수정 `{transcript_sha1, words, lines}` 을 SRT 에 적용. `transcript_sha1` 이 지금 전사와 다르면 로그만 남기고 무시).
 - 앱 화면: 자막 탭·영상 위 자막에서 어절을 눌러 고침(빈칸 = 뺌, `원래대로`), 찾아 바꾸기, 줄 시간 ±0.1초·`지금 위치로`.
-  타임라인을 끌어 구간을 직접 자르거나 되살림(잘린 곳 목록에 `직접 자름`/`직접 되살림`). `말 없는 구간`·`배경 잡음` 은 0~100 슬라이더(50 = 예전 기본).
+  타임라인을 끌어 구간을 직접 자르거나 되살림(잘린 곳 목록에 `직접 자름`/`직접 되살림`). 편집은 `실행 취소`/`다시 실행`
+  (Api.undo/redo, 메모리 스냅숏 — 옵션 변경은 제외). `말 없는 구간`·`배경 잡음` 은 0~100 슬라이더(50 = 예전 기본).
   자막 수정은 `out/<이름>.subs_edits.json` 에 저장되고 전사가 바뀌면 지워진다.
 - 사용자 데이터: 맥 `~/Library/Application Support/youtube-edit`, 윈도우 `%APPDATA%\youtube-edit` (`YTEDIT_DATA_DIR` 로 덮어씀).
   앱 설치 폴더에는 쓰지 않는다. 화면 문구는 스펙(`docs/superpowers/specs/2026-10-22-desktop-app-design.md` 3장) 그대로 쓴다.

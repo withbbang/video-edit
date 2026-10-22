@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import math
 import logging
@@ -41,6 +42,7 @@ ALLOWED = {
     "quality": ("low", "auto", "high"),
 }
 PROGRESS_INTERVAL = 0.2  # 작업·모델 진행 이벤트는 초당 5번까지
+HISTORY_MAX = 100        # 영상마다 되돌릴 수 있는 편집 수
 
 Push = Callable[[str, dict], None]
 
@@ -232,6 +234,8 @@ class Api:
         self._download_thread: threading.Thread | None = None
         self._update_thread: threading.Thread | None = None
         self._update: dict | None = None            # 마지막으로 찾은 새 버전
+        # 편집 되돌리기: 영상 id → (undo, redo) 편집 전 상태 묶음 목록 (메모리에만, 앱을 끄면 사라짐)
+        self._history: dict[str, tuple[list, list]] = {}
 
     # ---- 내부 ----------------------------------------------------------------
 
@@ -241,6 +245,56 @@ class Api:
     def _save(self) -> None:
         with self._queue.lock:
             self._store.save()
+
+    # ---- 편집 되돌리기 ---------------------------------------------------------
+    # 결과 편집(잘린 곳 되살리기, 구간 작업, 자막 고치기)만 되돌린다. 옵션 변경은 다시 판정이라 넣지 않는다.
+
+    @staticmethod
+    def _snap(job: Job) -> tuple:
+        return copy.deepcopy((job.restored, job.range_ops, job.word_edits, job.line_times, job.edits_sha1))
+
+    @staticmethod
+    def _put(job: Job, snap: tuple) -> None:
+        job.restored, job.range_ops, job.word_edits, job.line_times, job.edits_sha1 = copy.deepcopy(snap)
+
+    def _record(self, job: Job, before: tuple) -> None:
+        """편집 뒤에 부른다 (queue.lock 안). 실제로 바뀌었으면 편집 전 상태를 쌓고 다시 실행 목록을 비운다."""
+        if self._snap(job) == before:
+            return
+        undo, redo = self._history.setdefault(job.id, ([], []))
+        undo.append(before)
+        del undo[:-HISTORY_MAX]
+        redo.clear()
+
+    def _hist(self, job_id: str) -> dict:
+        undo, redo = self._history.get(job_id, ([], []))
+        return {"undo": bool(undo), "redo": bool(redo)}
+
+    def undo(self, job_id: str) -> dict | None:
+        """마지막 편집을 되돌린다. → {"history": {"undo", "redo"}}, 되돌릴 게 없거나 확인 대기·저장됨이 아니면 None."""
+        return self._step(job_id, forward=False)
+
+    def redo(self, job_id: str) -> dict | None:
+        """되돌린 편집을 다시 한다."""
+        return self._step(job_id, forward=True)
+
+    def _step(self, job_id: str, forward: bool) -> dict | None:
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None or job.status not in (Status.REVIEW, Status.SAVED):
+                return None
+            undo, redo = self._history.get(job_id, ([], []))
+            src, dst = (redo, undo) if forward else (undo, redo)
+            if not src:
+                return None
+            dst.append(self._snap(job))
+            self._put(job, src.pop())
+            if job.status == Status.SAVED:
+                job.status = Status.REVIEW
+            self._store.save()
+            view, hist = job_view(job), self._hist(job_id)
+        self._push("job", view)
+        return {"history": hist}
 
     # ---- 목록 ----------------------------------------------------------------
 
@@ -271,6 +325,8 @@ class Api:
     def remove_job(self, job_id: str) -> list[dict]:
         """대기 중이면 빼고, 처리·저장 중이면 멈추고 뺀다 (확인은 화면이 먼저 받는다)."""
         self._queue.cancel(job_id)
+        with self._queue.lock:
+            self._history.pop(job_id, None)
         return self.list_jobs()
 
     def start(self) -> list[dict]:
@@ -278,7 +334,6 @@ class Api:
         return self.list_jobs()
 
     def save(self, job_id: str) -> dict | None:
-        # 락을 쥔 채로 요청해야 작업 스레드가 렌더를 끝내기 전에 prev_cuts 를 지울 수 있다 (queue.lock 은 RLock).
         # 알림(evaluate_js)은 락을 놓은 뒤에 보낸다 — 맥에선 메인 스레드를 기다리므로 락을 쥐고 보내면 교착 위험.
         with self._queue.lock:
             job = self._job(job_id)
@@ -286,9 +341,6 @@ class Api:
                 return None
             before = job.status
             self._queue.request_save(job_id, notify=False)
-            if job.status in (Status.SAVING, Status.SAVED) and job.prev_cuts:
-                job.prev_cuts = None   # "달라진 곳" 은 저장 때 초기화 (스펙 3.3)
-                self._store.save()
             changed = job.status != before
             view = job_view(job)
         if changed:
@@ -320,11 +372,9 @@ class Api:
                 setattr(job.options, key, value)
                 if key in FAST_KEYS:
                     rejudge = job.status in (Status.REVIEW, Status.SAVED)
-                else:
-                    job.prev_cuts = None   # "달라진 곳" 은 다음 옵션 변경 때 초기화 (스펙 3.3)
-                    if job.status == Status.SAVED:
-                        job.status = Status.REVIEW
-                        changed_status = True
+                elif job.status == Status.SAVED:
+                    job.status = Status.REVIEW
+                    changed_status = True
                 self._store.save()
             opts = job.options.to_dict()
             view = job_view(job)
@@ -343,9 +393,11 @@ class Api:
             job = self._job(job_id)
             if job is None or job.status not in (Status.REVIEW, Status.SAVED) or end <= start:
                 return None
+            before = self._snap(job)
             cut = {"start": start, "end": end}
             others = [r for r in job.restored if not diff.is_restored(cut, [r])]
             job.restored = others + ([[start, end]] if restored else [])
+            self._record(job, before)
             if job.status == Status.SAVED:
                 job.status = Status.REVIEW
             self._store.save()
@@ -356,8 +408,12 @@ class Api:
     def _change_ops(self, job_id: str, change: Callable[[Job], bool]) -> dict | None:
         with self._queue.lock:
             job = self._job(job_id)
-            if job is None or job.status not in (Status.REVIEW, Status.SAVED) or not change(job):
+            if job is None or job.status not in (Status.REVIEW, Status.SAVED):
                 return None
+            before = self._snap(job)
+            if not change(job):
+                return None
+            self._record(job, before)
             if job.status == Status.SAVED:
                 job.status = Status.REVIEW
             self._store.save()
@@ -406,6 +462,7 @@ class Api:
         if job.edits_sha1 is None or job.edits_sha1 == subtitles.transcript_sha1(tr):
             return False
         job.word_edits, job.line_times, job.edits_sha1 = {}, {}, None
+        self._history.pop(job.id, None)   # 옛 받아쓰기 기준 수정은 되돌려도 맞지 않는다
         self._store.save()
         return True
 
@@ -446,12 +503,14 @@ class Api:
             job = self._job(job_id)
             if job is None or job.status not in (Status.REVIEW, Status.SAVED):
                 return None
+            before = self._snap(job)
             if not change(job, tr):
                 return None
             if job.edits_sha1 is None and (job.word_edits or job.line_times):
                 job.edits_sha1 = subtitles.transcript_sha1(tr)
             elif not (job.word_edits or job.line_times):
                 job.edits_sha1 = None
+            self._record(job, before)
             if job.status == Status.SAVED:
                 job.status = Status.REVIEW
             self._store.save()
@@ -460,14 +519,14 @@ class Api:
         st = self._caption_state_ex(job_id)
         if st is None:
             return None
-        return {"captions": st[3], "edits_dropped": dropped or st[4]}
+        return {"captions": st[3], "edits_dropped": dropped or st[4], "history": self._hist(job_id)}
 
     def get_captions(self, job_id: str) -> dict | None:
         """{"captions": 목록, "edits_dropped": 받아쓰기가 바뀌어 고친 자막을 버린 그 한 번만 True}."""
         st = self._caption_state_ex(job_id)
         if st is None:
             return None
-        return {"captions": st[3], "edits_dropped": st[4]}
+        return {"captions": st[3], "edits_dropped": st[4], "history": self._hist(job_id)}
 
     def set_word(self, job_id: str, key: str, text: str | None) -> dict | None:
         """어절 글자를 고친다. text 가 None 이거나 원래 글자와 같으면 원래대로."""
@@ -504,7 +563,8 @@ class Api:
             edited = self._edit_subs(job_id, change)
             if edited is None:
                 return None
-            result.update(captions=edited["captions"], edits_dropped=edited["edits_dropped"] or st[4])
+            result.update(captions=edited["captions"], edits_dropped=edited["edits_dropped"] or st[4],
+                          history=edited["history"])
         return result
 
     def set_line_time(self, job_id: str, key: str, start: float | None, end: float | None) -> dict | None:
@@ -567,7 +627,7 @@ class Api:
             job = self._job(job_id)
             if job is None:
                 return None
-            src, summary, prev, status = Path(job.src), job.summary, job.prev_cuts, job.status
+            src, summary, status = Path(job.src), job.summary, job.status
             restored = [list(r) for r in job.restored]
             ops = [dict(o) for o in job.range_ops]
             save_dir = Path(self._store.settings["save_dir"])
@@ -579,11 +639,6 @@ class Api:
             with self._queue.lock:
                 job = self._job(job_id)
                 dropped = job is not None and self._drop_stale_edits(job, transcript)
-        changes = None
-        if prev and cur is not None:
-            old = _read_json(Path(prev))
-            if old is not None:
-                changes = diff.compare(old, cur, transcript)
         duration = 0.0
         try:
             duration = float((transcript or {}).get("duration") or (summary or {}).get("orig_sec") or 0)
@@ -609,7 +664,7 @@ class Api:
             # 슬라이더 설명의 "N초 이상" — 앱의 파이프라인이 쓰는 fillers.json 의 silence_min_sec
             summary = {**summary, "silence_min_sec": _silence_min_sec()}
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "cut_items": items,
-                  "range_ops": ops, "changes": changes,
+                  "range_ops": ops, "history": self._hist(job_id),
                   "preview_url": _preview_url(f"{self._preview_base}/{job_id}/preview.mp4", preview),
                   "duration": duration}
         if dropped:

@@ -137,32 +137,6 @@ def test_remove_start_save_delegate_to_queue(tmp_path):
     assert q.calls == [("start_all",), ("request_save", job.id), ("cancel", job.id)]
 
 
-def test_save_clears_changes_baseline(tmp_path):
-    a, store, q, _ = make(tmp_path)
-    job = add_job(tmp_path, a, store, status=Status.REVIEW)
-    job.prev_cuts = "/x/prev.cuts.json"
-    q.request_save = lambda jid, notify=True: setattr(job, "status", Status.SAVING)
-    a.save(job.id)
-    assert job.prev_cuts is None
-
-
-def test_save_clears_baseline_even_if_render_already_finished(tmp_path):
-    a, store, q, _ = make(tmp_path)
-    job = add_job(tmp_path, a, store, status=Status.REVIEW)
-    job.prev_cuts = "/x/prev.cuts.json"
-    q.request_save = lambda jid, notify=True: setattr(job, "status", Status.SAVED)
-    a.save(job.id)
-    assert job.prev_cuts is None
-
-
-def test_save_rejected_keeps_baseline(tmp_path):
-    a, store, q, _ = make(tmp_path)
-    job = add_job(tmp_path, a, store, status=Status.PROCESSING)
-    job.prev_cuts = "/x/prev.cuts.json"
-    a.save(job.id)
-    assert job.prev_cuts == "/x/prev.cuts.json"
-
-
 # ---- 옵션 --------------------------------------------------------------------
 
 def test_set_fast_option_triggers_rejudge(tmp_path):
@@ -292,7 +266,6 @@ def test_get_result_without_prev(tmp_path):
     preview.write_bytes(b"v")
     r = a.get_result(job.id)
     assert r["cuts"] == [[1, 1.5], [5, 5.5]]
-    assert r["changes"] is None
     assert r["duration"] == 10.0
     assert r["summary"] == {**job.summary, "silence_cuts": 0, "silence_sec": 0.0, "silence_min_sec": 0.3}
     assert r["preview_url"] == f"http://127.0.0.1:9999/jobs/{job.id}/preview.mp4?v={preview.stat().st_mtime_ns}"
@@ -311,16 +284,7 @@ def test_get_result_without_preview_still_usable(tmp_path):
     assert r["summary"] == {**job.summary, "silence_cuts": 0, "silence_sec": 0.0, "silence_min_sec": 0.3}
 
 
-def test_get_result_with_prev_compares(tmp_path):
-    a, store, *_ = make(tmp_path)
-    job = add_job(tmp_path, a, store, status=Status.REVIEW)
-    cut = {"start": 1.0, "end": 1.2, "reason": "filler", "word": "그", "words_idx": [[0, 0]]}
-    write_out(job, "a.cuts.json", {"cuts": [cut]})
-    job.prev_cuts = str(write_out(job, "prev.cuts.json", {"cuts": []}))
-    write_out(job, "a.transcript.json", {"duration": 3.0, "segments": [
-        {"words": [{"word": " 그", "start": 1.0, "end": 1.2}]}]})
-    r = a.get_result(job.id)
-    assert r["changes"]["rows"] == [{"word": "그", "kind": "added", "start": 1.0, "end": 1.2}]
+
 
 
 def test_preview_url_has_version(tmp_path):
@@ -376,7 +340,7 @@ def test_get_result_missing_files(tmp_path):
     job = add_job(tmp_path, a, store)
     job.summary = {"orig_sec": 7.0}
     r = a.get_result(job.id)
-    assert r["cuts"] == [] and r["changes"] is None and r["duration"] == 7.0
+    assert r["cuts"] == [] and r["duration"] == 7.0
 
 
 def test_get_result_saved_paths(tmp_path):
@@ -605,9 +569,8 @@ def test_save_notifies_outside_queue_lock(tmp_path):
             preview_base="http://x")
     job = store.add(video(tmp_path))
     job.status = Status.REVIEW
-    job.prev_cuts = "/x/prev.cuts.json"
     view = a.save(job.id)
-    assert view["status"] == Status.SAVING and job.prev_cuts is None
+    assert view["status"] == Status.SAVING
     gate.set()
     assert q.join(5)
     assert seen[0] == (Status.SAVING, True)
@@ -689,20 +652,6 @@ def test_publish_media_across_volumes(tmp_path, monkeypatch):
     monkeypatch.setattr(api_mod.os, "rename", no_cross)
     assert api_mod.publish_media(media, save) == [save / "x_clean.mp4"]
     assert (save / "x_clean.mp4").read_bytes() == b"v" and [p.name for p in save.iterdir()] == ["x_clean.mp4"]
-
-
-# ---- 옵션을 바꾸면 달라진 곳 초기화 (final-review M1, 스펙 3.3) ----
-
-@pytest.mark.parametrize("status", [Status.REVIEW, Status.SAVED])
-def test_render_option_change_clears_changes(tmp_path, status):
-    a, store, q, push = make(tmp_path)
-    job = add_job(tmp_path, a, store, status=status)
-    write_out(job, "a.cuts.json", {"cuts": []})
-    job.prev_cuts = str(write_out(job, "prev.cuts.json", {"cuts": [{"start": 1, "end": 2}]}))
-    assert a.get_result(job.id)["changes"] is not None
-    assert a.set_option(job.id, "quality", "high")["accepted"]
-    assert job.prev_cuts is None and a.get_result(job.id)["changes"] is None
-    assert Store.load(store.path).get(job.id).prev_cuts is None
 
 
 # ---- 원본이 돌아오면 목록 새로고침 때 되돌린다 (final-review I5) ----

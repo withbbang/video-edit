@@ -12,7 +12,7 @@ def test_roundtrip(tmp_path, monkeypatch):
     ja, jb = s.add(a), s.add(b)
     assert ja.id == paths.job_dir(a).name
     ja.options = JobOptions(habit="all")
-    jb.status, jb.summary, jb.prev_cuts = "review", {"orig_sec": 1.0, "final_sec": 0.5, "cuts": 2, "removed_sec": 0.5}, "x.json"
+    jb.status, jb.summary = "review", {"orig_sec": 1.0, "final_sec": 0.5, "cuts": 2, "removed_sec": 0.5}
     s.settings["save_dir"] = "/z/한글"
     s.save()
     r = Store.load(tmp_path / "state.json")

@@ -201,8 +201,6 @@ def test_diff_shows_gap_as_silence():
     with_word = {"start": 5.0, "end": 6.0, "word": "(무음) + 음", "reason": "gap + filler", "words_idx": [[0, 1]]}
     items = diff.cut_items({"cuts": [gap, both, with_word]}, [])
     assert [i["kind"] for i in items] == ["silence", "silence", "filler"]
-    r = diff.compare({"cuts": []}, {"cuts": [gap]})
-    assert r["silence"] == {"added": 1, "restored": 0} and r["rows"] == []
 
 
 def partial_overlap(a_db=-31.0, b_db=-30.6, bg=-36):
