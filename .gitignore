@@ -8,3 +8,9 @@ __pycache__/
 .DS_Store
 *.swp
 .superpowers/
+
+# 패키징 결과물
+packaging/bin/
+build/
+dist/
+*.dmg

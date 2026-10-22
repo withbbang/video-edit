@@ -1,0 +1,65 @@
+youtube-edit — 함께 배포하는 다른 소프트웨어와 라이선스
+=====================================================
+
+youtube-edit 은 GNU General Public License 버전 3 (GPL-3.0) 으로 배포됩니다. 전문은 LICENSE 파일에 있습니다.
+소스 코드: https://github.com/withbbang/video-edit
+
+설치 파일에는 아래 프로그램·라이브러리가 함께 들어 있습니다. 각각의 저작권은 해당 저작자에게 있습니다.
+
+=== BEGIN ffmpeg (packaging/fetch_ffmpeg.py 가 쓰는 부분, 손으로 고치지 마세요) ===
+
+FFmpeg 9.0.2 (ffmpeg, ffprobe 실행 파일)
+  이 프로그램은 FFmpeg 프로젝트(https://ffmpeg.org/)의 ffmpeg/ffprobe 를 별도 실행 파일로 함께 배포합니다.
+  이 FFmpeg 빌드는 GNU General Public License 버전 3 으로 배포됩니다. 라이선스 전문은 함께 들어 있는
+  LICENSE 파일(GPL-3.0)과 https://www.gnu.org/licenses/gpl-3.0.html 에 있습니다.
+  FFmpeg 소스 코드: https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+  (FFmpeg 저장소: https://git.ffmpeg.org/ffmpeg.git , 라이선스 안내: https://ffmpeg.org/legal.html)
+
+  [macOS (Apple Silicon arm64)]
+    빌드: ffmpeg 9.0.2 정적 빌드, Martin Riedl (https://ffmpeg.martin-riedl.de/)
+    구성: --enable-gpl --enable-version3 (libx264, libx265, VideoToolbox 포함)
+    라이선스: GNU GPL v3 (--enable-gpl --enable-version3)
+    빌드 스크립트: https://git.martin-riedl.de/ffmpeg/build-script
+    받은 파일: https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffmpeg.zip
+      sha256 c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924
+    받은 파일: https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffprobe.zip
+      sha256 fcbe839537485eaee7a7a8bc5cbc0f90d53617e80943e8a5b2e31cb851197ea6
+
+  [Windows (x64)]
+    빌드: ffmpeg 9.0.2 essentials 정적 빌드, Gyan Doshi (https://www.gyan.dev/ffmpeg/builds/)
+    구성: --enable-gpl --enable-version3 (libx264, libx265 포함)
+    라이선스: GNU GPL v3
+    FFmpeg 소스 커밋: https://github.com/FFmpeg/FFmpeg/commit/946fcce07b
+    받은 파일: https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip
+      sha256 60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba
+
+=== END ffmpeg ===
+
+RNNoise 노이즈 모델 (models/sh.rnnn, "somnolent-hogwash")
+  출처: https://github.com/GregorR/rnnoise-models
+  RNNoise: https://github.com/xiph/rnnoise (BSD-3-Clause)
+
+파이썬과 파이썬 패키지 (PyInstaller 로 묶음)
+  Python                     PSF License             https://www.python.org/
+  PyInstaller (부트로더)       GPL-2.0 + 부트로더 예외   https://pyinstaller.org/
+  pywebview                  BSD-3-Clause            https://github.com/r0x0r/pywebview
+  faster-whisper             MIT                     https://github.com/SYSTRAN/faster-whisper
+  CTranslate2                MIT                     https://github.com/OpenNMT/CTranslate2
+  PyAV (av)                  BSD-3-Clause            https://github.com/PyAV-Org/PyAV
+    PyAV 휠에 든 FFmpeg 라이브러리(libav*)는 LGPL/GPL — 소스는 위 FFmpeg 소스 주소와
+    https://github.com/PyAV-Org/pyav-ffmpeg
+  ONNX Runtime               MIT                     https://github.com/microsoft/onnxruntime
+  tokenizers                 Apache-2.0              https://github.com/huggingface/tokenizers
+  huggingface_hub            Apache-2.0              https://github.com/huggingface/huggingface_hub
+  transformers               Apache-2.0              https://github.com/huggingface/transformers
+  PyTorch (CPU)              BSD-3-Clause            https://github.com/pytorch/pytorch
+  NumPy                      BSD-3-Clause            https://github.com/numpy/numpy
+  pyobjc (맥)                 MIT                     https://github.com/ronaldoussoren/pyobjc
+  pythonnet / clr-loader (윈도우) MIT                 https://github.com/pythonnet/pythonnet
+
+내려받는 모델 (설치 파일에는 없음, 처음 실행할 때 Hugging Face 에서 받음)
+  mobiuslabsgmbh/faster-whisper-large-v3-turbo   MIT (OpenAI Whisper)
+  kresnik/wav2vec2-large-xlsr-korean             Apache-2.0
+
+Microsoft Edge WebView2 런타임 (윈도우, 없을 때 설치 프로그램이 Microsoft 의 Evergreen 부트스트래퍼를 받아 실행)
+  https://developer.microsoft.com/microsoft-edge/webview2/
