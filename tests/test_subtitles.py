@@ -137,3 +137,49 @@ def test_captions_match_render_path_with_frame_snapping():
     got = subtitles.captions(cuts_json, TR, cfg, {}, {})
     assert [(c["key"], c["start"], c["end"], [w["key"] for w in c["words"]]) for c in got] == \
            [(c["key"], c["start"], c["end"], [w["key"] for w in c["words"]]) for c in expect]
+
+
+def test_save_subs_edits_writes_and_cleans(tmp_path):
+    from app import api as api_mod
+    a, store, job, _ = setup(tmp_path)
+    assert api_mod.save_subs_edits(job) is None
+    a.set_word(job.id, "0:1", "여러분들")
+    a.set_line_time(job.id, a.get_captions(job.id)[0]["key"], 0.0, 1.0)
+    p = api_mod.save_subs_edits(job)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["transcript_sha1"] == subtitles.transcript_sha1(TR)
+    assert data["words"] == {"0:1": "여러분들"} and list(data["lines"]) == list(job.line_times)
+    a.set_word(job.id, "0:1", None)
+    a.set_line_time(job.id, next(iter(job.line_times)), None, None)
+    assert job.edits_sha1 is None
+    assert api_mod.save_subs_edits(job) is None and not p.exists()
+
+
+def test_edits_survive_rejudge(tmp_path):
+    a, store, job, _ = setup(tmp_path)
+    a.set_word(job.id, "0:1", "여러분들")
+    ops = [{"op": "cut", "start": 10.0, "end": 11.0}]
+    job.range_ops = list(ops)
+    write_out(job, "a.cuts.json", {"cuts": [{"start": 1.0, "end": 1.5, "kind": "silence", "word": "", "reason": "silence",
+                                             "context": "", "seg": -1}]})  # 다시 판정
+    caps = a.get_captions(job.id)
+    words = {w["key"]: w for c in caps for w in c["words"]}
+    assert words["0:1"]["text"] == "여러분들" and store.get(job.id).word_edits == {"0:1": "여러분들"}
+    assert store.get(job.id).range_ops == ops
+
+
+def test_stale_edits_dropped(tmp_path):
+    a, store, job, _ = setup(tmp_path)
+    a.set_word(job.id, "0:1", "여러분들")
+    other = json.loads(json.dumps(TR))
+    other["segments"][0]["words"][0]["word"] = " 안녕"
+    write_out(job, "a.transcript.json", other)
+    r = a.get_captions(job.id)
+    assert isinstance(r, dict) and r["edits_dropped"] is True
+    assert store.get(job.id).word_edits == {} and store.get(job.id).edits_sha1 is None
+    assert isinstance(a.get_captions(job.id), list)          # 한 번만
+
+    a.set_word(job.id, "0:1", "여러분들")
+    write_out(job, "a.transcript.json", TR)
+    assert a.get_result(job.id)["edits_dropped"] is True
+    assert "edits_dropped" not in a.get_result(job.id)

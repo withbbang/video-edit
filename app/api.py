@@ -117,7 +117,7 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
         media = media_dir(job)
         shutil.rmtree(media, ignore_errors=True)   # 지난번에 멈춘 저장의 찌꺼기
         media.mkdir(parents=True, exist_ok=True)
-        cmd, weights = runner.render_command(job, model, device, media, save_cuts(job)), RENDER_WEIGHTS
+        cmd, weights = runner.render_command(job, model, device, media, save_cuts(job), save_subs_edits(job)), RENDER_WEIGHTS
     else:
         raise ValueError(f"알 수 없는 작업 종류: {kind}")
     if device == "cuda":
@@ -136,6 +136,19 @@ def save_cuts(job: Job) -> Path | None:
     path = out / f"{src.stem}.save.cuts.json"
     path.write_text(json.dumps(diff.effective_cuts(cur, job.restored, job.range_ops, tr), ensure_ascii=False, indent=1),
                     encoding="utf-8")
+    return path
+
+
+def save_subs_edits(job: Job) -> Path | None:
+    """저장용 자막 수정 파일 <이름>.subs_edits.json. 어절·줄 시간 수정이 없으면 낡은 파일을 지우고 None."""
+    src = Path(job.src)
+    path = paths.job_dir(src) / "out" / f"{src.stem}.subs_edits.json"
+    if not (job.word_edits or job.line_times) or not job.edits_sha1:
+        path.unlink(missing_ok=True)
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"transcript_sha1": job.edits_sha1, "words": job.word_edits,
+                                "lines": job.line_times}, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
 
 
@@ -350,34 +363,54 @@ class Api:
 
     # ---- 자막 고치기 ----------------------------------------------------------
 
-    def _caption_state(self, job_id: str):
-        """(job, cuts, transcript, caps) — 파일을 못 읽으면 None."""
+    def _drop_stale_edits(self, job: Job, tr: dict) -> bool:
+        """고친 자막을 만들 때의 받아쓰기 지문이 지금과 다르면 어절·줄 시간 수정을 버린다 (구간 작업은 시간 기준이라 남김).
+        버렸으면 True. queue.lock 을 쥔 채 부른다."""
+        if job.edits_sha1 is None or job.edits_sha1 == subtitles.transcript_sha1(tr):
+            return False
+        job.word_edits, job.line_times, job.edits_sha1 = {}, {}, None
+        self._store.save()
+        return True
+
+    def _caption_state_ex(self, job_id: str):
+        """(job, cuts, transcript, caps, edits_dropped) — 파일을 못 읽으면 None."""
         with self._queue.lock:
             job = self._job(job_id)
             if job is None:
                 return None
             src, restored = Path(job.src), [list(r) for r in job.restored]
             ops = [dict(o) for o in job.range_ops]
-            edits, times = dict(job.word_edits), {k: list(v) for k, v in job.line_times.items()}
         out = paths.job_dir(src) / "out"
         cuts = _read_json(out / f"{src.stem}.cuts.json")
         tr = _read_json(out / f"{src.stem}.transcript.json")
         if cuts is None or tr is None:
             return None
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None:
+                return None
+            dropped = self._drop_stale_edits(job, tr)
+            edits, times = dict(job.word_edits), {k: list(v) for k, v in job.line_times.items()}
         cuts = diff.effective_cuts(cuts, restored, ops, tr)
         try:
             caps = subtitles.captions(cuts, tr, subtitles.load_cfg(), edits, times)
         except Exception:
             log.exception("자막 계산 실패")
             return None
-        return job, cuts, tr, caps
+        return job, cuts, tr, caps, dropped
 
-    def _edit_subs(self, job_id: str, change: Callable[[Job, dict], bool]) -> list | None:
-        """자막 수정 공통: 확인 대기·저장됨에서만. change(job, tr) 가 False 면 거절. → 새 자막 목록."""
-        st = self._caption_state(job_id)
+    def _caption_state(self, job_id: str):
+        """(job, cuts, transcript, caps) — 파일을 못 읽으면 None."""
+        st = self._caption_state_ex(job_id)
+        return st[:4] if st else None
+
+    def _edit_subs(self, job_id: str, change: Callable[[Job, dict], bool]) -> list | dict | None:
+        """자막 수정 공통: 확인 대기·저장됨에서만. change(job, tr) 가 False 면 거절. → 새 자막 목록
+        (고치기 직전에 낡은 수정을 버렸으면 get_captions 와 같이 {"captions", "edits_dropped"})."""
+        st = self._caption_state_ex(job_id)
         if st is None:
             return None
-        _, _, tr, _ = st
+        _, _, tr, _, dropped = st
         with self._queue.lock:
             job = self._job(job_id)
             if job is None or job.status not in (Status.REVIEW, Status.SAVED):
@@ -386,16 +419,24 @@ class Api:
                 return None
             if job.edits_sha1 is None and (job.word_edits or job.line_times):
                 job.edits_sha1 = subtitles.transcript_sha1(tr)
+            elif not (job.word_edits or job.line_times):
+                job.edits_sha1 = None
             if job.status == Status.SAVED:
                 job.status = Status.REVIEW
             self._store.save()
             view = job_view(job)
         self._push("job", view)
-        return self.get_captions(job_id)
+        caps = self.get_captions(job_id)
+        if dropped and caps is not None:
+            return {"captions": caps, "edits_dropped": True}
+        return caps
 
-    def get_captions(self, job_id: str) -> list | None:
-        st = self._caption_state(job_id)
-        return st[3] if st else None
+    def get_captions(self, job_id: str) -> list | dict | None:
+        """자막 목록. 받아쓰기가 바뀌어 고친 자막을 버린 그 한 번만 {"captions": 목록, "edits_dropped": True}."""
+        st = self._caption_state_ex(job_id)
+        if st is None:
+            return None
+        return {"captions": st[3], "edits_dropped": True} if st[4] else st[3]
 
     def set_word(self, job_id: str, key: str, text: str | None) -> list | None:
         """어절 글자를 고친다. text 가 None 이거나 원래 글자와 같으면 원래대로."""
@@ -493,6 +534,11 @@ class Api:
         out = paths.job_dir(src) / "out"
         cur = _read_json(out / f"{src.stem}.cuts.json")
         transcript = _read_json(out / f"{src.stem}.transcript.json")
+        dropped = False
+        if transcript is not None:
+            with self._queue.lock:
+                job = self._job(job_id)
+                dropped = job is not None and self._drop_stale_edits(job, transcript)
         changes = None
         if prev and cur is not None:
             old = _read_json(Path(prev))
@@ -524,6 +570,8 @@ class Api:
                   "changes": changes,
                   "preview_url": f"{self._preview_base}/{job_id}/preview.mp4" if preview.is_file() else None,
                   "duration": duration}
+        if dropped:
+            result["edits_dropped"] = True
         if status == Status.SAVED:
             names = [f"{src.stem}_clean.mp4", f"{src.stem}_clean.m4a", f"{src.stem}_clean.srt"]
             result["saved_paths"] = [str(save_dir / n) for n in names if (save_dir / n).is_file()]

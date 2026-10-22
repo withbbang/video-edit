@@ -101,3 +101,12 @@ def test_read_summary(tmp_path):
     (out / "강의 03 (최종).transcript.json").write_text(json.dumps({"duration": 60.0}))
     s = runner.read_summary(job)
     assert s == {"orig_sec": 60.0, "final_sec": 57.5, "cuts": 2, "removed_sec": 2.5}
+
+
+def test_render_command_passes_edits(tmp_path):
+    job = Job(id="j", src=str(tmp_path / "a.mp4"))
+    base = runner.render_command(job, ModelPaths("/m/w", "/m/c"), "cpu", tmp_path / "save")
+    assert "--subs-edits" not in base
+    cmd = runner.render_command(job, ModelPaths("/m/w", "/m/c"), "cpu", tmp_path / "save",
+                                edits_path=tmp_path / "e.json")
+    assert cmd[cmd.index("--subs-edits") + 1] == str(tmp_path / "e.json")
