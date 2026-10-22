@@ -589,7 +589,7 @@ class Api:
             sil = _union([c for c in (cur or {}).get("cuts", []) if diff._is_silence(c)])
             summary = {**(summary or {}), "silence_cuts": len(sil), "silence_sec": sum(b - a for a, b in sil)}
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "cut_items": items,
-                  "changes": changes,
+                  "range_ops": ops, "changes": changes,
                   "preview_url": _preview_url(f"{self._preview_base}/{job_id}/preview.mp4", preview),
                   "duration": duration}
         if dropped:

@@ -93,6 +93,7 @@ def test_list_restore_removes_manual_op(tmp_path):
     assert job.range_ops == [{"op": "cut", "start": 6.0, "end": 7.0}]
     res = a.get_result(job.id)
     assert res["cuts"] == [[1.0, 2.0], [6.0, 7.0]]
+    assert res["range_ops"] == [{"op": "cut", "start": 6.0, "end": 7.0}]   # 화면의 직접 되살림 줄·지우기 번호
     assert res["summary"]["cuts"] == 2 and abs(res["summary"]["removed_sec"] - 2.0) < 1e-9
     assert a.remove_range_op(job.id, 0) is not None
     assert a.get_result(job.id)["cuts"] == [[1.0, 2.0]]

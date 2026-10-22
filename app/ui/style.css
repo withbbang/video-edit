@@ -86,8 +86,8 @@ body.dragging .drop, body.dragging .qi.add { border-color: var(--accent); backgr
 .summary .stat { margin-right: 4px; }
 .err { color: var(--cut); white-space: pre-wrap; -webkit-user-select: text; user-select: text; }
 video { display: block; width: 100%; max-height: 42vh; background: #000; border-radius: 6px; margin-top: 6px; }
-.tl { height: 14px; background: var(--soft); border-radius: 3px; position: relative; margin: 8px 0 4px;
-  cursor: pointer; overflow: hidden; }
+.tl { height: 16px; background: var(--soft); border-radius: 3px; position: relative; margin: 10px 0 4px;
+  cursor: pointer; touch-action: none; }
 .tl b, .tl s { position: absolute; top: 0; height: 100%; min-width: 1px; text-decoration: none; }
 .tl b { background: var(--cut); }
 .tl s { background: var(--changed); }
@@ -183,3 +183,21 @@ input[type=text] { -webkit-user-select: text; user-select: text; }
 .find input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .find input:disabled { opacity: .5; }
 .find .n { color: var(--muted); white-space: nowrap; }
+
+/* 타임라인 구간 고르기 (끌어서 잡고 여기서 시작/끝·0.1초로 다듬기) */
+.tl .rsel { position: absolute; top: -3px; bottom: -3px; min-width: 2px; border: 2px solid var(--accent);
+  background: #4a7dff33; border-radius: 3px; pointer-events: none; }
+.tl .rsel.mark { border-width: 0 0 0 2px; background: none; border-radius: 0; }
+.tl .rsel .hd { position: absolute; top: 2px; bottom: 2px; width: 7px; background: var(--accent); border-radius: 2px;
+  cursor: ew-resize; pointer-events: auto; }
+.tl .rsel .hd[data-end=start] { left: -5px; }
+.tl .rsel .hd[data-end=end] { right: -5px; }
+.tl .rsel.mark .hd { display: none; }
+.range-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 4px 0 6px; font-size: 12px; }
+.range-bar .lt { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.range-bar .rt { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.range-bar .rt b { padding: 0 6px; border-radius: 4px; background: #4a7dff1a; color: var(--accent);
+  font-variant-numeric: tabular-nums; min-width: 46px; text-align: center; }
+.range-bar .hint { font-size: 11px; }
+.btn.cut { border-color: var(--cut); color: var(--cut); }
+.opt.op-back .w { color: var(--restored); }
