@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import math
 import logging
 import os
 import shutil
@@ -328,6 +329,8 @@ class Api:
             start, end = float(start), float(end)
         except (TypeError, ValueError):
             return None
+        if not (math.isfinite(start) and math.isfinite(end)):
+            return None
 
         def change(job: Job) -> bool:
             if op not in ("cut", "restore") or start < 0 or end - start < 0.05 or end > self._duration(job):
@@ -506,9 +509,15 @@ class Api:
         if (restored or ops) and cur is not None:
             # 되살린 곳은 미리보기에서 건너뛰지 않고 요약에서도 뺀다 (저장도 같은 목록으로 한다)
             kept = diff.effective_cuts(cur, restored, ops, transcript)["cuts"]
-            removed = sum(float(c["end"]) - float(c["start"]) for c in kept)
+            merged: list[list[float]] = []
+            for a, b in sorted((float(c["start"]), float(c["end"])) for c in kept):
+                if merged and a <= merged[-1][1]:
+                    merged[-1][1] = max(merged[-1][1], b)
+                else:
+                    merged.append([a, b])
+            removed = sum(b - a for a, b in merged)
             orig = float((summary or {}).get("orig_sec") or duration)
-            summary = {**(summary or {}), "cuts": len(kept), "removed_sec": removed,
+            summary = {**(summary or {}), "cuts": len(merged), "removed_sec": removed,
                        "final_sec": max(orig - removed, 0.0), "restored": sum(1 for c in cur["cuts"] if diff.is_restored(c, restored))}
             cur = {**cur, "cuts": kept}
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "cut_items": items,

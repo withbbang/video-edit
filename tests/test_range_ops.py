@@ -128,3 +128,17 @@ def test_save_cuts_includes_manual(tmp_path):
     assert p is not None
     data = json.loads(Path(p).read_text(encoding="utf-8"))
     assert any(c.get("reason") == "manual" for c in data["cuts"])
+
+
+def test_summary_unions_overlapping_cuts(tmp_path):
+    a, store, job, _ = setup(tmp_path)
+    a.add_range_op(job.id, "cut", 1.5, 2.5)
+    s = a.get_result(job.id)["summary"]
+    assert s["cuts"] == 1 and abs(s["removed_sec"] - 1.5) < 1e-9 and abs(s["final_sec"] - 8.5) < 1e-9
+
+
+def test_range_op_rejects_non_finite(tmp_path):
+    a, store, job, _ = setup(tmp_path)
+    for s, e in [(float("nan"), 2), (1, float("inf")), (float("-inf"), 2), (1, float("nan"))]:
+        assert a.add_range_op(job.id, "cut", s, e) is None
+    assert job.range_ops == []

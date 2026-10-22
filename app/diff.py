@@ -163,7 +163,7 @@ def _apply_ops(cuts, range_ops, transcript):
             cur = [(p, src) for c, src in cur for p in _subtract(c, a, b, transcript)]
         else:
             cur.append(({"start": a, "end": b, "word": f"({MANUAL_LABEL})", "reason": MANUAL, "context": "",
-                         "seg": 0, "words_idx": _midpoint_words(transcript, a, b)}, n))
+                         "seg": -1, "words_idx": _midpoint_words(transcript, a, b)}, n))
     return cur
 
 
