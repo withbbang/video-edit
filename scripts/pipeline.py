@@ -306,13 +306,12 @@ WIN_CRASH_CODES = {3221225477, -1073741819,   # 0xC0000005 접근 위반
                    3221226505, -1073740791}   # 0xC0000409 (CUDA/cuDNN 로드 실패 때 흔함)
 
 
-def probe_whisper_windows(model_name: str, device: str, compute_type: str, threads: int) -> None:
+def probe_whisper_windows(model_name: str, device: str, compute_type: str, threads: int, marker: Path) -> None:
     """일부 Windows PC 에선 ctranslate2 4.5+ 가 모델 로드·첫 전사에서 파이썬 오류 없이 프로세스째 죽는다.
     본 프로세스에서 죽으면 사용자는 원인을 알 수 없으니, 처음 한 번 별도 프로세스로 로드+짧은 전사를 해 보고
     죽으면 고치는 방법을 알려 준다. 성공하면 work/ 에 기록해 ctranslate2 버전·설정이 같으면 다시 하지 않는다."""
     from importlib.metadata import version
     key = {"ctranslate2": version("ctranslate2"), "model": model_name, "device": device, "compute_type": compute_type}
-    marker = ROOT / "work" / ".whisper_probe.json"
     try:
         if json.loads(marker.read_text(encoding="utf-8")) == key:
             return
@@ -344,20 +343,20 @@ def probe_whisper_windows(model_name: str, device: str, compute_type: str, threa
                  "  winget install Microsoft.VCRedist.2015+.x64")
 
 
-def load_whisper(model_name: str, device: str, compute_type: str):
+def load_whisper(model_name: str, device: str, compute_type: str, probe_marker: Path):
     try:
         from faster_whisper import WhisperModel
     except ImportError:
         sys.exit("오류: faster-whisper 가 설치되지 않았습니다. ./setup.sh 를 먼저 실행하세요.")
     threads = perf_cores()
     if os.name == "nt":
-        probe_whisper_windows(model_name, device, compute_type, threads)
+        probe_whisper_windows(model_name, device, compute_type, threads, probe_marker)
     log(f"Whisper 모델 로드: {model_name} (device={device}, compute={compute_type}, threads={threads})")
     return WhisperModel(model_name, device=device, compute_type=compute_type, cpu_threads=threads)
 
 
 def transcribe(asr_wav: Path, out_json: Path, audio_key: dict, model_name: str, device: str,
-               compute_type: str, prompt: str, force: bool) -> dict:
+               compute_type: str, prompt: str, force: bool, probe_marker: Path) -> dict:
     key = {"audio": audio_key, "model": model_name, "compute_type": compute_type, "hotwords": prompt}
     if out_json.exists() and not force:
         try:
@@ -370,7 +369,7 @@ def transcribe(asr_wav: Path, out_json: Path, audio_key: dict, model_name: str, 
         log("원본·오디오·모델·프롬프트 중 바뀐 것이 있어 전사를 다시 합니다")
 
     log("  처음 한 번은 모델 다운로드(1~3GB)로 시간이 걸립니다")
-    model = load_whisper(model_name, device, compute_type)
+    model = load_whisper(model_name, device, compute_type, probe_marker)
 
     log("전사 시작 (한국어, 단어 타임스탬프, 필러 보존 프롬프트)")
     segments_iter, info = model.transcribe(str(asr_wav), **whisper_options(prompt))
@@ -556,13 +555,13 @@ CTC_MODEL = "kresnik/wav2vec2-large-xlsr-korean"  # 한글 음절 단위 CTC 모
 class CtcAligner:
     """wav2vec2 CTC 강제 정렬. 텍스트를 알 때 글자마다 소리가 난 프레임을 찾는다.
     긴 구간에선 이 모델도 헤매므로 필러 주변 몇 초짜리 창에만 쓴다."""
-    def __init__(self):
+    def __init__(self, model_id: str):
         import torch
         from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
-        log(f"정렬 모델 로드: {CTC_MODEL} (처음 한 번은 약 1.2GB 다운로드)")
+        log(f"정렬 모델 로드: {model_id} (처음 한 번은 약 1.2GB 다운로드)")
         self.torch = torch
-        self.proc = Wav2Vec2Processor.from_pretrained(CTC_MODEL)
-        self.model = Wav2Vec2ForCTC.from_pretrained(CTC_MODEL).eval()
+        self.proc = Wav2Vec2Processor.from_pretrained(model_id)
+        self.model = Wav2Vec2ForCTC.from_pretrained(model_id).eval()
         self.vocab = self.proc.tokenizer.get_vocab()
         self.blank = self.proc.tokenizer.pad_token_id
 
@@ -640,7 +639,8 @@ def filler_needs_ctc(k: int, words: list, cfg: dict, quiet, hop: float, suspects
     return None
 
 
-def ctc_fix_fillers(tr: dict, asr_wav: Path, rms: list[float], hop: float, cfg: dict) -> tuple[int, list[dict]]:
+def ctc_fix_fillers(tr: dict, asr_wav: Path, rms: list[float], hop: float, cfg: dict,
+                    ctc_model: str = CTC_MODEL) -> tuple[int, list[dict]]:
     """시간이 의심스러운 필러만 주변 몇 초를 CTC 로 정렬해 필러와 이웃 단어의 시간을 바로잡는다 (tr 을 직접 고침).
     정렬이 그럴듯할 때만 쓴다: 모든 글자가 소리 나는 곳에 있고, 필러가 Whisper 위치에서 0.3초 안에 있어야 한다."""
     import numpy as np
@@ -658,7 +658,7 @@ def ctc_fix_fillers(tr: dict, asr_wav: Path, rms: list[float], hop: float, cfg: 
     if not todo:
         return 0, []
     try:
-        aligner = CtcAligner()
+        aligner = CtcAligner(ctc_model)
     except ImportError:
         log("경고: torch/transformers 가 없어 필러 시간 보정을 건너뜁니다 (./setup.sh 로 설치). 해당 필러는 review.md 참고")
         return 0, [{"start": words[k][2]["start"], "end": words[k][2]["end"], "word": words[k][2]["word"].strip(),
@@ -1172,7 +1172,7 @@ def load_cut_list(path: Path, tr: dict, fps: Fraction,
     return merge_cuts(cuts, fps, 0), data.get("skipped", []), modes
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="유튜브 영상 정리: 노이즈 제거 → 필러 컷 → SRT")
     ap.add_argument("input", type=Path)
     ap.add_argument("--out", type=Path, default=ROOT / "output")
@@ -1200,7 +1200,15 @@ def main() -> None:
                     help="--hw on 일 때 비트레이트 (기본 auto: 해상도·프레임 수에 맞춤, 예: 20M)")
     ap.add_argument("--preset", default="medium", help="--hw off 일 때 인코딩 속도")
     ap.add_argument("--force", action="store_true", help="work/ 캐시 무시하고 전부 다시")
-    args = ap.parse_args()
+    ap.add_argument("--work-root", type=Path, default=ROOT / "work", help="작업 캐시 폴더 (기본 work/)")
+    ap.add_argument("--media-out", type=Path, default=None,
+                    help="_clean.mp4/.m4a 와 _clean.srt 를 둘 폴더 (기본 --out). 나머지 산출물은 --out")
+    ap.add_argument("--ctc-model", default=CTC_MODEL, help="필러 시간 보정용 정렬 모델 (허브 ID 또는 로컬 폴더)")
+    return ap
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     if args.review and args.apply_cuts:
         sys.exit("오류: --review 와 --apply-cuts 는 함께 쓸 수 없습니다 (--apply-cuts 는 바로 렌더합니다)")
 
@@ -1212,7 +1220,7 @@ def main() -> None:
 
     stem = src.stem
     out_dir = args.out.resolve(); out_dir.mkdir(parents=True, exist_ok=True)
-    work = ROOT / "work" / stem; work.mkdir(parents=True, exist_ok=True)
+    work = args.work_root.resolve() / stem; work.mkdir(parents=True, exist_ok=True)
     with RunLock(work / "run.lock"):
         process(args, src, stem, out_dir, work, t_start)
 
@@ -1236,7 +1244,7 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     # 2) 전사
     tr_path = out_dir / f"{stem}.transcript.json"
     tr = transcribe(asr_wav, tr_path, audio_key, args.model, args.device, args.compute_type,
-                    cfg.get("prompt", ""), args.force)
+                    cfg.get("prompt", ""), args.force, args.work_root / ".whisper_probe.json")
     # 필러 시간 보정은 사전(단어 목록)에 따라 대상이 달라진다 → 사전이 바뀌면 원래 시간으로 되돌려 다시 한다
     align_key = {"v": ALIGN_VERSION, "words": sorted(cfg["_always"] | cfg["_habit"] | cfg["_pause_after"]),
                  "never": sorted(cfg["_never"]), "silence": [cfg.get("silence_threshold_db", -40),
@@ -1247,7 +1255,7 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
             if "whisper" in w:
                 w["start"], w["end"] = w.pop("whisper")
         rms, hop = load_rms(asr_wav)
-        n, align_failed = ctc_fix_fillers(tr, asr_wav, rms, hop, cfg)
+        n, align_failed = ctc_fix_fillers(tr, asr_wav, rms, hop, cfg, args.ctc_model)
         if n or align_failed:
             log(f"필러 시간 보정: {n}곳 (실패 {len(align_failed)}곳)")
         tr["align"], tr["align_failed"] = align_key, align_failed
@@ -1305,7 +1313,8 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         sys.exit("오류: 남길 구간이 없습니다 (전부 컷 대상). --silence off 등으로 다시 실행해 보세요.")
 
     # 4) SRT — 영상과 같은 이름이어야 윈도우 기본 플레이어 등이 자동으로 불러온다
-    out_media = out_dir / (f"{stem}_clean.mp4" if info["has_video"] else f"{stem}_clean.m4a")
+    media_dir = (args.media_out or out_dir).resolve(); media_dir.mkdir(parents=True, exist_ok=True)
+    out_media = media_dir / (f"{stem}_clean.mp4" if info["has_video"] else f"{stem}_clean.m4a")
     final_dur = sum(ef - sf for sf, ef in keeps) / float(fps)
     srt_path = out_media.with_suffix(".srt")
     srt_text = build_srt(tr, TimeRemap(cuts), final_dur, cfg["_always"], cfg["_single_only"])
