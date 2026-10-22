@@ -36,6 +36,7 @@ class Job:
     summary: dict | None = None   # {"orig_sec", "final_sec", "cuts", "removed_sec"}
     prev_cuts: str | None = None  # 직전 판정 cuts.json 경로 (diff 기준)
     before_missing: str | None = None  # 원본 없음이 되기 전 상태 (원본이 돌아오면 되돌린다)
+    restored: list = field(default_factory=list)  # 사용자가 되살린 컷 [[시작, 끝], ...] (diff.is_restored)
 
     def to_dict(self) -> dict:
         d = asdict(self)

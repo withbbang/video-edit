@@ -70,3 +70,48 @@ def compare(old: dict, new: dict, transcript: dict | None = None) -> dict:
 
 def cut_ranges(cuts_json: dict) -> list:
     return sorted([c["start"], c["end"]] for c in cuts_json.get("cuts", []))
+
+
+# ---- 잘린 곳 되살리기 --------------------------------------------------------
+# 되살린 곳은 사용자가 고른 컷의 [시작, 끝] 으로 기억한다. 옵션을 바꿔 다시 판정하면 컷 경계가 조금 달라질 수 있어
+# 새 컷 길이의 절반 이상이 되살린 구간과 겹치면 같은 자리로 본다.
+
+def is_restored(cut: dict, restored: list) -> bool:
+    length = float(cut["end"]) - float(cut["start"])
+    if length <= 0:
+        return False
+    return any(min(float(cut["end"]), b) - max(float(cut["start"]), a) >= length / 2 for a, b in restored)
+
+
+def _is_placeholder(word: str) -> bool:
+    return word.startswith("(") and word.endswith(")")
+
+
+def _kind(cut: dict) -> str:
+    """화면에 보일 종류: 합쳐진 컷("(전사 누락) + 좀" / "filler(전사 누락) + habit")은 실제 단어의 이유를 앞세우고,
+    단어가 없으면 말 쪽 이유, 그것도 없으면 무음."""
+    kinds = [p.split("(")[0] for p in _parts(cut)]
+    words = [w.strip() for w in str(cut.get("word", "")).split(" + ")]
+    if len(words) == len(kinds):
+        for w, k in zip(words, kinds):
+            if w and not _is_placeholder(w) and k:
+                return k
+    return next((k for k in kinds if k and k != "silence"), "silence")
+
+
+def _label(cut: dict) -> str:
+    """합쳐진 컷의 단어에서 (무음)·(전사 누락) 같은 자리표시는 뺀다."""
+    words = [w.strip() for w in str(cut.get("word", "")).split(" + ")]
+    return " ".join(w for w in words if w and not _is_placeholder(w))
+
+
+def cut_items(cuts_json: dict, restored: list) -> list:
+    """결과 화면의 '잘린 곳' 목록: 시간순, 되살렸는지 포함."""
+    return sorted(({"start": c["start"], "end": c["end"], "word": _label(c), "kind": _kind(c),
+                    "restored": is_restored(c, restored)} for c in cuts_json.get("cuts", [])),
+                  key=lambda i: (i["start"], i["end"]))
+
+
+def without_restored(cuts_json: dict, restored: list) -> dict:
+    """저장(렌더)용 cuts.json: 되살린 컷만 뺀다. 나머지 키(transcript_sha1 등)는 그대로."""
+    return {**cuts_json, "cuts": [c for c in cuts_json.get("cuts", []) if not is_restored(c, restored)]}

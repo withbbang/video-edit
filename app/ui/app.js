@@ -24,7 +24,7 @@ const ROWS_FIRST = 5;
 const S = {
   jobs: [], sel: null, options: null,
   result: null, resultFor: null, resultKey: null,
-  showAll: false, changedKey: null, saveDir: '', advOpen: false, update: null,
+  showAll: false, showAllCuts: false, changedKey: null, saveDir: '', advOpen: false, update: null,
   resultVersion: 0, drawn: null,
 };
 
@@ -93,7 +93,7 @@ function applyJobs(jobs) {
 function select(id) {
   if (S.sel === id) return;
   S.sel = id; S.options = null; S.result = null; S.resultFor = null; S.resultKey = null;
-  S.showAll = false; S.changedKey = null;
+  S.showAll = false; S.showAllCuts = false; S.changedKey = null;
   player.detach();
   if (id) {
     call('get_options', id).then((o) => { if (S.sel === id && o) { S.options = o; render(); } });
@@ -219,7 +219,7 @@ function renderPrimary() {
 function renderResult(force) {
   const box = $('result');
   const j = selected();
-  const key = j ? [j.id, j.status, j.error, S.resultVersion, S.showAll].join('|') : '';
+  const key = j ? [j.id, j.status, j.error, S.resultVersion, S.showAll, S.showAllCuts].join('|') : '';
   if (!force && key === S.drawn) return;
   S.drawn = key;
   if (!j) { box.replaceChildren(); return; }
@@ -245,13 +245,16 @@ function resultParts(j, r) {
   out.push(h('div', { class: 'summary' },
     h('b', { class: 'stat' }, `${clock(s.orig_sec)} → ${clock(s.final_sec)}`), ' · ',
     h('span', { class: 'stat' }, `${s.cuts || 0}곳 잘림`), ' · ',
-    h('span', { class: 'stat' }, `−${Math.round(Number(s.removed_sec) || 0)}초`)));
+    h('span', { class: 'stat' }, `−${Math.round(Number(s.removed_sec) || 0)}초`),
+    s.restored ? [' · ', h('span', { class: 'stat back' }, `${s.restored}곳 되살림`)] : []));
   // 미리보기를 못 만들어도 컷·요약은 그대로 쓸 수 있다
   out.push(r.preview_url ? player.slot() : h('div', { class: 'err' }, '미리보기를 만들지 못했습니다'));
   out.push(timeline(r));
   out.push(h('div', { class: 'legend' },
-    h('b', { class: 'cut' }, '■ 잘린 곳'), ' · ', h('b', { class: 'changed' }, '■ 달라진 곳')));
+    h('b', { class: 'cut' }, '■ 잘린 곳'), ' · ', h('b', { class: 'changed' }, '■ 달라진 곳'),
+    s.restored ? [' · ', h('b', { class: 'back' }, '▭ 되살린 곳')] : []));
   if (r.changes) out.push(...changeRows(r.changes));
+  out.push(...cutRows(j, r));
   if (j.status === 'saved' && r.saved_paths && r.saved_paths.length) {
     out.push(h('div', { class: 'saved-files' }, r.saved_paths.map((p) => h('div', {}, p))));
   }
@@ -268,6 +271,7 @@ function timeline(r) {
   if (dur > 0) {
     const pos = (a, b) => `left:${(a / dur) * 100}%;width:${((b - a) / dur) * 100}%`;
     for (const [a, b] of r.cuts || []) bar.append(h('b', { style: pos(a, b) }));
+    for (const c of r.cut_items || []) if (c.restored) bar.append(h('u', { style: pos(c.start, c.end) }));
     for (const row of (r.changes && r.changes.rows) || []) bar.append(h('s', { style: pos(row.start, row.end) }));
   }
   bar.append(player.head);
@@ -283,18 +287,46 @@ function changeRows(ch) {
   const shown = S.showAll ? rows : rows.slice(0, ROWS_FIRST);
   for (const row of shown) {
     const added = row.kind === 'added';
-    out.push(h('div', { class: 'opt' },
+    // 줄을 누르면 그 자리 조금 앞부터 지금 모습(잘린 곳은 건너뛰며)으로 들려 준다
+    out.push(h('div', { class: 'opt row', onclick: () => player.clip(row.start, row.end, true) },
       h('span', {}, `${clock(row.start)} “${row.word}” `,
         h('span', { class: added ? 'tag add' : 'tag back' }, added ? '추가 잘림' : '다시 살림')),
-      h('span', { class: 'play' },
-        h('button', { type: 'button', class: 'link', onclick: () => player.clip(row.start, row.end, false) }, '▶ 원본'),
-        ' · ',
-        h('button', { type: 'button', class: 'link', onclick: () => player.clip(row.start, row.end, true) }, '▶ 수정본'))));
+      h('span')));
   }
   if (!S.showAll && rows.length > ROWS_FIRST) {
     out.push(h('div', { class: 'opt more', onclick: () => { S.showAll = true; renderResult(true); } }, h('span', {}, '+ 더 보기'), h('span')));
   }
   return out;
+}
+
+const KIND = { silence: '말 없는 구간', filler: '망설임 소리', habit: '말버릇' };
+
+// 잘린 곳 목록: 하나씩 되살리거나 다시 자를 수 있다 (처리 없이 바로 반영, 저장 때 쓰임)
+function cutRows(j, r) {
+  const items = r.cut_items || [];
+  if (!items.length) return [];
+  const n = items.filter((c) => c.restored).length;
+  const out = [h('h3', { class: 'list-title' }, `잘린 곳 ${items.length}` + (n ? ` · 되살림 ${n}` : ''))];
+  const shown = S.showAllCuts ? items : items.slice(0, ROWS_FIRST);
+  const editable = HAS_RESULT.has(j.status);
+  for (const c of shown) {
+    const name = c.kind === 'silence' || !c.word ? KIND[c.kind] || '' : `“${c.word}”`;
+    const sub = (c.kind === 'silence' || !c.word ? '' : `${KIND[c.kind] || ''} · `) + `${(c.end - c.start).toFixed(1)}초`;
+    out.push(h('div', { class: 'opt row' + (c.restored ? ' undone' : ''), onclick: () => player.clip(c.start, c.end, true) },
+      h('span', {}, h('span', { class: 'w' }, `${clock(c.start)} ${name}`), h('span', { class: 'sec' }, sub)),
+      h('button', { type: 'button', class: 'btn' + (c.restored ? ' on' : ''), disabled: !editable,
+        onclick: (e) => { e.stopPropagation(); setRestored(j.id, c, !c.restored); } },
+        c.restored ? '다시 자르기' : '되살리기')));
+  }
+  if (!S.showAllCuts && items.length > ROWS_FIRST) {
+    out.push(h('div', { class: 'opt more', onclick: () => { S.showAllCuts = true; renderResult(true); } }, h('span', {}, '+ 더 보기'), h('span')));
+  }
+  return out;
+}
+
+async function setRestored(id, c, on) {
+  const r = await call('set_restored', id, c.start, c.end, on);
+  if (r) loadResult(id);
 }
 
 // ---- 미리보기 재생기: 잘린 구간을 건너뛰며 재생 ---------------------------

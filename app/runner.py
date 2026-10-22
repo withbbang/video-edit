@@ -46,11 +46,14 @@ def analyze_command(job: Job, model: ModelPaths, device: str) -> list[str]:
             + _tail(model, device) + analysis_args(job.options))
 
 
-def render_command(job: Job, model: ModelPaths, device: str, media_dir: Path) -> list[str]:
-    """media_dir 은 결과 영상·SRT 를 쓸 임시 폴더 (성공하면 api 가 저장 폴더로 옮긴다)."""
+def render_command(job: Job, model: ModelPaths, device: str, media_dir: Path,
+                   cuts_path: Path | None = None) -> list[str]:
+    """media_dir 은 결과 영상·SRT 를 쓸 임시 폴더 (성공하면 api 가 저장 폴더로 옮긴다).
+    cuts_path 는 되살린 곳을 뺀 컷 목록 (없으면 판정 결과 그대로)."""
     src = Path(job.src)
     jd = paths.job_dir(src)
-    return (pipeline_cmd() + [job.src, "--apply-cuts", str(jd / "out" / f"{src.stem}.cuts.json"),
+    cuts_path = cuts_path or jd / "out" / f"{src.stem}.cuts.json"
+    return (pipeline_cmd() + [job.src, "--apply-cuts", str(cuts_path),
                               "--progress-json", "--out", str(jd / "out"),
                               "--work-root", str(jd / "work"), "--media-out", str(media_dir)]
             + _tail(model, device) + render_args(job.options))

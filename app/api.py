@@ -116,12 +116,25 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
         media = media_dir(job)
         shutil.rmtree(media, ignore_errors=True)   # 지난번에 멈춘 저장의 찌꺼기
         media.mkdir(parents=True, exist_ok=True)
-        cmd, weights = runner.render_command(job, model, device, media), RENDER_WEIGHTS
+        cmd, weights = runner.render_command(job, model, device, media, save_cuts(job)), RENDER_WEIGHTS
     else:
         raise ValueError(f"알 수 없는 작업 종류: {kind}")
     if device == "cuda":
         cmd += ["--compute-type", models.CUDA_COMPUTE_TYPE]
     return cmd, weights, models.pipeline_env(manifest, data_root, store.settings)
+
+
+def save_cuts(job: Job) -> Path | None:
+    """저장용 컷 목록: 판정 결과에서 되살린 곳만 뺀 <이름>.save.cuts.json. 되살린 곳이 없거나 못 읽으면 None(원본 그대로)."""
+    src = Path(job.src)
+    out = paths.job_dir(src) / "out"
+    cur = _read_json(out / f"{src.stem}.cuts.json")
+    if not job.restored or cur is None:
+        return None
+    path = out / f"{src.stem}.save.cuts.json"
+    path.write_text(json.dumps(diff.without_restored(cur, job.restored), ensure_ascii=False, indent=1),
+                    encoding="utf-8")
+    return path
 
 
 def make_execute(store: Store, manifest: dict, data_root: Path, queue_getter: Callable[[], object]):
@@ -269,6 +282,25 @@ class Api:
             self._push("job", view)
         return {"options": opts, "accepted": True}
 
+    def set_restored(self, job_id: str, start: float, end: float, restored: bool) -> dict | None:
+        """잘린 곳 [start, end] 를 되살리거나(True) 다시 자른다(False). 처리 없이 바로 반영되고 저장 때 쓰인다.
+        확인 대기·저장됨 상태에서만. → {"restored": [[시작, 끝], ...]}, 안 되면 None.
+        저장됨이었으면 저장한 파일과 달라지므로 확인 대기로 돌린다."""
+        start, end = float(start), float(end)
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None or job.status not in (Status.REVIEW, Status.SAVED) or end <= start:
+                return None
+            cut = {"start": start, "end": end}
+            others = [r for r in job.restored if not diff.is_restored(cut, [r])]
+            job.restored = others + ([[start, end]] if restored else [])
+            if job.status == Status.SAVED:
+                job.status = Status.REVIEW
+            self._store.save()
+            view, out = job_view(job), [list(r) for r in job.restored]
+        self._push("job", view)
+        return {"restored": out}
+
     # ---- 결과 ----------------------------------------------------------------
 
     def get_result(self, job_id: str) -> dict | None:
@@ -277,6 +309,7 @@ class Api:
             if job is None:
                 return None
             src, summary, prev, status = Path(job.src), job.summary, job.prev_cuts, job.status
+            restored = [list(r) for r in job.restored]
             save_dir = Path(self._store.settings["save_dir"])
         out = paths.job_dir(src) / "out"
         cur = _read_json(out / f"{src.stem}.cuts.json")
@@ -293,7 +326,17 @@ class Api:
             pass
         # 미리보기를 못 만들었으면(분석은 성공) None — 화면은 재생기 대신 안내를 보여 준다
         preview = paths.job_dir(src) / "preview.mp4"
-        result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "changes": changes,
+        items = diff.cut_items(cur, restored) if cur else []
+        if restored and cur is not None:
+            # 되살린 곳은 미리보기에서 건너뛰지 않고 요약에서도 뺀다 (저장도 같은 목록으로 한다)
+            kept = diff.without_restored(cur, restored)["cuts"]
+            removed = sum(float(c["end"]) - float(c["start"]) for c in kept)
+            orig = float((summary or {}).get("orig_sec") or duration)
+            summary = {**(summary or {}), "cuts": len(kept), "removed_sec": removed,
+                       "final_sec": max(orig - removed, 0.0), "restored": len(cur["cuts"]) - len(kept)}
+            cur = {**cur, "cuts": kept}
+        result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "cut_items": items,
+                  "changes": changes,
                   "preview_url": f"{self._preview_base}/{job_id}/preview.mp4" if preview.is_file() else None,
                   "duration": duration}
         if status == Status.SAVED:
