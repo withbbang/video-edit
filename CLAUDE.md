@@ -127,8 +127,9 @@ tests/                pytest (requirements-dev.txt)
   (기본값은 기존 동작): `--progress-json`(@progress 줄 출력), `--render-denoise`/`--render-loudnorm`(렌더 때만 배경 잡음·음량),
   `--preview`(미리보기 파일), `--vbitrate-scale`(화질 배율 0.6/1/1.5), `--work-root`(작업 캐시 폴더),
   `--media-out`(결과 mp4/m4a·srt 저장 폴더), `--ctc-model`(정렬 모델 ID 또는 로컬 폴더),
-  `--silence-level 0~100`(말 없는 구간 세기, 주면 `--silence` 대신: 0 끔 · 1~50 최소 길이 1.0→0.3초 · 50 = `--silence on` ·
-  51~99 자동 무음 기준 상한을 풂 · 100 은 단어 없는 틈도 `gap` 으로 컷. 무음 판정에만 쓰고 정렬 키·필러 판정은 그대로).
+  `--silence-level 0~100`(말 없는 구간 세기, 주면 `--silence` 대신: 0 끔 · 1~50 최소 길이 1.0초→fillers.json 값 · 50 = `--silence on` ·
+  51~100 자동 무음 기준을 말소리 쪽으로 올림(여유 +10dB·상한 +24dB·말소리 여유 −4dB, fillers.json 값에 더함) ·
+  100 은 단어 없는 틈도 `gap` 으로 컷(단어가 하나도 없으면 안 자름). 무음 판정에만 쓰고 정렬 키·필러 판정은 그대로).
 - 사용자 데이터: 맥 `~/Library/Application Support/youtube-edit`, 윈도우 `%APPDATA%\youtube-edit` (`YTEDIT_DATA_DIR` 로 덮어씀).
   앱 설치 폴더에는 쓰지 않는다. 화면 문구는 스펙(`docs/superpowers/specs/2026-10-22-desktop-app-design.md` 3장) 그대로 쓴다.
 - 릴리스: `app/__init__.py` 의 `__version__` 과 같은 `v<버전>` 태그(접미사 `-rc1` 은 prerelease)를 push 하면 CI 가 draft 릴리스를 만든다.

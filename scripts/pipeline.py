@@ -906,15 +906,21 @@ def detect_silences(tr: dict, rms: list[float], hop: float, duration: float,
 
 
 def silence_level_cfg(cfg: dict, level: int) -> dict:
-    """--silence-level 0~100 → cfg 에 덮어쓸 무음 값. 1~50: 최소 길이 1.0초 → 0.3초 (소리 크기 기준은 그대로).
-    50~100: 최소 길이 0.3초, 자동 무음 기준의 상한(-30dB → -6dB)과 "말소리 중간값 − 여유"의 여유(6 → 2dB)를 풀어
-    기준을 말소리 쪽으로 올린다. 50 은 지금 값(0.3, -30, 6)과 같다. 0(끔)·100(단어 없는 틈)은 silence_cuts_for_level."""
+    """--silence-level 0~100 → cfg 에 덮어쓸 무음 값. 모두 cfg(fillers.json) 값 기준이라 50 은 언제나 --silence on 과 같다.
+    1~50: 최소 길이를 1.0초 → cfg 의 silence_min_sec(기본 0.3) 으로 줄인다 (cfg 값이 1초 이상이면 그대로, 소리 크기 기준은 그대로).
+    50~100: 최소 길이는 cfg 값, 자동 무음 기준을 말소리 쪽으로 올린다 — 배경 + 여유(silence_auto_margin_db)의 여유 +0 → +10dB,
+    상한(silence_auto_max_db) +0 → +24dB, "말소리 중간값 − 여유"의 여유 −0 → −4dB. 0(끔)·100(단어 없는 틈)은 silence_cuts_for_level."""
     level = max(0, min(100, int(level)))
-    if level <= 50:
-        return {"silence_min_sec": round(1.0 - 0.7 * level / 50, 4)}
+    min_sec = float(cfg.get("silence_min_sec", 0.3))
+    if level < 50:
+        return {"silence_min_sec": min_sec if min_sec >= 1.0 else round(1.0 - (1.0 - min_sec) * level / 50, 4)}
+    if level == 50:
+        return {"silence_min_sec": min_sec}
     f = (level - 50) / 50
-    return {"silence_min_sec": 0.3, "silence_auto_max_db": round(-30 + 24 * f, 4),
-            "silence_auto_speech_margin_db": round(6 - 4 * f, 4)}
+    return {"silence_min_sec": min_sec,
+            "silence_auto_max_db": round(float(cfg.get("silence_auto_max_db", -30)) + 24 * f, 4),
+            "silence_auto_speech_margin_db": round(float(cfg.get("silence_auto_speech_margin_db", 6)) - 4 * f, 4),
+            "silence_auto_margin_db": round(float(cfg.get("silence_auto_margin_db", 5)) + 10 * f, 4)}
 
 
 def detect_word_gaps(tr: dict, duration: float, cfg: dict, suspects: dict = None) -> list[Cut]:
@@ -923,6 +929,8 @@ def detect_word_gaps(tr: dict, duration: float, cfg: dict, suspects: dict = None
     min_len = float(cfg.get("silence_min_sec", 0.3))
     pad = float(cfg.get("silence_pad_sec", 0.08))
     words = sorted((w for s, i, w in all_words(tr) if (s, i) not in (suspects or {})), key=lambda w: w["start"])
+    if not words:  # 받아쓰기된 말이 없으면 영상 전체가 한 틈이 된다 → 자르지 않는다
+        return []
     cuts: list[Cut] = []
     prev = 0.0
     for j in range(len(words) + 1):

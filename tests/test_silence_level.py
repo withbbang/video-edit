@@ -50,8 +50,41 @@ def test_level_cfg_values():
     assert pipeline.silence_level_cfg(cfg, 25)["silence_min_sec"] == 0.65
     assert pipeline.silence_level_cfg(cfg, 1)["silence_min_sec"] == 0.986
     o = pipeline.silence_level_cfg(cfg, 75)
-    assert o == {"silence_min_sec": 0.3, "silence_auto_max_db": -18, "silence_auto_speech_margin_db": 4}
-    assert pipeline.silence_level_cfg(cfg, 100)["silence_auto_max_db"] == -6
+    assert o == {"silence_min_sec": 0.3, "silence_auto_max_db": -18, "silence_auto_speech_margin_db": 4,
+                 "silence_auto_margin_db": 10}
+    o = pipeline.silence_level_cfg(cfg, 100)
+    assert o["silence_auto_max_db"] == -6 and o["silence_auto_margin_db"] == 15
+
+
+def test_level_cfg_relative_to_fillers_json():
+    """fillers.json 을 고친 사용자: 50 은 그 값 그대로, 1~50 은 1.0초에서 그 값까지, 50~100 은 그 값에 더함"""
+    cfg = {"silence_min_sec": 0.45, "silence_auto_max_db": -33, "silence_auto_speech_margin_db": 8,
+           "silence_auto_margin_db": 4}
+    assert pipeline.silence_level_cfg(cfg, 50) == {"silence_min_sec": 0.45}
+    assert pipeline.silence_level_cfg(cfg, 25)["silence_min_sec"] == 0.725
+    assert pipeline.silence_level_cfg(cfg, 100) == {"silence_min_sec": 0.45, "silence_auto_max_db": -9,
+                                                    "silence_auto_speech_margin_db": 4, "silence_auto_margin_db": 14}
+    assert pipeline.silence_level_cfg({"silence_min_sec": 1.2}, 10)["silence_min_sec"] == 1.2   # 1초 이상이면 그대로
+
+
+def test_level_50_equals_default_custom_min_sec():
+    tr, rms = mixed()   # 0.4·0.5·0.35초 틈은 0.3 이면 잘리고 0.55 면 안 잘린다
+    custom = {**base_cfg(), "silence_min_sec": 0.55}
+    cfg = dict(custom)
+    cfg.update(pipeline.auto_silence(tr, rms, HOP, cfg))
+    want, _ = pipeline.detect_silences(tr, rms, HOP, len(rms) * HOP, cfg, {})
+    got, _, _ = pipeline.silence_cuts_for_level(tr, rms, HOP, len(rms) * HOP, custom, 50, {})
+    assert want and [asdict(c) for c in got] == [asdict(c) for c in want]
+    at03, _, _ = pipeline.silence_cuts_for_level(tr, rms, HOP, len(rms) * HOP, base_cfg(), 50, {})
+    assert len(at03) > len(got)
+
+
+def test_word_gaps_no_words_cuts_nothing():
+    """받아쓰기된 단어가 하나도 없으면 영상 전체를 자르지 않는다"""
+    tr = {"segments": []}
+    assert pipeline.detect_word_gaps(tr, 30.0, {"silence_min_sec": 0.3}, {}) == []
+    only_suspect = {"segments": [{"id": 0, "words": [{"word": " 숨", "start": 1.0, "end": 3.0}]}]}
+    assert pipeline.detect_word_gaps(only_suspect, 30.0, {"silence_min_sec": 0.3}, {(0, 0): 1.0}) == []
 
 
 def test_level_50_equals_default():
