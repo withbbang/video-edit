@@ -632,7 +632,8 @@ def auto_silence(tr: dict, rms: list[float], hop: float, cfg: dict) -> dict:
     if gap.sum() * hop < 2.0 or gap.all():
         return out
     floor = float(np.percentile(db[gap], 20))
-    cap = min(float(cfg.get("silence_auto_max_db", -30)), float(np.median(db[~gap])) - 6)
+    cap = min(float(cfg.get("silence_auto_max_db", -30)),
+              float(np.median(db[~gap])) - float(cfg.get("silence_auto_speech_margin_db", 6)))
     thr = round(max(base, min(floor + float(cfg.get("silence_auto_margin_db", 5)), cap)), 1)
     return {"silence_threshold_db": thr, "silence_bridge_max_db": max(bridge, thr + 10),
             "silence_noise_floor_db": round(floor, 1)}
@@ -904,6 +905,91 @@ def detect_silences(tr: dict, rms: list[float], hop: float, duration: float,
     return cuts, skipped
 
 
+def silence_level_cfg(cfg: dict, level: int) -> dict:
+    """--silence-level 0~100 → cfg 에 덮어쓸 무음 값. 1~50: 최소 길이 1.0초 → 0.3초 (소리 크기 기준은 그대로).
+    50~100: 최소 길이 0.3초, 자동 무음 기준의 상한(-30dB → -6dB)과 "말소리 중간값 − 여유"의 여유(6 → 2dB)를 풀어
+    기준을 말소리 쪽으로 올린다. 50 은 지금 값(0.3, -30, 6)과 같다. 0(끔)·100(단어 없는 틈)은 silence_cuts_for_level."""
+    level = max(0, min(100, int(level)))
+    if level <= 50:
+        return {"silence_min_sec": round(1.0 - 0.7 * level / 50, 4)}
+    f = (level - 50) / 50
+    return {"silence_min_sec": 0.3, "silence_auto_max_db": round(-30 + 24 * f, 4),
+            "silence_auto_speech_margin_db": round(6 - 4 * f, 4)}
+
+
+def detect_word_gaps(tr: dict, duration: float, cfg: dict, suspects: dict = None) -> list[Cut]:
+    """전사된 단어가 없는 틈(처음·끝 포함)은 소리가 있어도 컷 (풍경 장면, 전사 안 된 목소리).
+    자리가 의심스러운 단어(find_suspect_words)는 틈을 막지 않는다. 앞뒤 silence_pad_sec 남기고, 영상 맨 앞/뒤는 여유 없이."""
+    min_len = float(cfg.get("silence_min_sec", 0.3))
+    pad = float(cfg.get("silence_pad_sec", 0.08))
+    words = sorted((w for s, i, w in all_words(tr) if (s, i) not in (suspects or {})), key=lambda w: w["start"])
+    cuts: list[Cut] = []
+    prev = 0.0
+    for j in range(len(words) + 1):
+        last = j == len(words)
+        gs, ge = prev, (duration if last else min(duration, words[j]["start"]))
+        if ge - gs >= min_len:
+            cs, ce = (gs if j == 0 else gs + pad), (ge if last else ge - pad)
+            if ce - cs >= 0.05:
+                ctx_prev = " ".join(x["word"].strip() for x in words[max(0, j - 3):j])
+                ctx_next = " ".join(x["word"].strip() for x in words[j:j + 3])
+                cuts.append(Cut(cs, ce, "(무음)", "gap", f"{ctx_prev} [{ge-gs:.1f}s 단어 없는 틈] {ctx_next}".strip(),
+                                -1, words_idx=[]))
+        if not last:
+            prev = max(prev, words[j]["end"])
+    return cuts
+
+
+def _union_spans(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    out: list[list[float]] = []
+    for s, e in sorted(spans):
+        if out and s <= out[-1][1] + 1e-9:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return [(s, e) for s, e in out]
+
+
+def silence_cuts_for_level(tr: dict, rms: list[float], hop: float, duration: float, cfg: dict, level: int,
+                           suspects: dict = None) -> tuple[list[Cut], list[dict], dict]:
+    """--silence-level 의 무음 컷. cfg 는 auto_silence 를 적용하기 전 설정(fillers.json 그대로)이다.
+    → (컷, 건너뜀, 무음 판정에 쓴 cfg). 0 은 컷 없음, 50 은 지금의 --silence on 과 같다.
+    50 을 넘으면 50 과 그 사이 10 단위 값들의 무음 컷을 합친다 — 기준을 올리면 무음이 길어져 그 안의 단어 주변을
+    새로 남기는 일이 생겨 드물게 잘린 곳이 줄 수 있기 때문 (값이 커지면 잘린 곳이 줄지 않게). 100 은 단어 없는 틈도 컷."""
+    level = max(0, min(100, int(level)))
+    if level <= 0:
+        return [], [], {}
+
+    def at(lv: int):
+        c = {**cfg, **silence_level_cfg(cfg, lv)}
+        c.update(auto_silence(tr, rms, hop, c))
+        return (c, *detect_silences(tr, rms, hop, duration, c, suspects))
+
+    if level <= 50:  # 최소 길이만 달라진다 → 값이 작을수록 50 의 컷 중 일부
+        c, cuts, skipped = at(level)
+        return cuts, skipped, c
+    found, skipped, seen = [], [], set()
+    for lv in sorted({50, *range(60, level, 10), level}):
+        c, cuts, sk = at(lv)
+        found += cuts
+        for x in sk:
+            if (x["start"], x["end"], x["word"]) not in seen:
+                seen.add((x["start"], x["end"], x["word"]))
+                skipped.append(x)
+    out = []
+    for s, e in _union_spans([(x.start, x.end) for x in found]):
+        first = min((x for x in found if s - 1e-9 <= x.start and x.end <= e + 1e-9), key=lambda x: x.start)
+        out.append(Cut(s, e, "(무음)", "silence", first.context, -1, words_idx=[]))
+    if level >= 100:
+        covered = _union_spans([(x.start, x.end) for x in out])
+        for g in detect_word_gaps(tr, duration, c, suspects):
+            pieces = [(g.start, g.end)]
+            for s, e in covered:
+                pieces = [q for x0, x1 in pieces for q in ((x0, min(x1, s)), (max(x0, e), x1))]
+            out += [Cut(x0, x1, g.word, g.reason, g.context, -1, words_idx=[]) for x0, x1 in pieces if x1 - x0 >= 0.05]
+    return sorted(out, key=lambda x: x.start), skipped, c
+
+
 UNHEARD = "(전사 누락)"
 
 
@@ -1004,7 +1090,7 @@ def refine_cuts(cuts: list[Cut], rms: list[float], hop: float, fps: Fraction,
 
     refined: list[Cut] = []
     for c in cuts:
-        if c.reason == "silence":  # 이미 무음 안쪽 경계 — 옮기면 남겨 둔 여유가 줄어든다
+        if c.reason in ("silence", "gap"):  # 이미 무음 안쪽 경계 — 옮기면 남겨 둔 여유가 줄어든다
             s, e = c.start, c.end
         else:
             s = snap_to_quiet(c.start, rms, hop, win, -1)
@@ -1371,7 +1457,7 @@ def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: li
     from collections import Counter
     by_word = Counter(normalize(w) for c in cuts for w in c.word.split(" + ") if w not in ("(무음)", UNHEARD))
     removed = sum(c.end - c.start for c in cuts)
-    n_silence = sum(1 for c in cuts if "silence" in c.reason)
+    n_silence = sum(1 for c in cuts if "silence" in c.reason or "gap" in c.reason)
     n_unheard = sum(1 for c in cuts if UNHEARD in c.word)
     out = [f"# {src.name} 처리 리포트", "",
            f"- 원본 길이: {fmt_clock(info['duration'])} → 결과: {fmt_clock(final_dur)} "
@@ -1422,6 +1508,16 @@ def load_cut_list(path: Path, tr: dict, fps: Fraction,
     return cuts, data.get("skipped", []), modes
 
 
+def level_0_100(v: str) -> int:
+    try:
+        n = int(v)
+    except ValueError:
+        n = -1
+    if not 0 <= n <= 100:
+        raise argparse.ArgumentTypeError(f"0~100 사이 정수여야 합니다: {v}")
+    return n
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="유튜브 영상 정리: 노이즈 제거 → 필러 컷 → SRT")
     ap.add_argument("input", type=Path)
@@ -1439,6 +1535,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "aggressive: 둘 다 전부)")
     ap.add_argument("--silence", choices=["on", "off"], default="on",
                     help="말 사이 무음 컷 (기본 on, 파라미터는 fillers.json 의 silence_*)")
+    ap.add_argument("--silence-level", type=level_0_100, default=None,
+                    help="말 없는 구간 자르기 세기 0~100 (데스크톱 앱용, 주면 --silence 대신). "
+                         "0 끔, 50 = --silence on, 100 = 단어 없는 틈은 소리가 있어도 전부")
     ap.add_argument("--hw", choices=["on", "off"], default="on",
                     help="맥 하드웨어 인코딩 VideoToolbox (기본 on, off 면 libx264/libx265)")
     ap.add_argument("--review", action="store_true", help="컷 리스트/검토표까지만 만들고 렌더링은 하지 않음")
@@ -1510,6 +1609,7 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     tr = transcribe(asr_wav, tr_path, audio_key, args.model, args.device, args.compute_type,
                     cfg.get("prompt", ""), args.force, args.work_root / ".whisper_probe.json")
     rms, hop = load_rms(asr_wav)
+    sil_base = dict(cfg)  # --silence-level 은 자동 무음 기준 전 설정에서 무음 판정만 따로 한다 (정렬·필러 판정은 그대로)
     if not args.apply_cuts:
         base_db = float(cfg.get("silence_threshold_db", -40))
         cfg.update(auto_silence(tr, rms, hop, cfg))
@@ -1538,7 +1638,9 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         cuts, skipped, modes = load_cut_list(args.apply_cuts, tr, fps, total_frames)
         log(f"컷 리스트 불러옴: {args.apply_cuts.name} ({len(cuts)}곳)")
     else:
-        modes = {"filler": args.filler, "habit": args.habit, "silence": args.silence}
+        level = args.silence_level
+        modes = {"filler": args.filler, "habit": args.habit,
+                 "silence": args.silence if level is None else f"level:{level}"}
         habit_mode = {"on": "conservative", "off": "off", "aggressive": "aggressive"}[args.habit]
         raw_cuts, skipped = detect_fillers(tr, cfg, habit_mode, args.filler == "on")
         suspects = find_suspect_words(tr, quiet_mask(rms, hop, cfg), hop, cfg)
@@ -1557,8 +1659,16 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         if un_cuts or un_skipped:
             log(f"전사 안 된 목소리: 필러 옆이라 컷 {len(un_cuts)}곳, 확인 필요 {len(un_skipped)}곳")
         n_fillers = len(raw_cuts)
-        if args.silence == "on":
+        if level is not None and level > 0:
+            sil_cuts, sil_skipped, sil_cfg = silence_cuts_for_level(tr, rms, hop, info["duration"], sil_base,
+                                                                    level, suspects)
+            log(f"무음 세기 {level}: 기준 {sil_cfg['silence_threshold_db']:.1f}dB, "
+                f"{sil_cfg['silence_min_sec']:.2f}초 이상{', 단어 없는 틈 전부' if level >= 100 else ''}")
+        elif level is None and args.silence == "on":
             sil_cuts, sil_skipped = detect_silences(tr, rms, hop, info["duration"], cfg, suspects)
+        else:
+            sil_cuts = None
+        if sil_cuts is not None:
             raw_cuts += sil_cuts
             skipped += sil_skipped
             log(f"무음 감지: {len(sil_cuts)}곳, {sum(c.end - c.start for c in sil_cuts):.1f}s "

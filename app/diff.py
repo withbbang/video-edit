@@ -7,8 +7,11 @@ def _parts(cut):
     return [p.strip() for p in str(cut.get("reason", "")).split(" + ")]
 
 
+SILENCE_REASONS = {"silence", "gap"}  # gap: --silence-level 100 의 단어 없는 틈 — 화면에선 말 없는 구간
+
+
 def _is_silence(cut):
-    return "silence" in _parts(cut)
+    return any(p in SILENCE_REASONS for p in _parts(cut))
 
 
 def _is_untranscribed(cut):
@@ -96,7 +99,7 @@ def _kind(cut: dict) -> str:
         for w, k in zip(words, kinds):
             if w and not _is_placeholder(w) and k:
                 return k
-    return next((k for k in kinds if k and k != "silence"), "silence")
+    return next((k for k in kinds if k and k not in SILENCE_REASONS), "silence")
 
 
 def _label(cut: dict) -> str:
