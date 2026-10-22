@@ -294,7 +294,7 @@ def test_get_result_without_prev(tmp_path):
     assert r["cuts"] == [[1, 1.5], [5, 5.5]]
     assert r["changes"] is None
     assert r["duration"] == 10.0
-    assert r["summary"] == {**job.summary, "silence_cuts": 0, "silence_sec": 0.0}
+    assert r["summary"] == {**job.summary, "silence_cuts": 0, "silence_sec": 0.0, "silence_min_sec": 0.3}
     assert r["preview_url"] == f"http://127.0.0.1:9999/jobs/{job.id}/preview.mp4?v={preview.stat().st_mtime_ns}"
     assert "saved_paths" not in r
     json.dumps(r)
@@ -308,7 +308,7 @@ def test_get_result_without_preview_still_usable(tmp_path):
     write_out(job, "a.cuts.json", {"cuts": [{"start": 1, "end": 1.5}]})
     r = a.get_result(job.id)
     assert r["preview_url"] is None and r["cuts"] == [[1, 1.5]]
-    assert r["summary"] == {**job.summary, "silence_cuts": 0, "silence_sec": 0.0}
+    assert r["summary"] == {**job.summary, "silence_cuts": 0, "silence_sec": 0.0, "silence_min_sec": 0.3}
 
 
 def test_get_result_with_prev_compares(tmp_path):
@@ -355,6 +355,20 @@ def test_get_result_silence_summary(tmp_path):
     job.range_ops.append({"op": "restore", "start": 5.0, "end": 5.5})
     s = a.get_result(job.id)["summary"]
     assert s["silence_cuts"] == 1 and s["silence_sec"] == pytest.approx(2.0)
+
+
+def test_get_result_silence_min_sec_from_fillers(tmp_path, monkeypatch):
+    """슬라이더 설명의 "N초 이상" 은 앱이 쓰는 fillers.json 의 silence_min_sec"""
+    from app import subtitles
+    a, store, *_ = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    job.summary = {"orig_sec": 20.0}
+    write_out(job, "a.cuts.json", {"cuts": []})
+    assert a.get_result(job.id)["summary"]["silence_min_sec"] == 0.3
+    custom = tmp_path / "fillers.json"
+    custom.write_text(json.dumps({"silence_min_sec": 0.5}), encoding="utf-8")
+    monkeypatch.setattr(subtitles, "fillers_path", lambda: custom)
+    assert a.get_result(job.id)["summary"]["silence_min_sec"] == 0.5
 
 
 def test_get_result_missing_files(tmp_path):

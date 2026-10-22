@@ -138,3 +138,45 @@ def test_load_subs_edits_malformed_entries_dropped(tmp_path):
     p.write_text(json.dumps({"transcript_sha1": pipeline.transcript_sha1(tr), "words": [], "lines": 3}),
                  encoding="utf-8")
     assert pipeline.load_subs_edits(p, tr) == ({}, {})
+
+
+def _four():
+    return {"segments": [{"id": 0, "words": [
+        {"word": " 하나", "start": 0.0, "end": 0.4}, {"word": " 둘", "start": 0.6, "end": 1.0},
+        {"word": " 셋", "start": 2.0, "end": 2.4}, {"word": " 넷", "start": 2.6, "end": 3.0}]}]}
+
+
+def _srt_for(tr, cut_dicts, line_times=None):
+    from fractions import Fraction
+    remap = pipeline.TimeRemap(pipeline.cuts_from_dicts(cut_dicts, Fraction(30), 300))
+    caps = pipeline.build_captions(tr, remap.cut_words, remap, set(), set())
+    return caps, remap, pipeline.captions_to_srt(caps, remap, 10.0, line_times=line_times)
+
+
+def test_line_time_follows_word_after_regroup():
+    """줄 시간 key 가 다시 판정 뒤 줄 가운데 어절이 돼도 그 어절이 든 줄에 붙는다"""
+    tr = _four()
+    caps, remap, srt = _srt_for(tr, [], {"0:2": [1.9, 2.9]})
+    assert [c["key"] for c in caps] == ["0:0", "0:2"]
+    assert "00:00:01,900 --> 00:00:02,900\n셋 넷" in srt
+    sil = [{"start": 1.1, "end": 1.9, "word": "", "reason": "silence", "context": "", "seg": -1}]
+    caps, remap, srt = _srt_for(tr, sil, {"0:2": [1.9, 2.9]})
+    assert [c["key"] for c in caps] == ["0:0"]
+    s, e = pipeline.fmt_srt_time(remap(1.9)), pipeline.fmt_srt_time(remap(2.9))
+    assert srt == f"1\n{s} --> {e}\n하나 둘 셋 넷\n\n"
+
+
+def test_line_times_several_keys_in_one_line_uses_earliest():
+    tr = _four()
+    sil = [{"start": 1.1, "end": 1.9, "word": "", "reason": "silence", "context": "", "seg": -1}]
+    caps, remap, _ = _srt_for(tr, sil)
+    got = pipeline.resolve_line_times(caps, {"0:3": [2.0, 3.0], "0:1": [0.1, 1.5], "9:9": [0, 1]})
+    assert got == {"0:0": ("0:1", [0.1, 1.5])}
+
+
+def test_no_line_times_srt_unchanged():
+    tr = _four()
+    for cuts in ([], [{"start": 1.1, "end": 1.9, "word": "", "reason": "silence", "context": "", "seg": -1}]):
+        _, _, a = _srt_for(tr, cuts)
+        _, _, b = _srt_for(tr, cuts, {})
+        assert a == b

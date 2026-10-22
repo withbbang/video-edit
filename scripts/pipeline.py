@@ -1273,24 +1273,44 @@ def build_captions(tr: dict, cut_words: set, remap: TimeRemap, always_fillers: s
         ws = [x for x in g if x["text"]]   # 글자를 비운 어절은 빠진다 (줄 key 는 원래 첫 어절이라 안 바뀐다)
         if not ws or not " ".join(x["text"] for x in ws).strip():
             if keep_empty:
-                caps.append({"key": g[0]["key"], "start": g[0]["start"], "end": g[-1]["end"], "words": g})
+                caps.append({"key": g[0]["key"], "start": g[0]["start"], "end": g[-1]["end"], "words": g,
+                             "keys": [x["key"] for x in g]})
             continue
         caps.append({"key": g[0]["key"], "start": ws[0]["start"], "end": ws[-1]["end"],
-                     "words": g if keep_empty else ws})
+                     "words": g if keep_empty else ws, "keys": [x["key"] for x in g]})
     return caps
+
+
+def resolve_line_times(caps: list[dict], line_times: dict | None) -> dict[str, tuple[str, list[float]]]:
+    """줄 key → (적용된 저장 key, [시작, 끝]). 저장 key 는 그 어절이 들어 있는 줄(비운 어절 포함)에 붙는다 —
+    다시 판정으로 줄이 다시 나뉘어 저장 key 가 줄 첫 어절이 아니게 돼도 시간을 잃지 않게.
+    한 줄에 여러 개면 줄 안에서 가장 앞 어절의 것만 쓴다. 어느 줄에도 없는 key(잘린 어절 등)는 무시."""
+    if not line_times:
+        return {}
+    owner: dict[str, tuple[int, int]] = {}
+    for li, c in enumerate(caps):
+        for pos, k in enumerate(c.get("keys") or [w["key"] for w in c["words"]]):
+            owner.setdefault(k, (li, pos))
+    best: dict[int, tuple[int, str]] = {}
+    for k in line_times:
+        hit = owner.get(k)
+        if hit is not None and (hit[0] not in best or hit[1] < best[hit[0]][0]):
+            best[hit[0]] = (hit[1], k)
+    return {caps[li]["key"]: (k, line_times[k]) for li, (_, k) in best.items()}
 
 
 def captions_to_srt(caps: list[dict], remap: TimeRemap, final_dur: float,
                     line_times: dict[str, list[float]] | None = None) -> str:
     """줄 → SRT. line_times[key] = [시작, 끝](원본초)인 줄은 그 시간을 쓰고 뒷처리에서 움직이지 않는다."""
-    line_times = line_times or {}
+    timed = resolve_line_times(caps, line_times)
     # 자막끼리 겹치지 않게, 영상 길이를 넘지 않게
     out: list[list] = []   # [시작, 끝, 글자, 고정 여부]
     for c in caps:
         text = " ".join(w["text"] for w in c["words"]).strip()
-        fixed = c["key"] in line_times
+        fixed = c["key"] in timed
         if fixed:
-            s, e = remap(line_times[c["key"]][0]), remap(line_times[c["key"]][1])
+            t = timed[c["key"]][1]
+            s, e = remap(t[0]), remap(t[1])
         else:
             s = remap(c["start"])
             e = max(remap(c["end"]), s + 0.4)
@@ -1826,7 +1846,8 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
 
     keeps = keep_segments(cuts, total_frames)
     if not keeps:
-        sys.exit("오류: 남길 구간이 없습니다 (전부 컷 대상). --silence off 등으로 다시 실행해 보세요.")
+        sys.exit("오류: 남길 구간이 없습니다 (전부 컷 대상)."
+                 + ("" if PROGRESS else " --silence off 등으로 다시 실행해 보세요."))
 
     # 4) SRT — 영상과 같은 이름이어야 윈도우 기본 플레이어 등이 자동으로 불러온다
     media_dir = (args.media_out or out_dir).resolve(); media_dir.mkdir(parents=True, exist_ok=True)

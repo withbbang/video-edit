@@ -1,5 +1,6 @@
 """자막 모델: 찾아 바꾸기 계획, 줄 시간 한계, 어절 고치기 API"""
 import json
+from fractions import Fraction
 
 from app import subtitles
 from app.store import Job, Status
@@ -167,6 +168,38 @@ def test_edits_survive_rejudge(tmp_path):
     words = {w["key"]: w for c in caps for w in c["words"]}
     assert words["0:1"]["text"] == "여러분들" and store.get(job.id).word_edits == {"0:1": "여러분들"}
     assert store.get(job.id).range_ops == ops
+
+
+def test_line_time_survives_regrouping_rejudge(tmp_path):
+    """다시 판정으로 줄이 합쳐져 저장 key 가 줄 첫 어절이 아니게 돼도 시간이 그 줄에 남고, 원래대로·새 시간은 그 key 를 다룬다"""
+    import pipeline
+    a, store, job, _ = setup(tmp_path)
+    caps = a.get_captions(job.id)["captions"]
+    assert [c["key"] for c in caps] == ["0:0", "0:2", "0:4"]
+    a.set_line_time(job.id, "0:2", 1.9, 2.9)
+    assert job.line_times == {"0:2": [1.9, 2.9]}
+    rejudged = {"cuts": [{"start": 1.0, "end": 1.5, "kind": "silence", "word": "", "reason": "silence",
+                          "context": "", "seg": -1}]}
+    write_out(job, "a.cuts.json", rejudged)                       # 1.0~2.0 멈춤이 0.5초로 → 앞 두 줄이 합쳐짐
+    caps = a.get_captions(job.id)["captions"]
+    assert [c["key"] for c in caps] == ["0:0", "0:4"]
+    first = caps[0]
+    assert first["timed"] is True and (first["start"], first["end"]) == (1.9, 2.9)
+    # SRT 도 같은 규칙
+    pl_cuts = pipeline.cuts_from_dicts(rejudged["cuts"], Fraction(30), 600)
+    remap = pipeline.TimeRemap(pl_cuts)
+    srt = pipeline.captions_to_srt(pipeline.build_captions(TR, remap.cut_words, remap, set(), set()), remap, 19.5,
+                                   line_times=job.line_times)
+    assert srt.startswith(f"1\n{pipeline.fmt_srt_time(remap(1.9))} --> {pipeline.fmt_srt_time(remap(2.9))}\n")
+    # 새 시간은 두 번째 key 를 더하지 않고 바꾼다
+    a.set_line_time(job.id, "0:0", 0.0, 1.2)
+    assert job.line_times == {"0:0": [0.0, 1.2]}
+    a.set_line_time(job.id, "0:2", 0.0, 1.2)                       # 줄 key 가 아니면 거절
+    assert job.line_times == {"0:0": [0.0, 1.2]}
+    # 원래대로: 줄 가운데 어절에 붙은 저장 key 도 지운다
+    job.line_times = {"0:2": [1.9, 2.9]}
+    r = a.set_line_time(job.id, "0:0", None, None)
+    assert job.line_times == {} and r["captions"][0]["timed"] is False
 
 
 def test_stale_edits_dropped(tmp_path):

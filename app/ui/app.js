@@ -18,12 +18,15 @@ const ADV = [
 const DEFAULTS = { filler: 'remove', habit: 'some', silence: 50, denoise: 50, loudnorm: 'match', subs: 'embed', quality: 'auto' };
 const FAST = new Set(['filler', 'habit', 'silence', 'denoise']);
 
-// 슬라이더 설명 한 줄. st: 지금 결과의 말 없는 구간 {곳, 초} (결과가 없으면 null)
+// 슬라이더 설명 한 줄. st: 지금 결과의 말 없는 구간 {n: 곳, sec: 초, min: fillers.json 최소 길이} (결과가 없으면 null)
 function silenceSay(v, st) {
-  const tail = st ? ` · ${st.n}곳 · −${st.sec}초` : '';
+  const tail = st && typeof st.n === 'number' ? ` · ${st.n}곳 · −${st.sec}초` : '';
+  const min = st && Number.isFinite(st.min) && st.min > 0 ? st.min : 0.3;
+  // 파이프라인 silence_level_cfg 와 같은 식: 1~50 은 1.0초 → min (min 이 1초 이상이면 그대로)
+  const at = min >= 1.0 ? min : 1.0 - (1.0 - min) * v / 50;
   if (v <= 0) return '말 없는 구간을 자르지 않습니다';
-  if (v <= 50) return `조용히 말 없는 구간 중 ${(1.0 - 0.7 * v / 50).toFixed(1)}초 이상만 자름${tail}`;
-  if (v < 100) return `조금 시끄러운 말 없는 구간도 자름 (0.3초 이상)${tail}`;
+  if (v <= 50) return `조용히 말 없는 구간 중 ${at.toFixed(1)}초 이상만 자름${tail}`;
+  if (v < 100) return `조금 시끄러운 말 없는 구간도 자름 (${min.toFixed(1)}초 이상)${tail}`;
   return `말 없는 구간은 소리가 있어도 전부 자름${tail}`;
 }
 function denoiseSay(v) {
@@ -236,8 +239,10 @@ function segRow(def, value, disabled, onPick, changed) {
 function silenceStats() {
   const j = selected();
   const s = j && S.resultFor === j.id && S.result && S.result.summary;
-  if (!s || typeof s.silence_cuts !== 'number') return null;
-  return { n: s.silence_cuts, sec: Math.round(Number(s.silence_sec) || 0) };
+  if (!s) return null;
+  const min = Number(s.silence_min_sec);
+  if (typeof s.silence_cuts !== 'number') return Number.isFinite(min) ? { min } : null;
+  return { n: s.silence_cuts, sec: Math.round(Number(s.silence_sec) || 0), min };
 }
 
 // 0~100 슬라이더: 끄는 동안(input)엔 숫자·설명만, 손을 떼면(change) 옵션을 바꾼다

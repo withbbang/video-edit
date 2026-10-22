@@ -59,15 +59,16 @@ def captions(cuts_json: dict, transcript: dict, cfg: dict, word_edits: dict, lin
     remap = pl.TimeRemap(cuts)
     caps = pl.build_captions(transcript, remap.cut_words, remap, cfg["_always"], cfg["_single_only"],
                              word_edits=word_edits or {}, keep_empty=True)
+    timed = pl.resolve_line_times(caps, line_times)   # SRT 와 같은 규칙: 저장 key 가 든 줄에 붙는다
     for c in caps:
         for w in c["words"]:
             w["edited"] = w["key"] in (word_edits or {})
         # 어절을 모두 비운 줄: 화면에서 되돌릴 수 있게 남기지만 SRT 에는 없다
         c["empty"] = not "".join(w["text"] for w in c["words"]).strip()
-        t = (line_times or {}).get(c["key"])
-        c["timed"] = t is not None
-        if t is not None:
-            c["start"], c["end"] = float(t[0]), float(t[1])
+        hit = timed.get(c["key"])
+        c["timed"] = hit is not None
+        if hit is not None:
+            c["start"], c["end"] = float(hit[1][0]), float(hit[1][1])
     return caps
 
 

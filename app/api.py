@@ -137,7 +137,7 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
         media = media_dir(job)
         shutil.rmtree(media, ignore_errors=True)   # 지난번에 멈춘 저장의 찌꺼기
         media.mkdir(parents=True, exist_ok=True)
-        cmd, weights = runner.render_command(job, model, device, media, save_cuts(job), save_subs_edits(job, lock)), RENDER_WEIGHTS
+        cmd, weights = runner.render_command(job, model, device, media, save_cuts(job, lock), save_subs_edits(job, lock)), RENDER_WEIGHTS
     else:
         raise ValueError(f"알 수 없는 작업 종류: {kind}")
     if device == "cuda":
@@ -145,16 +145,29 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
     return cmd, weights, models.pipeline_env(manifest, data_root, store.settings)
 
 
-def save_cuts(job: Job) -> Path | None:
-    """저장용 컷 목록: 판정 결과에 되살리기·구간 작업을 반영한 <이름>.save.cuts.json. 반영할 게 없거나 못 읽으면 None(원본 그대로)."""
-    src = Path(job.src)
+def _silence_min_sec() -> float:
+    """앱의 파이프라인이 쓰는 fillers.json(사용자 폴더에 있으면 그것, 없으면 기본) 의 silence_min_sec. 못 읽으면 0.3."""
+    try:
+        v = float(subtitles.load_cfg().get("silence_min_sec", 0.3))
+        return v if v > 0 else 0.3
+    except Exception:
+        return 0.3
+
+
+def save_cuts(job: Job, lock=None) -> Path | None:
+    """저장용 컷 목록: 판정 결과에 되살리기·구간 작업을 반영한 <이름>.save.cuts.json. 반영할 게 없거나 못 읽으면 None(원본 그대로).
+    job 필드는 lock(queue.lock) 을 쥐고 복사한 뒤 락 밖에서 쓴다."""
+    with lock or contextlib.nullcontext():
+        src = Path(job.src)
+        restored = [list(r) for r in job.restored]
+        ops = [dict(o) for o in job.range_ops]
     out = paths.job_dir(src) / "out"
     cur = _read_json(out / f"{src.stem}.cuts.json")
-    if (not job.restored and not job.range_ops) or cur is None:
+    if (not restored and not ops) or cur is None:
         return None
     tr = _read_json(out / f"{src.stem}.transcript.json")
     path = out / f"{src.stem}.save.cuts.json"
-    path.write_text(json.dumps(diff.effective_cuts(cur, job.restored, job.range_ops, tr), ensure_ascii=False, indent=1),
+    path.write_text(json.dumps(diff.effective_cuts(cur, restored, ops, tr), ensure_ascii=False, indent=1),
                     encoding="utf-8")
     return path
 
@@ -532,10 +545,14 @@ class Api:
                     s = max(lo, e - subtitles.MIN_LINE_SEC)
             new = [s, e]
 
+        in_line = set(line.get("keys") or [w["key"] for w in line["words"]]) | {key}
+
         def change(job: Job, _tr: dict) -> bool:
-            if new is None:
-                job.line_times.pop(key, None)
-            else:
+            # 이 줄에 든 저장 key 는 모두 지운다 (다시 판정 뒤 줄 가운데 어절에 붙은 것까지) — 원래대로가 실제로
+            # 되돌리고, 새 시간은 두 번째 key 를 더하지 않고 바꾼다
+            for k in [k for k in job.line_times if k in in_line]:
+                del job.line_times[k]
+            if new is not None:
                 job.line_times[key] = new
             return True
         r = self._edit_subs(job_id, change)
@@ -588,6 +605,9 @@ class Api:
             # 말 없는 구간 슬라이더 설명의 {곳}곳 · −{초}초 (요약과 같은 컷 목록에서, 겹치면 합쳐서)
             sil = _union([c for c in (cur or {}).get("cuts", []) if diff._is_silence(c)])
             summary = {**(summary or {}), "silence_cuts": len(sil), "silence_sec": sum(b - a for a, b in sil)}
+        if summary is not None:
+            # 슬라이더 설명의 "N초 이상" — 앱의 파이프라인이 쓰는 fillers.json 의 silence_min_sec
+            summary = {**summary, "silence_min_sec": _silence_min_sec()}
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "cut_items": items,
                   "range_ops": ops, "changes": changes,
                   "preview_url": _preview_url(f"{self._preview_base}/{job_id}/preview.mp4", preview),
