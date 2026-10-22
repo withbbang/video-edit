@@ -199,18 +199,49 @@ class Queue:
                         self._set(job, Status.PROCESSING, progress=0.0, error="")
                     self._notify(job)
                 result = self._execute(job, kind)
+                # 결과 반영과 상태 정리를 한 번의 락 안에서 끝내고 나서 알린다 — 알림을 받은 UI 가
+                # 곧바로 rejudge/cancel/request_save 를 불러도 정상 동작하도록.
                 with self.lock:
-                    self._finish(job, kind, result)
+                    self._finish_safe(job, kind, result)
+                    self._release_worker(job_id)
+                self._notify(job)
             except Exception:  # noqa: BLE001 — 다음 항목은 계속 돌린다
                 log.exception("작업 처리 중 예외: %s %s", job_id, kind)
             finally:
                 with self.lock:
-                    self._handles.pop(job_id, None)
-                    self._cancel.discard(job_id)
-                    if self._current == job_id:
-                        self._current = None
-                    self._cv.notify_all()
-            self._notify(job)
+                    if self._current == job_id:   # 안전망: 위에서 정리하지 못한 경우
+                        self._fail_if_running(job, "처리 중 예기치 못한 오류가 났습니다")
+                        self._release_worker(job_id)
+
+    def _release_worker(self, job_id: str) -> None:
+        """lock 안에서 부른다."""
+        self._handles.pop(job_id, None)
+        self._cancel.discard(job_id)
+        if self._current == job_id:
+            self._current = None
+        self._cv.notify_all()
+
+    def _release_rejudge(self, job_id: str) -> None:
+        """lock 안에서 부른다."""
+        self._rejudging.pop(job_id, None)
+        self._handles.pop(job_id, None)
+        self._cancel.discard(job_id)
+        self._cv.notify_all()
+
+    def _fail_if_running(self, job: Job, msg: str) -> None:
+        """lock 안에서 부른다. 처리 중으로 남은 영상을 실패로 돌린다."""
+        if job.status in (Status.PROCESSING, Status.SAVING) and self.store.get(job.id) is job:
+            job.status, job.error = Status.FAILED, msg
+            self._save()
+
+    def _finish_safe(self, job: Job, kind: str, result: RunResult) -> None:
+        """lock 안에서 부른다. _finish 가 터져도 영상을 처리 중으로 남기지 않는다."""
+        try:
+            self._finish(job, kind, result)
+        except Exception as e:  # noqa: BLE001
+            log.exception("결과 반영 실패: %s %s", job.id, kind)
+            job.status, job.error = Status.FAILED, f"처리 결과를 정리하지 못했습니다: {e}"
+            self._save()
 
     def _execute(self, job: Job, kind: str) -> RunResult:
         try:
@@ -254,6 +285,7 @@ class Queue:
 
     def _rejudge_loop(self, job_id: str) -> None:
         job = self.store.get(job_id)
+        released = False
         try:
             while True:
                 result = self._execute(job, ANALYZE)
@@ -263,9 +295,20 @@ class Queue:
                     if again:
                         self._handles.pop(job_id, None)
                         self._rejudging[job_id] = False
-                        self._prepare_rejudge(job, copy_prev=False)
+                        try:
+                            self._prepare_rejudge(job, copy_prev=False)
+                        except Exception as e:  # noqa: BLE001
+                            log.exception("재판정 준비 실패: %s", job_id)
+                            job.status, job.error = Status.FAILED, f"다시 판정하지 못했습니다: {e}"
+                            self._save()
+                            again = False
+                            self._release_rejudge(job_id)
+                            released = True
                     else:
-                        self._finish(job, ANALYZE, result)
+                        # 결과 반영과 상태 정리를 한 번의 락 안에서 끝내고 나서 알린다
+                        self._finish_safe(job, ANALYZE, result)
+                        self._release_rejudge(job_id)
+                        released = True
                 self._notify(job)
                 if not again:
                     return
@@ -273,7 +316,7 @@ class Queue:
             log.exception("재판정 처리 중 예외: %s", job_id)
         finally:
             with self.lock:
-                self._rejudging.pop(job_id, None)
-                self._handles.pop(job_id, None)
-                self._cancel.discard(job_id)
-                self._cv.notify_all()
+                # 안전망. 이미 정리했다면 알림을 받은 UI 가 새로 시작한 재판정일 수 있으니 건드리지 않는다
+                if not released:
+                    self._fail_if_running(job, "다시 판정하는 중 예기치 못한 오류가 났습니다")
+                    self._release_rejudge(job_id)

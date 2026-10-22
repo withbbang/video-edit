@@ -368,3 +368,100 @@ def test_execute_raising_marks_failed_and_continues(tmp_path):
     assert q.join(WAIT)
     assert a.status == Status.FAILED and "터짐" in a.error
     assert b.status == Status.REVIEW
+
+
+def test_request_save_from_on_change_after_rejudge(tmp_path):
+    store = Store(tmp_path / "state.json")
+    p = tmp_path / "a.mp4"
+    p.write_bytes(b"x")
+    a = store.add(p)
+    a.status = Status.REVIEW
+    write_cuts(a, [])
+    fx = FakeExec()
+    q = None
+    seen_processing = []
+
+    def on_change(job):
+        if job.status == Status.PROCESSING:
+            seen_processing.append(True)
+        elif job.status == Status.REVIEW and seen_processing:
+            seen_processing.clear()
+            q.request_save(job.id)
+    q = Queue(store, fx, on_change)
+    q.rejudge(a.id)
+    assert q.join(WAIT)
+    assert fx.calls == [(a.id, "analyze"), (a.id, "render")]
+    assert a.status == Status.SAVED
+
+
+def test_rejudge_from_on_change_after_analysis(tmp_path):
+    store = Store(tmp_path / "state.json")
+    p = tmp_path / "a.mp4"
+    p.write_bytes(b"x")
+    a = store.add(p)
+    fx = FakeExec()
+    q = None
+    fired = []
+
+    def on_change(job):
+        if job.status == Status.REVIEW and not fired:
+            fired.append(True)
+            q.rejudge(job.id)
+    q = Queue(store, fx, on_change)
+    q.start_all()
+    assert q.join(WAIT)
+    assert fx.calls == [(a.id, "analyze"), (a.id, "analyze")]
+    assert a.status == Status.REVIEW
+
+
+def test_store_save_raising_does_not_stick(tmp_path):
+    store, (a, b), fx, q, _ = make(tmp_path, ("a", "b"))
+
+    def broken_save():
+        raise OSError("디스크 오류")
+    store.save = broken_save
+    q.start_all()
+    assert q.join(WAIT)
+    assert a.status == b.status == Status.REVIEW
+    a.status = Status.REVIEW
+    q.rejudge(a.id)
+    assert q.join(WAIT)
+    assert a.status == Status.REVIEW
+
+
+def test_finish_raising_marks_failed(tmp_path):
+    store, (a, b), fx, q, _ = make(tmp_path, ("a", "b"))
+    real_remove = store.remove
+    fx.results[(a.id, "analyze")] = RunResult(False, "cancelled")
+
+    def broken_remove(job_id):
+        raise RuntimeError("제거 실패")
+    store.remove = broken_remove
+    q.start_all()
+    assert q.join(WAIT)
+    store.remove = real_remove
+    assert a.status == Status.FAILED and a.error
+    assert b.status == Status.REVIEW
+
+
+def test_rejudge_from_on_change_after_rejudge(tmp_path):
+    store = Store(tmp_path / "state.json")
+    p = tmp_path / "a.mp4"
+    p.write_bytes(b"x")
+    a = store.add(p)
+    a.status = Status.REVIEW
+    write_cuts(a, [])
+    fx = FakeExec()
+    q = None
+    reviews = []
+
+    def on_change(job):
+        if job.status == Status.REVIEW:
+            reviews.append(True)
+            if len(reviews) == 1:
+                q.rejudge(job.id)
+    q = Queue(store, fx, on_change)
+    q.rejudge(a.id)
+    assert q.join(WAIT)
+    assert fx.calls == [(a.id, "analyze")] * 2
+    assert a.status == Status.REVIEW and len(reviews) == 2
