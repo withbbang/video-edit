@@ -1,0 +1,18 @@
+{
+  "models": [
+    {"key": "whisper", "repo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+     "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf", "bytes": 1621665983,
+     "files": ["config.json", "model.bin", "preprocessor_config.json", "tokenizer.json", "vocabulary.json"]},
+    {"key": "ctc", "repo": "kresnik/wav2vec2-large-xlsr-korean",
+     "revision": "629c9a3501c10ba128bf3fa1eebb12af3be03f61", "bytes": 1266768803,
+     "files": ["config.json", "model.safetensors", "preprocessor_config.json", "tokenizer_config.json", "vocab.json"]}
+  ],
+  "cuda_win": [
+    {"name": "nvidia-cublas-cu12", "version": "12.8.4.1",
+     "url": "https://files.pythonhosted.org/packages/70/61/7d7b3c70186fb651d0fbd35b01dbfc8e755f69fd58f817f3d0f642df20c3/nvidia_cublas_cu12-12.8.4.1-py3-none-win_amd64.whl",
+     "sha256": "47e9b82132fa8d2b4944e708049229601448aaad7e6f296f630f2d1a32de35af", "bytes": 567544208},
+    {"name": "nvidia-cudnn-cu12", "version": "9.10.2.21",
+     "url": "https://files.pythonhosted.org/packages/3d/90/0bd6e586701b3a890fd38aa71c387dab4883d619d6e5ad912ccbd05bfd67/nvidia_cudnn_cu12-9.10.2.21-py3-none-win_amd64.whl",
+     "sha256": "c6288de7d63e6cf62988f0923f96dc339cea362decb1bf5b3141883392a7d65e", "bytes": 692992268}
+  ]
+}

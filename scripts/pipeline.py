@@ -415,7 +415,18 @@ def probe_whisper_windows(model_name: str, device: str, compute_type: str, threa
                  "  winget install Microsoft.VCRedist.2015+.x64")
 
 
+def use_cuda_dir(is_windows: bool = os.name == "nt") -> None:
+    """앱이 받아 둔 CUDA DLL 폴더(환경변수 YTEDIT_CUDA_DIR)를 윈도우 DLL 검색 경로에 더한다.
+    PATH 에도 앞에 붙여 probe 하위 프로세스가 같은 DLL 을 찾게 한다. 변수가 없으면 아무것도 안 한다 (CLI)."""
+    d = os.environ.get("YTEDIT_CUDA_DIR")
+    if not (is_windows and d and os.path.isdir(d)):
+        return
+    os.add_dll_directory(d)
+    os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+
+
 def load_whisper(model_name: str, device: str, compute_type: str, probe_marker: Path):
+    use_cuda_dir()
     try:
         from faster_whisper import WhisperModel
     except ImportError:
