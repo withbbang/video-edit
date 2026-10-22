@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Callable, Protocol
 
-from . import __version__, diff, models, paths, runner, updates
+from . import __version__, diff, models, paths, runner, subtitles, updates
 from .jobqueue import ANALYZE, RENDER
 from .options import FAST_KEYS, JobOptions
 from .progress import ANALYZE_WEIGHTS, RENDER_WEIGHTS
@@ -300,6 +300,136 @@ class Api:
             view, out = job_view(job), [list(r) for r in job.restored]
         self._push("job", view)
         return {"restored": out}
+
+    # ---- 자막 고치기 ----------------------------------------------------------
+
+    def _caption_state(self, job_id: str):
+        """(job, cuts, transcript, caps) — 파일을 못 읽으면 None."""
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None:
+                return None
+            src, restored = Path(job.src), [list(r) for r in job.restored]
+            edits, times = dict(job.word_edits), {k: list(v) for k, v in job.line_times.items()}
+        out = paths.job_dir(src) / "out"
+        cuts = _read_json(out / f"{src.stem}.cuts.json")
+        tr = _read_json(out / f"{src.stem}.transcript.json")
+        if cuts is None or tr is None:
+            return None
+        cuts = diff.without_restored(cuts, restored)   # TODO(Task 4): effective_cuts
+        try:
+            caps = subtitles.captions(cuts, tr, subtitles.load_cfg(), edits, times)
+        except Exception:
+            log.exception("자막 계산 실패")
+            return None
+        return job, cuts, tr, caps
+
+    def _edit_subs(self, job_id: str, change: Callable[[Job, dict], bool]) -> list | None:
+        """자막 수정 공통: 확인 대기·저장됨에서만. change(job, tr) 가 False 면 거절. → 새 자막 목록."""
+        st = self._caption_state(job_id)
+        if st is None:
+            return None
+        _, _, tr, _ = st
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None or job.status not in (Status.REVIEW, Status.SAVED):
+                return None
+            if not change(job, tr):
+                return None
+            if job.edits_sha1 is None and (job.word_edits or job.line_times):
+                job.edits_sha1 = subtitles.transcript_sha1(tr)
+            if job.status == Status.SAVED:
+                job.status = Status.REVIEW
+            self._store.save()
+            view = job_view(job)
+        self._push("job", view)
+        return self.get_captions(job_id)
+
+    def get_captions(self, job_id: str) -> list | None:
+        st = self._caption_state(job_id)
+        return st[3] if st else None
+
+    def set_word(self, job_id: str, key: str, text: str | None) -> list | None:
+        """어절 글자를 고친다. text 가 None 이거나 원래 글자와 같으면 원래대로."""
+        if not isinstance(key, str) or not (text is None or isinstance(text, str)):
+            return None
+
+        def change(job: Job, tr: dict) -> bool:
+            orig = subtitles.transcript_words(tr).get(key)
+            if orig is None:
+                return False
+            if text is None or text.strip() == orig:
+                job.word_edits.pop(key, None)
+            else:
+                job.word_edits[key] = text.strip()
+            return True
+        return self._edit_subs(job_id, change)
+
+    def replace_text(self, job_id: str, find: str, repl: str, apply: bool) -> dict | None:
+        """찾아 바꾸기. apply=False 면 몇 곳인지만 알려 준다. → {"count": 곳, "keys": [바뀔 어절 키]}"""
+        st = self._caption_state(job_id)
+        if st is None or not isinstance(find, str) or not isinstance(repl, str):
+            return None
+        plan, count = subtitles._plan(st[3], find, repl)
+        result = {"count": count, "keys": list(plan)}
+        if apply and plan:
+            def change(job: Job, tr: dict) -> bool:
+                words = subtitles.transcript_words(tr)
+                for k, v in plan.items():
+                    if v.strip() == words.get(k):
+                        job.word_edits.pop(k, None)
+                    else:
+                        job.word_edits[k] = v.strip()
+                return True
+            if self._edit_subs(job_id, change) is None:
+                return None
+        return result
+
+    def set_line_time(self, job_id: str, key: str, start: float | None, end: float | None) -> list | None:
+        """자막 줄의 시작·끝(원본 초)을 맞춘다. 둘 다 None 이면 원래대로. 앞 줄 끝~다음 줄 시작,
+        0~영상 길이 안으로 자르고 길이는 0.3초 이상."""
+        import math
+        st = self._caption_state(job_id)
+        if st is None:
+            return None
+        _, _, tr, caps = st
+        line = next((c for c in caps if c["key"] == key), None)
+        if line is None:
+            return None
+        remove = start is None and end is None
+        new = None
+        if not remove:
+            try:
+                s = float(line["start"] if start is None else start)
+                e = float(line["end"] if end is None else end)
+            except (TypeError, ValueError):
+                return None
+            if not (math.isfinite(s) and math.isfinite(e)):
+                return None
+            lo, hi = subtitles.line_bounds(caps, key)
+            try:
+                dur = float(tr.get("duration") or 0)
+            except (TypeError, ValueError):
+                dur = 0.0
+            lo = max(lo, 0.0)
+            if dur > 0:
+                hi = min(hi, dur)
+            s = min(max(s, lo), hi)
+            e = min(max(e, lo), hi)
+            if e - s < subtitles.MIN_LINE_SEC:
+                e = s + subtitles.MIN_LINE_SEC
+                if e > hi:
+                    e = hi
+                    s = max(lo, e - subtitles.MIN_LINE_SEC)
+            new = [s, e]
+
+        def change(job: Job, _tr: dict) -> bool:
+            if new is None:
+                job.line_times.pop(key, None)
+            else:
+                job.line_times[key] = new
+            return True
+        return self._edit_subs(job_id, change)
 
     # ---- 결과 ----------------------------------------------------------------
 
