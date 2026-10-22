@@ -1135,6 +1135,17 @@ def captions_to_srt(caps: list[dict], remap: TimeRemap, final_dur: float,
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def load_subs_edits(path: Path | None, tr: dict) -> tuple[dict, dict]:
+    """앱이 넘긴 자막 수정 파일 → (어절 글자, 줄 시간). 받아쓰기가 달라졌으면 버린다."""
+    if not path:
+        return {}, {}
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if data.get("transcript_sha1") != transcript_sha1(tr):
+        log("자막 수정이 지금 받아쓰기와 맞지 않아 무시합니다")
+        return {}, {}
+    return dict(data.get("words") or {}), dict(data.get("lines") or {})
+
+
 def build_srt(tr: dict, remap: TimeRemap, final_dur: float, always_fillers: set[str] = frozenset(),
               single_only: set[str] = frozenset(),
               max_chars: int = 28, max_dur: float = 5.0, gap_break: float = 0.7) -> str:
@@ -1433,6 +1444,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="판정 뒤 컷 적용 전 원본 타임라인의 미리보기 사본(긴 변 1280, H.264)을 이 경로에 만듦")
     ap.add_argument("--vbitrate-scale", type=float, default=1.0,
                     help="--vbitrate auto 일 때 자동 비트레이트에 곱할 배율 (기본 1.0)")
+    ap.add_argument("--subs-edits", type=Path, default=None,
+                    help='자막 수정 파일 {"transcript_sha1","words","lines"} (데스크톱 앱용). 받아쓰기가 다르면 무시')
     return ap
 
 
@@ -1557,7 +1570,10 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     out_media = media_dir / (f"{stem}_clean.mp4" if info["has_video"] else f"{stem}_clean.m4a")
     final_dur = sum(ef - sf for sf, ef in keeps) / float(fps)
     srt_path = out_media.with_suffix(".srt")
-    srt_text = build_srt(tr, TimeRemap(cuts), final_dur, cfg["_always"], cfg["_single_only"])
+    sub_words, sub_lines = load_subs_edits(args.subs_edits, tr)
+    remap_ = TimeRemap(cuts)
+    caps = build_captions(tr, remap_.cut_words, remap_, cfg["_always"], cfg["_single_only"], word_edits=sub_words)
+    srt_text = captions_to_srt(caps, remap_, final_dur, line_times=sub_lines)
     srt_path.write_text(srt_text, encoding="utf-8")
     if not srt_text:
         log("인식된 말소리가 없어 자막이 비어 있습니다 (자막 트랙은 넣지 않음)")

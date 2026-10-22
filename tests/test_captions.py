@@ -90,3 +90,25 @@ def test_line_key_stable_when_first_word_emptied():
     assert first not in [w["key"] for w in caps[0]["words"]]
     srt = pipeline.captions_to_srt(caps, remap, FINAL, {first: [0.0, 1.0]})
     assert srt.split("\n")[1] == f"{pipeline.fmt_srt_time(remap(0.0))} --> {pipeline.fmt_srt_time(remap(1.0))}"
+
+
+def _edits_file(tmp_path, sha):
+    import json
+    p = tmp_path / "e.json"
+    p.write_text(json.dumps({"transcript_sha1": sha, "words": {"0:0": "안녕"},
+                             "lines": {"0:0": [0.0, 1.0]}}), encoding="utf-8")
+    return p
+
+
+def test_load_subs_edits_matches_sha(tmp_path):
+    tr = _tr()
+    p = _edits_file(tmp_path, pipeline.transcript_sha1(tr))
+    assert pipeline.load_subs_edits(p, tr) == ({"0:0": "안녕"}, {"0:0": [0.0, 1.0]})
+
+
+def test_load_subs_edits_stale_ignored(tmp_path):
+    assert pipeline.load_subs_edits(_edits_file(tmp_path, "nope"), _tr()) == ({}, {})
+
+
+def test_load_subs_edits_none():
+    assert pipeline.load_subs_edits(None, _tr()) == ({}, {})
