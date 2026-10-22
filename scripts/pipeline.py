@@ -1058,52 +1058,89 @@ class TimeRemap:
         return t - self.removed_before[i] - (self.ends[i] - self.starts[i])
 
 
-def build_srt(tr: dict, remap: TimeRemap, final_dur: float, always_fillers: set[str] = frozenset(),
-              single_only: set[str] = frozenset(),
-              max_chars: int = 28, max_dur: float = 5.0, gap_break: float = 0.7) -> str:
-    captions: list[list] = []
-    cur: list[tuple[float, float, str]] = []   # (결과 영상 기준 시작, 끝, 단어)
+def build_captions(tr: dict, cut_words: set, remap: TimeRemap, always_fillers: set[str] = frozenset(),
+                   single_only: set[str] = frozenset(), word_edits: dict[str, str] | None = None,
+                   max_chars: int = 28, max_dur: float = 5.0, gap_break: float = 0.7) -> list[dict]:
+    """자막 줄 계산. 줄 나눔은 원래 Whisper 글자로 하고(고쳐도 줄이 다시 나뉘지 않게),
+    고친 글자는 words[].text 에만 반영한다. 시간(start/end)은 원본 영상 기준 초."""
+    word_edits = word_edits or {}
+    groups: list[list[dict]] = []
+    cur: list[dict] = []
+    cur_r: list[tuple[float, float, str]] = []   # (결과 영상 기준 시작, 끝, 원래 글자)
 
     def flush():
         if cur:
-            text = " ".join(w for _, _, w in cur).strip()
-            if text:
-                captions.append([cur[0][0], max(cur[-1][1], cur[0][0] + 0.4), text])
-            cur.clear()
+            groups.append(list(cur))
+        cur.clear()
+        cur_r.clear()
 
     words = all_words(tr)
     norms = [normalize(w["word"]) for _, _, w in words]
     for k, (seg_id, wi, w) in enumerate(words):
-        if (seg_id, wi) in remap.cut_words:
+        if (seg_id, wi) in cut_words:
             continue  # 잘려나간 필러
         if norms[k] in always_fillers and not is_repeated_sound(words, norms, k, single_only):
             continue  # 오디오엔 남았더라도(건너뛴 항목) 자막에는 '어/음'을 넣지 않는다
-        s, e, text = remap(w["start"]), remap(w["end"]), w["word"].strip()
-        if cur:
+        s, e, orig = remap(w["start"]), remap(w["end"]), w["word"].strip()
+        if cur_r:
             # 멈춤·길이는 결과 영상 기준으로 잰다 — 무음 컷으로 사라진 멈춤에서 끊으면 한 단어 자막이 생긴다
-            length = sum(len(x[2]) + 1 for x in cur) + len(text)
-            if (s - cur[-1][1] > gap_break or length > max_chars or e - cur[0][0] > max_dur
-                    or cur[-1][2].endswith((".", "?", "!"))):
+            length = sum(len(x[2]) + 1 for x in cur_r) + len(orig)
+            if (s - cur_r[-1][1] > gap_break or length > max_chars or e - cur_r[0][0] > max_dur
+                    or cur_r[-1][2].endswith((".", "?", "!"))):
                 flush()
-        cur.append((s, e, text))
+        key = f"{seg_id}:{wi}"
+        cur_r.append((s, e, orig))
+        cur.append({"key": key, "text": word_edits.get(key, orig).strip(), "orig": orig,
+                    "start": w["start"], "end": w["end"]})
     flush()
 
+    caps = []
+    for g in groups:
+        ws = [x for x in g if x["text"]]   # 글자를 비운 어절은 빠진다
+        if not ws or not " ".join(x["text"] for x in ws).strip():
+            continue
+        caps.append({"key": ws[0]["key"], "start": ws[0]["start"], "end": ws[-1]["end"], "words": ws})
+    return caps
+
+
+def captions_to_srt(caps: list[dict], remap: TimeRemap, final_dur: float,
+                    line_times: dict[str, list[float]] | None = None) -> str:
+    """줄 → SRT. line_times[key] = [시작, 끝](원본초)인 줄은 그 시간을 쓰고 뒷처리에서 움직이지 않는다."""
+    line_times = line_times or {}
     # 자막끼리 겹치지 않게, 영상 길이를 넘지 않게
-    out: list[list] = []
-    for s, e, text in captions:
+    out: list[list] = []   # [시작, 끝, 글자, 고정 여부]
+    for c in caps:
+        text = " ".join(w["text"] for w in c["words"]).strip()
+        fixed = c["key"] in line_times
+        if fixed:
+            s, e = remap(line_times[c["key"]][0]), remap(line_times[c["key"]][1])
+        else:
+            s = remap(c["start"])
+            e = max(remap(c["end"]), s + 0.4)
         if out:
             prev = out[-1]
-            if prev[1] > s - 0.05:
+            if not prev[3] and prev[1] > s - 0.05:
                 prev[1] = max(prev[0] + 0.3, s - 0.05)
-            s = max(s, prev[1] + 0.05)
-        e = max(e, s + 0.3)
-        out.append([s, e, text])
+            if not fixed:
+                s = max(s, prev[1] + 0.05)
+        if not fixed:
+            e = max(e, s + 0.3)
+        out.append([s, e, text, fixed])
     lines = []
-    for i, (s, e, text) in enumerate(out):
-        e = min(e, final_dur)
-        s = min(s, max(0.0, e - 0.3))
+    for i, (s, e, text, fixed) in enumerate(out):
+        if not fixed:
+            e = min(e, final_dur)
+            s = min(s, max(0.0, e - 0.3))
         lines.append(f"{i+1}\n{fmt_srt_time(s)} --> {fmt_srt_time(e)}\n{text}\n")
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def build_srt(tr: dict, remap: TimeRemap, final_dur: float, always_fillers: set[str] = frozenset(),
+              single_only: set[str] = frozenset(),
+              max_chars: int = 28, max_dur: float = 5.0, gap_break: float = 0.7) -> str:
+    caps = build_captions(tr, remap.cut_words, remap, always_fillers, single_only,
+                          max_chars=max_chars, max_dur=max_dur, gap_break=gap_break)
+    return captions_to_srt(caps, remap, final_dur)
 
 
 # ---------------------------------------------------------------------------
