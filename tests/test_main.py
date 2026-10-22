@@ -46,15 +46,22 @@ def test_default_runs_window(monkeypatch):
     assert ran == [True]
 
 
-def test_dash_c_runs_code(monkeypatch, capsys):
+def _frozen(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+
+
+def test_dash_c_runs_code(monkeypatch, capsys, tmp_path):
     """묶은 앱에선 sys.executable 이 파이썬이 아니므로 pipeline.probe_whisper_windows 의
     [sys.executable, "-c", code] 가 창을 띄우지 않고 코드를 실행해야 한다."""
+    _frozen(monkeypatch, tmp_path)
     monkeypatch.setattr("app.window.run", lambda: pytest.fail("창을 띄우면 안 됨"))
     entry.main(["x", "-c", "import sys; print('hi', __name__)"])
     assert capsys.readouterr().out == "hi __main__\n"
 
 
-def test_dash_c_exit_code(monkeypatch):
+def test_dash_c_exit_code(monkeypatch, tmp_path):
+    _frozen(monkeypatch, tmp_path)
     monkeypatch.setattr("app.window.run", lambda: pytest.fail("창을 띄우면 안 됨"))
     with pytest.raises(SystemExit) as e:
         entry.main(["x", "-c", "import sys; sys.exit(7)"])
@@ -84,3 +91,11 @@ def test_pipeline_path_unchanged_when_not_frozen(monkeypatch):
     entry.main(["x", "--pipeline", "in.mp4"])
     import os
     assert os.environ["PATH"] == "/usr/bin"
+
+
+def test_dash_c_ignored_when_not_frozen(monkeypatch):
+    """개발 실행(python -m app)에선 -c 를 받지 않는다."""
+    ran = []
+    monkeypatch.setattr("app.window.run", lambda: ran.append(True))
+    entry.main(["x", "-c", "raise SystemExit(5)"])
+    assert ran == [True]

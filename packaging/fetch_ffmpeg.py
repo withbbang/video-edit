@@ -29,6 +29,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 THIRD_PARTY = HERE / "THIRD_PARTY.txt"
+DEFAULT_CACHE = HERE / ".ffmpeg-cache"   # 받은 zip (sha256 이 맞으면 다시 받지 않음). .gitignore 에 있음
 BEGIN = "=== BEGIN ffmpeg (packaging/fetch_ffmpeg.py 가 쓰는 부분, 손으로 고치지 마세요) ==="
 END = "=== END ffmpeg ==="
 
@@ -176,21 +177,28 @@ def verify_offline(dest: Path, plat: str, readme: str | None) -> None:
           f"({', '.join(names)})")
 
 
-def fetch(plat: str, dest: Path) -> list[Path]:
+def fetch(plat: str, dest: Path, cache: Path = DEFAULT_CACHE) -> list[Path]:
+    """임시 폴더에 풀어 확인까지 마친 뒤에만 dest 로 옮긴다. 실패하면 dest 엔 새로 생기는 것이 없다."""
     src = SOURCES[plat]
-    dest.mkdir(parents=True, exist_ok=True)
-    cache = dest / ".cache"
-    files, readme = [], None
-    for a in src["archives"]:
-        archive = download(a["url"], a["sha256"], cache)
-        files += extract(archive, a["members"], dest)
-        if a.get("readme"):
-            with zipfile.ZipFile(archive) as z:
-                readme = z.read(a["readme"]).decode("utf-8", "replace")
-    if host_platform() == plat:
-        verify_by_running(dest, plat)
-    else:
-        verify_offline(dest, plat, readme)
+    with tempfile.TemporaryDirectory(prefix="ffmpeg-stage-") as tmp:
+        stage = Path(tmp)
+        staged, readme = [], None
+        for a in src["archives"]:
+            archive = download(a["url"], a["sha256"], cache)
+            staged += extract(archive, a["members"], stage)
+            if a.get("readme"):
+                with zipfile.ZipFile(archive) as z:
+                    readme = z.read(a["readme"]).decode("utf-8", "replace")
+        if host_platform() == plat:
+            verify_by_running(stage, plat)
+        else:
+            verify_offline(stage, plat, readme)
+        dest.mkdir(parents=True, exist_ok=True)
+        files = []
+        for f in staged:
+            target = dest / f.name
+            shutil.move(str(f), str(target))
+            files.append(target)
     return files
 
 
@@ -200,7 +208,9 @@ def third_party_block() -> str:
              "  이 프로그램은 FFmpeg 프로젝트(https://ffmpeg.org/)의 ffmpeg/ffprobe 를 별도 실행 파일로 함께 배포합니다.",
              "  이 FFmpeg 빌드는 GNU General Public License 버전 3 으로 배포됩니다. 라이선스 전문은 함께 들어 있는",
              "  LICENSE 파일(GPL-3.0)과 https://www.gnu.org/licenses/gpl-3.0.html 에 있습니다.",
-             f"  FFmpeg 소스 코드: {FFMPEG_SOURCE}",
+             "  대응 소스 코드(FFmpeg 와 정적 빌드에 들어간 x264·x265 등 라이브러리의 소스 아카이브)는 이 앱의",
+             "  각 GitHub 릴리스(https://github.com/withbbang/video-edit/releases)에 함께 첨부됩니다.",
+             f"  FFmpeg 소스 코드 원본: {FFMPEG_SOURCE}",
              "  (FFmpeg 저장소: https://git.ffmpeg.org/ffmpeg.git , 라이선스 안내: https://ffmpeg.org/legal.html)",
              ""]
     for plat in ("mac", "win"):
@@ -237,9 +247,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--platform", choices=sorted(SOURCES), required=True)
     ap.add_argument("--dest", type=Path, default=HERE / "bin")
     ap.add_argument("--third-party", type=Path, default=THIRD_PARTY)
+    ap.add_argument("--cache", type=Path, default=DEFAULT_CACHE, help="받은 zip 보관 폴더")
     a = ap.parse_args(argv)
     try:
-        files = fetch(a.platform, a.dest)
+        files = fetch(a.platform, a.dest, a.cache)
         changed = update_third_party(a.third_party)
     except (FetchError, OSError) as e:
         print(f"오류: {e}", file=sys.stderr)

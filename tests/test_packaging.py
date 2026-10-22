@@ -72,3 +72,30 @@ def test_verify_offline_needs_arnndn(tmp_path):
     (tmp_path / "ffmpeg.exe").write_bytes(good.replace(b"arnndn\0", b""))
     with pytest.raises(ff.FetchError, match="arnndn"):
         ff.verify_offline(tmp_path, "win", None)
+
+
+def _fake_source(monkeypatch, tmp_path, payload: bytes):
+    src = _zip(tmp_path / "f.zip", {"bin/ffmpeg.exe": payload, "bin/ffprobe.exe": b"probe"})
+    monkeypatch.setitem(ff.SOURCES, "win", dict(ff.SOURCES["win"], archives=[
+        {"url": src.as_uri(), "sha256": ff.sha256_of(src),
+         "members": {"bin/ffmpeg.exe": "ffmpeg.exe", "bin/ffprobe.exe": "ffprobe.exe"}}]))
+    monkeypatch.setattr(ff, "host_platform", lambda: None)  # 실행하지 않고 문자열로 확인
+
+
+def test_fetch_failure_leaves_dest_untouched(monkeypatch, tmp_path):
+    _fake_source(monkeypatch, tmp_path, b"no filters here")
+    dest = tmp_path / "bin"
+    dest.mkdir()
+    (dest / "old.txt").write_text("x")
+    with pytest.raises(ff.FetchError):
+        ff.fetch("win", dest, tmp_path / "cache")
+    assert [p.name for p in dest.iterdir()] == ["old.txt"]
+
+
+def test_fetch_success_moves_into_dest(monkeypatch, tmp_path):
+    names = ff.FILTERS + ff.SOURCES["win"]["encoders"]
+    _fake_source(monkeypatch, tmp_path, b"".join(n.encode() + b"\0" for n in names))
+    dest = tmp_path / "new" / "bin"
+    files = ff.fetch("win", dest, tmp_path / "cache")
+    assert sorted(p.name for p in dest.iterdir()) == ["ffmpeg.exe", "ffprobe.exe"]
+    assert all(f.parent == dest for f in files)

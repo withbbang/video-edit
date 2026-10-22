@@ -82,8 +82,27 @@ excludes = [
     "tkinter", "_tkinter", "matplotlib", "IPython", "jupyter", "notebook", "pytest", "_pytest",
     "tensorboard", "torch.utils.tensorboard", "tensorflow", "flax", "jax", "keras",
     "torchvision", "torchaudio", "pandas", "scipy", "sklearn", "PIL.ImageQt", "PyQt5", "PyQt6",
-    "PySide2", "PySide6", "gi",
+    "PySide2", "PySide6", "gi", "py",
 ]
+
+
+def package_license_files(packages: list[str]) -> list[tuple[str, str]]:
+    """dist-info 밖(패키지 폴더 바로 아래)에 둔 LICENSE·ThirdPartyNotices 도 넣는다 (onnxruntime 등)."""
+    import importlib.util
+    out = []
+    for name in packages:
+        spec = importlib.util.find_spec(name)
+        if spec is None or not spec.submodule_search_locations:
+            continue
+        pkg = Path(list(spec.submodule_search_locations)[0])
+        for f in pkg.iterdir():
+            if f.is_file() and f.name.upper().startswith(("LICENSE", "LICENCE", "COPYING", "NOTICE", "THIRDPARTYNOTICES")):
+                out.append((str(f), name))
+    return out
+
+
+datas += package_license_files(["onnxruntime", "ctranslate2", "tokenizers", "torch", "av", "faster_whisper",
+                                "transformers", "webview"])
 
 a = Analysis(
     [str(ROOT / "packaging" / "launcher.py")],
@@ -96,6 +115,36 @@ a = Analysis(
     excludes=excludes,
     noarchive=False,
 )
+
+
+def bundled_metadata(analysis) -> list[tuple[str, str, str]]:
+    """묶인 모든 파이썬 패키지의 *.dist-info (라이선스 전문 포함)를 넣는다. THIRD_PARTY.txt 가 여기를 가리킨다.
+    묶인 최상위 모듈 이름 → 배포판 이름(packages_distributions) 으로 찾는다."""
+    import os
+    from importlib.metadata import packages_distributions
+    tops = {name.split(".")[0] for name, *_ in analysis.pure}
+    tops |= {Path(dest).parts[0] for dest, *_ in analysis.binaries if len(Path(dest).parts) > 1}
+    pd = packages_distributions()
+    dists = sorted({d for t in tops for d in pd.get(t, [])})
+    have = {dest for dest, *_ in analysis.datas}
+    toc = []
+    for dist in dists:
+        try:
+            pairs = copy_metadata(dist)
+        except Exception:  # noqa: BLE001
+            continue
+        for src, dest in pairs:
+            for root, _dirs, files in os.walk(src):
+                for f in files:
+                    full = os.path.join(root, f)
+                    d = os.path.join(dest, os.path.relpath(full, src))
+                    if d not in have and "__pycache__" not in d:
+                        toc.append((d, full, "DATA"))
+                        have.add(d)
+    return toc
+
+
+a.datas += bundled_metadata(a)
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -108,6 +157,9 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    # 창 없는 실행 파일에서 처리 안 된 예외가 메시지 창을 띄우면 숨은 하위 프로세스(--pipeline, -c)가 멈춘다.
+    # launcher.py 가 traceback 을 stderr 로 쓰고 1 로 끝낸다.
+    disable_windowed_traceback=True,
     target_arch="arm64" if IS_MAC else None,
     codesign_identity=None,
     entitlements_file=None,

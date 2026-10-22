@@ -14,3 +14,4 @@ packaging/bin/
 build/
 dist/
 *.dmg
+packaging/.ffmpeg-cache/

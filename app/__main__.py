@@ -2,7 +2,7 @@
 
   --pipeline ...   scripts/pipeline.py 를 이 프로세스에서 실행 (묶은 앱이 파이프라인 하위 프로세스로 쓴다)
   --probe-gpu      윈도우 GPU 시험 (models.run_gpu_probe)
-  -c CODE          파이썬 코드 실행. 묶은 앱에선 sys.executable 이 이 실행 파일이라
+  -c CODE          (묶은 앱에서만) 파이썬 코드 실행. 묶은 앱에선 sys.executable 이 이 실행 파일이라
                    pipeline.probe_whisper_windows 의 [sys.executable, "-c", ...] 가 여기로 온다
   그 외             창을 띄운다
 """
@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None):
         import pipeline
         sys.argv = [argv[0]] + rest[1:]
         return pipeline.main()
-    if rest[:1] == ["-c"] and len(rest) >= 2:
+    if rest[:1] == ["-c"] and len(rest) >= 2 and getattr(sys, "frozen", False):
         _use_bundled_ffmpeg()
         sys.argv = ["-c"] + rest[2:]
         exec(compile(rest[1], "<string>", "exec"), {"__name__": "__main__", "__builtins__": __builtins__})
