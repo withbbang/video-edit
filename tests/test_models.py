@@ -193,8 +193,8 @@ def test_cleanup_removes_old_revision(tmp_path):
                 "cuda/oldhash", keep_cuda]:
         (tmp_path / rel).mkdir(parents=True)
     models.cleanup(MAN, tmp_path)
-    left = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.glob("models/*/*")) + \
-        sorted(str(p.relative_to(tmp_path)) for p in (tmp_path / "cuda").iterdir())
+    left = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.glob("models/*/*")) + \
+        sorted(p.relative_to(tmp_path).as_posix() for p in (tmp_path / "cuda").iterdir())
     assert left == ["models/ctc/bbb222", "models/whisper/aaa111", keep_cuda]
 
 

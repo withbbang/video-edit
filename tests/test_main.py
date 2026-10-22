@@ -121,8 +121,9 @@ def test_pipeline_mode_writes_utf8_even_with_other_locale(monkeypatch):
     entry.main(["x", "--pipeline", "in.mp4"])
     sys.stdout.flush()
     sys.stderr.flush()
-    assert out_b.getvalue().decode("utf-8") == "오류: 입력 파일이 없습니다: 강의 03.mp4\n"
-    assert err_b.getvalue().decode("utf-8") == "오류: 둘째 줄 ✓\n"
+    # 윈도우는 줄바꿈이 \r\n — runner 는 줄 단위로 읽으므로 상관없다
+    assert out_b.getvalue().decode("utf-8").replace("\r\n", "\n") == "오류: 입력 파일이 없습니다: 강의 03.mp4\n"
+    assert err_b.getvalue().decode("utf-8").replace("\r\n", "\n") == "오류: 둘째 줄 ✓\n"
 
 
 def test_pipeline_mode_tolerates_missing_stdio(monkeypatch):
@@ -143,7 +144,7 @@ def test_dash_c_writes_utf8(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(buf, encoding="cp949"))
     entry.main(["x", "-c", "print('오류: 한글 ✓')"])
     sys.stdout.flush()
-    assert buf.getvalue().decode("utf-8") == "오류: 한글 ✓\n"
+    assert buf.getvalue().decode("utf-8").replace("\r\n", "\n") == "오류: 한글 ✓\n"
 
 
 def test_runner_reads_child_error_in_korean_with_cp949_env(tmp_path):
@@ -158,4 +159,5 @@ def test_runner_reads_child_error_in_korean_with_cp949_env(tmp_path):
     r = subprocess.run(cmd, cwd=root, env={**env, "PYTHONIOENCODING": "cp949"}, capture_output=True)
     assert "오류:" in r.stdout.decode("utf-8") + r.stderr.decode("utf-8")
     res = runner.run(cmd, {}, lambda p: None, env={"PYTHONIOENCODING": "cp949", "PYTHONPATH": str(root)})
-    assert not res.ok and res.error.startswith("오류:") and "없는 영상.mp4" in res.error
+    # 어느 검사에서 멈추든(ffmpeg 없는 CI 면 ffmpeg 검사) 한글 오류 줄이 깨지지 않고 실패 이유가 되면 된다
+    assert not res.ok and res.error.startswith("오류:") and "\ufffd" not in res.error

@@ -653,6 +653,7 @@ def test_model_status_not_ready_when_windows_gpu_undecided(tmp_path, monkeypatch
         d = tmp_path / "data" / "models" / key / rev
         d.mkdir(parents=True)
         (d / models.COMPLETE).write_text(rev)
+    monkeypatch.setattr(models.sys, "platform", "darwin")
     assert a.model_status()["ready"]
     monkeypatch.setattr(models.sys, "platform", "win32")
     st = a.model_status()

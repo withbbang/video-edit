@@ -119,8 +119,9 @@ def test_download_failure_oserror(monkeypatch, tmp_path):
 def test_open_file(monkeypatch):
     calls = []
     monkeypatch.setattr(updates.subprocess, "Popen", lambda a: calls.append(a))
+    monkeypatch.setattr(sys, "platform", "darwin")
     updates.open_file(Path("/t/a.dmg"))
-    assert calls == [["open", "/t/a.dmg"]]
+    assert calls == [["open", str(Path("/t/a.dmg"))]]
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(updates.os, "startfile", lambda p: calls.append(("sf", p)), raising=False)
     updates.open_file(Path("C:/a.exe"))
