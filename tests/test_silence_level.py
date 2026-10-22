@@ -203,3 +203,68 @@ def test_diff_shows_gap_as_silence():
     assert [i["kind"] for i in items] == ["silence", "silence", "filler"]
     r = diff.compare({"cuts": []}, {"cuts": [gap]})
     assert r["silence"] == {"added": 1, "restored": 0} and r["rows"] == []
+
+
+def partial_overlap(a_db=-31.0, b_db=-30.6, bg=-36):
+    """단어 W 의 Whisper 시간 [5.0, 5.6] 이 배경보다 조금 큰 소리(a_db, b_db) 위에 놓인 영상.
+    기준이 a 와 b 사이면 무음이 W 에 반쯤 걸쳐 W 앞부분까지 잘리고, b 를 넘으면 W 가 무음 안에 통째로 들어가
+    W 주변을 남긴다 → 값마다 따로 판정하면 잘린 곳이 줄어든다."""
+    ws, rms = [], []
+
+    def add(sec, db):
+        rms.extend([amp(db)] * int(round(sec / HOP)))
+    t = 0.0
+    for i in range(4):
+        add(0.7, bg)
+        ws.append({"word": f" 말{i}", "start": round(t + 0.7, 2), "end": round(t + 1.2, 2)})
+        add(0.5, -24)
+        t += 1.2
+    add(0.2, bg); add(0.3, a_db); add(0.3, b_db); add(0.6, bg)
+    ws.append({"word": " W", "start": 5.0, "end": 5.6})
+    t = 6.2
+    for i in range(4, 8):
+        ws.append({"word": f" 말{i}", "start": round(t, 2), "end": round(t + 0.5, 2)})
+        add(0.5, -24); add(0.7, bg)
+        t += 1.2
+    return {"segments": [{"id": 0, "words": ws}]}, rms
+
+
+def test_level_monotonic_every_integer_partial_word():
+    for tr, rms in (partial_overlap(), make(floor_db=-28), mixed()):
+        totals = [removed(judged(tr, rms, base_cfg(), lv)) for lv in range(0, 101)]
+        bad = [lv for lv in range(100) if totals[lv + 1] < totals[lv] - 1e-9]
+        assert not bad, (bad, [round(totals[lv], 3) for lv in bad])
+
+
+def early_onset(bg=-35):
+    """말1 의 실제 소리가 Whisper 시작보다 0.3초 먼저, 말2 의 소리가 Whisper 끝보다 0.3초 늦게까지 난다"""
+    ws, rms = [], []
+
+    def add(sec, db):
+        rms.extend([amp(db)] * int(round(sec / HOP)))
+    add(1.0, bg); ws.append({"word": " 말0", "start": 1.0, "end": 1.5}); add(0.5, -24)
+    add(1.2, bg); add(0.3, -24); ws.append({"word": " 말1", "start": 3.0, "end": 3.5}); add(0.5, -24)
+    add(1.0, bg); ws.append({"word": " 말2", "start": 4.5, "end": 5.0}); add(0.5, -24); add(0.3, -24)
+    add(1.2, bg); ws.append({"word": " 말3", "start": 6.5, "end": 7.0}); add(0.5, -24)
+    add(1.0, bg)
+    return {"segments": [{"id": 0, "words": ws}]}, rms
+
+
+def test_gap_edges_do_not_clip_early_speech():
+    tr, rms = early_onset()
+    cuts = judged(tr, rms, base_cfg(), 100)
+    speech = [(2.7, 3.5), (4.5, 5.3)]   # 실제 소리 (Whisper 시간보다 앞·뒤로 0.3초 더)
+    for c in cuts:
+        for s, e in speech:
+            assert min(c.end, e) - max(c.start, s) <= 1e-9, (c.start, c.end, c.reason, s, e)
+    # 틈 자체는 여전히 잘린다
+    assert removed(cuts) > removed(judged(tr, rms, base_cfg(), 50)) - 1e-9 and removed(cuts) > 3
+
+
+def test_level_100_fast_with_many_silences():
+    """무음 컷이 많아도 단어 없는 틈에서 무음 부분을 빼는 데 오래 걸리지 않는다 (조각이 두 배씩 늘던 버그)"""
+    import time
+    tr, rms = make(floor_db=-45, words=200, gap_sec=0.7)
+    t = time.time()
+    cuts = judged(tr, rms, base_cfg(), 100)
+    assert cuts and time.time() - t < 5

@@ -613,27 +613,39 @@ def quiet_mask(rms: list[float], hop: float, cfg: dict):
     return np.convolve(np.asarray(rms), np.ones(k) / k, mode="same") < thr
 
 
-def auto_silence(tr: dict, rms: list[float], hop: float, cfg: dict) -> dict:
-    """영상마다 무음 기준을 배경 소리에 맞춘다. 말 없는 틈(단어 앞뒤 0.1초 밖)의 하위 20% 크기를 배경 바닥으로 보고
-    바닥 + silence_auto_margin_db 를 무음 기준으로 쓴다. 단 silence_threshold_db 보다 내리지 않고(조용한 실내는 그대로),
-    silence_auto_max_db 와 말소리 중간값 - 6dB 보다 올리지 않는다. 무음 잇기 기준도 무음 기준 + 10dB 까지 같이 올린다.
-    틈이 2초 미만이면 바닥을 믿을 수 없어 그대로 둔다. → cfg 에 덮어쓸 값 (silence_noise_floor_db 는 기록용)"""
+def auto_silence_stats(tr: dict, rms: list[float], hop: float) -> tuple[float, float] | None:
+    """auto_silence 가 쓰는 (배경 바닥 dB, 말소리 중간값 dB). 말 없는 틈(단어 앞뒤 0.1초 밖)이 2초 미만이면 None"""
     import numpy as np
-    base = float(cfg.get("silence_threshold_db", -40))
-    bridge = float(cfg.get("silence_bridge_max_db", -30))
-    out = {"silence_threshold_db": base, "silence_bridge_max_db": bridge}
-    if not cfg.get("silence_auto", False) or not rms:
-        return out
+    if not rms:
+        return None
     k = max(1, int(round(0.05 / hop)))  # quiet_mask 와 같은 50ms 이동평균
     db = 20 * np.log10(np.maximum(np.convolve(np.asarray(rms), np.ones(k) / k, mode="same"), 1e-9))
     gap = np.ones(len(db), dtype=bool)
     for _, _, w in all_words(tr):
         gap[max(0, int((w["start"] - 0.1) / hop)):max(0, int(math.ceil((w["end"] + 0.1) / hop)))] = False
     if gap.sum() * hop < 2.0 or gap.all():
+        return None
+    return float(np.percentile(db[gap], 20)), float(np.median(db[~gap]))
+
+
+def auto_silence(tr: dict, rms: list[float], hop: float, cfg: dict, stats="auto") -> dict:
+    """영상마다 무음 기준을 배경 소리에 맞춘다. 말 없는 틈(단어 앞뒤 0.1초 밖)의 하위 20% 크기를 배경 바닥으로 보고
+    바닥 + silence_auto_margin_db 를 무음 기준으로 쓴다. 단 silence_threshold_db 보다 내리지 않고(조용한 실내는 그대로),
+    silence_auto_max_db 와 말소리 중간값 - 6dB 보다 올리지 않는다. 무음 잇기 기준도 무음 기준 + 10dB 까지 같이 올린다.
+    틈이 2초 미만이면 바닥을 믿을 수 없어 그대로 둔다. → cfg 에 덮어쓸 값 (silence_noise_floor_db 는 기록용)
+    stats: 미리 잰 auto_silence_stats 결과 (여러 설정으로 부를 때 한 번만 재려고)"""
+    base = float(cfg.get("silence_threshold_db", -40))
+    bridge = float(cfg.get("silence_bridge_max_db", -30))
+    out = {"silence_threshold_db": base, "silence_bridge_max_db": bridge}
+    if not cfg.get("silence_auto", False) or not rms:
         return out
-    floor = float(np.percentile(db[gap], 20))
+    if isinstance(stats, str):
+        stats = auto_silence_stats(tr, rms, hop)
+    if stats is None:
+        return out
+    floor, speech = stats
     cap = min(float(cfg.get("silence_auto_max_db", -30)),
-              float(np.median(db[~gap])) - float(cfg.get("silence_auto_speech_margin_db", 6)))
+              speech - float(cfg.get("silence_auto_speech_margin_db", 6)))
     thr = round(max(base, min(floor + float(cfg.get("silence_auto_margin_db", 5)), cap)), 1)
     return {"silence_threshold_db": thr, "silence_bridge_max_db": max(bridge, thr + 10),
             "silence_noise_floor_db": round(floor, 1)}
@@ -923,9 +935,31 @@ def silence_level_cfg(cfg: dict, level: int) -> dict:
             "silence_auto_margin_db": round(float(cfg.get("silence_auto_margin_db", 5)) + 10 * f, 4)}
 
 
-def detect_word_gaps(tr: dict, duration: float, cfg: dict, suspects: dict = None) -> list[Cut]:
+GAP_EDGE_SEARCH_SEC = 0.5  # Whisper 단어 시간 오차만큼 — 단어 없는 틈의 경계를 실제 조용한 곳으로 당겨 올 범위
+
+
+def _gap_edge(t: float, quiet, hop: float, direction: int, pad: float) -> float:
+    """단어 쪽 틈 경계 t 가 소리 나는 곳이면 틈 쪽(direction +1: 뒤, -1: 앞)으로 GAP_EDGE_SEARCH_SEC 안의
+    가장 가까운 조용한 프레임까지 줄이고 pad 를 남긴다 (Whisper 단어 시간보다 먼저/늦게 난 말소리를 자르지 않게).
+    단어 쪽으로는 넓히지 않는다. 조용한 프레임이 없으면(시끄러운 틈) t 그대로."""
+    n = len(quiet)
+    i = min(n - 1, max(0, int(t / hop)))
+    if quiet[i]:
+        return t
+    for k in range(1, int(round(GAP_EDGE_SEARCH_SEC / hop)) + 1):
+        j = i + direction * k
+        if not 0 <= j < n:
+            break
+        if quiet[j]:
+            return j * hop + pad if direction > 0 else (j + 1) * hop - pad
+    return t
+
+
+def detect_word_gaps(tr: dict, duration: float, cfg: dict, suspects: dict = None,
+                     quiet=None, hop: float = 0.01) -> list[Cut]:
     """전사된 단어가 없는 틈(처음·끝 포함)은 소리가 있어도 컷 (풍경 장면, 전사 안 된 목소리).
-    자리가 의심스러운 단어(find_suspect_words)는 틈을 막지 않는다. 앞뒤 silence_pad_sec 남기고, 영상 맨 앞/뒤는 여유 없이."""
+    자리가 의심스러운 단어(find_suspect_words)는 틈을 막지 않는다. 앞뒤 silence_pad_sec 남기고, 영상 맨 앞/뒤는 여유 없이.
+    quiet(무음 마스크)를 주면 단어 쪽 경계가 소리 나는 곳일 때 틈 쪽의 가까운 조용한 곳까지 줄인다 (_gap_edge)."""
     min_len = float(cfg.get("silence_min_sec", 0.3))
     pad = float(cfg.get("silence_pad_sec", 0.08))
     words = sorted((w for s, i, w in all_words(tr) if (s, i) not in (suspects or {})), key=lambda w: w["start"])
@@ -938,6 +972,11 @@ def detect_word_gaps(tr: dict, duration: float, cfg: dict, suspects: dict = None
         gs, ge = prev, (duration if last else min(duration, words[j]["start"]))
         if ge - gs >= min_len:
             cs, ce = (gs if j == 0 else gs + pad), (ge if last else ge - pad)
+            if quiet is not None and len(quiet):
+                if j > 0:
+                    cs = _gap_edge(cs, quiet, hop, +1, pad)
+                if not last:
+                    ce = _gap_edge(ce, quiet, hop, -1, pad)
             if ce - cs >= 0.05:
                 ctx_prev = " ".join(x["word"].strip() for x in words[max(0, j - 3):j])
                 ctx_next = " ".join(x["word"].strip() for x in words[j:j + 3])
@@ -962,23 +1001,30 @@ def silence_cuts_for_level(tr: dict, rms: list[float], hop: float, duration: flo
                            suspects: dict = None) -> tuple[list[Cut], list[dict], dict]:
     """--silence-level 의 무음 컷. cfg 는 auto_silence 를 적용하기 전 설정(fillers.json 그대로)이다.
     → (컷, 건너뜀, 무음 판정에 쓴 cfg). 0 은 컷 없음, 50 은 지금의 --silence on 과 같다.
-    50 을 넘으면 50 과 그 사이 10 단위 값들의 무음 컷을 합친다 — 기준을 올리면 무음이 길어져 그 안의 단어 주변을
-    새로 남기는 일이 생겨 드물게 잘린 곳이 줄 수 있기 때문 (값이 커지면 잘린 곳이 줄지 않게). 100 은 단어 없는 틈도 컷."""
+    50 을 넘으면 50 부터 그 값까지 모든 정수 값의 무음 컷을 합친다 — 기준을 올리면 무음이 길어져, 반쯤 걸쳐 있던 단어가
+    무음 안에 통째로 들어가 그 주변을 새로 남기는 일이 생겨 잘린 곳이 줄 수 있기 때문 (값이 커지면 잘린 곳이 줄지 않게).
+    무음 판정은 (무음 기준, 잇기 기준, 최소 길이) 가 다른 값마다 한 번만 한다. 100 은 단어 없는 틈도 컷."""
     level = max(0, min(100, int(level)))
     if level <= 0:
         return [], [], {}
+    stats = auto_silence_stats(tr, rms, hop) if cfg.get("silence_auto", False) else None
 
-    def at(lv: int):
+    def level_cfg(lv: int) -> dict:
         c = {**cfg, **silence_level_cfg(cfg, lv)}
-        c.update(auto_silence(tr, rms, hop, c))
-        return (c, *detect_silences(tr, rms, hop, duration, c, suspects))
+        c.update(auto_silence(tr, rms, hop, c, stats))
+        return c
 
     if level <= 50:  # 최소 길이만 달라진다 → 값이 작을수록 50 의 컷 중 일부
-        c, cuts, skipped = at(level)
-        return cuts, skipped, c
-    found, skipped, seen = [], [], set()
-    for lv in sorted({50, *range(60, level, 10), level}):
-        c, cuts, sk = at(lv)
+        c = level_cfg(level)
+        return (*detect_silences(tr, rms, hop, duration, c, suspects), c)
+    found, skipped, seen, judged = [], [], set(), set()
+    for lv in range(50, level + 1):
+        c = level_cfg(lv)
+        key = (c["silence_threshold_db"], c["silence_bridge_max_db"], c["silence_min_sec"])
+        if key in judged:
+            continue
+        judged.add(key)
+        cuts, sk = detect_silences(tr, rms, hop, duration, c, suspects)
         found += cuts
         for x in sk:
             if (x["start"], x["end"], x["word"]) not in seen:
@@ -990,10 +1036,10 @@ def silence_cuts_for_level(tr: dict, rms: list[float], hop: float, duration: flo
         out.append(Cut(s, e, "(무음)", "silence", first.context, -1, words_idx=[]))
     if level >= 100:
         covered = _union_spans([(x.start, x.end) for x in out])
-        for g in detect_word_gaps(tr, duration, c, suspects):
+        for g in detect_word_gaps(tr, duration, c, suspects, quiet_mask(rms, hop, c), hop):
             pieces = [(g.start, g.end)]
-            for s, e in covered:
-                pieces = [q for x0, x1 in pieces for q in ((x0, min(x1, s)), (max(x0, e), x1))]
+            for s, e in covered:  # 빈 조각은 바로 버린다 (안 버리면 무음 컷마다 조각 수가 두 배)
+                pieces = [q for x0, x1 in pieces for q in ((x0, min(x1, s)), (max(x0, e), x1)) if q[1] > q[0]]
             out += [Cut(x0, x1, g.word, g.reason, g.context, -1, words_idx=[]) for x0, x1 in pieces if x1 - x0 >= 0.05]
     return sorted(out, key=lambda x: x.start), skipped, c
 
