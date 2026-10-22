@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import logging
@@ -101,7 +102,7 @@ def publish_media(media: Path, save_dir: Path) -> list[Path]:
 
 
 def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_root: Path,
-                     save_dir: Path | None = None) -> tuple[list[str], dict, dict]:
+                     save_dir: Path | None = None, lock=None) -> tuple[list[str], dict, dict]:
     """(명령, 진행 가중치, 더할 환경변수). 필요한 폴더를 만든다. 렌더는 media_dir(job) 에 결과를 쓴다
     (저장 폴더로 옮기는 건 make_execute)."""
     model = models.paths(manifest, data_root)
@@ -117,7 +118,7 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
         media = media_dir(job)
         shutil.rmtree(media, ignore_errors=True)   # 지난번에 멈춘 저장의 찌꺼기
         media.mkdir(parents=True, exist_ok=True)
-        cmd, weights = runner.render_command(job, model, device, media, save_cuts(job), save_subs_edits(job)), RENDER_WEIGHTS
+        cmd, weights = runner.render_command(job, model, device, media, save_cuts(job), save_subs_edits(job, lock)), RENDER_WEIGHTS
     else:
         raise ValueError(f"알 수 없는 작업 종류: {kind}")
     if device == "cuda":
@@ -139,16 +140,18 @@ def save_cuts(job: Job) -> Path | None:
     return path
 
 
-def save_subs_edits(job: Job) -> Path | None:
-    """저장용 자막 수정 파일 <이름>.subs_edits.json. 어절·줄 시간 수정이 없으면 낡은 파일을 지우고 None."""
-    src = Path(job.src)
+def save_subs_edits(job: Job, lock=None) -> Path | None:
+    """저장용 자막 수정 파일 <이름>.subs_edits.json. 어절·줄 시간 수정이 없으면 낡은 파일을 지우고 None.
+    job 필드는 lock(queue.lock) 을 쥐고 복사한 뒤 락 밖에서 쓴다."""
+    with lock or contextlib.nullcontext():
+        src, sha = Path(job.src), job.edits_sha1
+        words, lines = dict(job.word_edits), {k: list(v) for k, v in job.line_times.items()}
     path = paths.job_dir(src) / "out" / f"{src.stem}.subs_edits.json"
-    if not (job.word_edits or job.line_times) or not job.edits_sha1:
+    if not (words or lines) or not sha:
         path.unlink(missing_ok=True)
         return None
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"transcript_sha1": job.edits_sha1, "words": job.word_edits,
-                                "lines": job.line_times}, ensure_ascii=False, indent=1), encoding="utf-8")
+    path.write_text(json.dumps({"transcript_sha1": sha, "words": words, "lines": lines}, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
 
 
@@ -157,7 +160,7 @@ def make_execute(store: Store, manifest: dict, data_root: Path, queue_getter: Ca
     진행률은 queue.set_progress 로 넘기고(그게 on_change → push("job") 로 이어진다) 작업마다 초당 5번까지만."""
     def execute(job: Job, kind: str, on_start) -> RunResult:
         save_dir = Path(store.settings["save_dir"]) if kind == RENDER else None
-        cmd, weights, env = pipeline_command(job, kind, store, manifest, data_root, save_dir)
+        cmd, weights, env = pipeline_command(job, kind, store, manifest, data_root, save_dir, queue_getter().lock)
         throttle = _Throttle()
 
         def on_progress(p: float) -> None:
@@ -399,11 +402,6 @@ class Api:
             return None
         return job, cuts, tr, caps, dropped
 
-    def _caption_state(self, job_id: str):
-        """(job, cuts, transcript, caps) — 파일을 못 읽으면 None."""
-        st = self._caption_state_ex(job_id)
-        return st[:4] if st else None
-
     def _edit_subs(self, job_id: str, change: Callable[[Job, dict], bool]) -> dict | None:
         """자막 수정 공통: 확인 대기·저장됨에서만. change(job, tr) 가 False 면 거절. → {"captions": 새 자막 목록, "edits_dropped": 고치기 직전에 낡은 수정을 버렸는가}."""
         st = self._caption_state_ex(job_id)
@@ -459,7 +457,7 @@ class Api:
         if st is None or not isinstance(find, str) or not isinstance(repl, str):
             return None
         plan, count = subtitles.plan_replace(st[3], find, repl)
-        result = {"count": count, "keys": list(plan)}
+        result = {"count": count, "keys": list(plan), "edits_dropped": st[4]}
         if apply and plan:
             def change(job: Job, tr: dict) -> bool:
                 words = subtitles.transcript_words(tr)
@@ -479,10 +477,10 @@ class Api:
         """자막 줄의 시작·끝(원본 초)을 맞춘다. 둘 다 None 이면 원래대로. 앞 줄 끝~다음 줄 시작,
         0~영상 길이 안으로 자르고 길이는 0.3초 이상."""
         import math
-        st = self._caption_state(job_id)
+        st = self._caption_state_ex(job_id)
         if st is None:
             return None
-        _, _, tr, caps = st
+        _, _, tr, caps, was_dropped = st
         line = next((c for c in caps if c["key"] == key), None)
         if line is None:
             return None
@@ -519,7 +517,10 @@ class Api:
             else:
                 job.line_times[key] = new
             return True
-        return self._edit_subs(job_id, change)
+        r = self._edit_subs(job_id, change)
+        if r is not None:
+            r["edits_dropped"] = r["edits_dropped"] or was_dropped
+        return r
 
     # ---- 결과 ----------------------------------------------------------------
 

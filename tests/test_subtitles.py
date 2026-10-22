@@ -106,9 +106,9 @@ def test_set_word_rejected_while_processing(tmp_path):
 
 def test_replace_text_api(tmp_path):
     a, store, job, _ = setup(tmp_path)
-    assert a.replace_text(job.id, "여러분", "분들", False) == {"count": 1, "keys": ["0:1"]}
+    assert a.replace_text(job.id, "여러분", "분들", False) == {"count": 1, "keys": ["0:1"], "edits_dropped": False}
     assert store.get(job.id).word_edits == {}
-    assert a.replace_text(job.id, "  ", "x", True) == {"count": 0, "keys": []}
+    assert a.replace_text(job.id, "  ", "x", True) == {"count": 0, "keys": [], "edits_dropped": False}
     r = a.replace_text(job.id, "여러분", "분들", True)
     assert r["count"] == 1 and r["edits_dropped"] is False and r["captions"]
     assert store.get(job.id).word_edits == {"0:1": "분들"}
@@ -184,3 +184,30 @@ def test_stale_edits_dropped(tmp_path):
     write_out(job, "a.transcript.json", TR)
     assert a.get_result(job.id)["edits_dropped"] is True
     assert "edits_dropped" not in a.get_result(job.id)
+
+
+def _stale(tmp_path):
+    a, store, job, _ = setup(tmp_path)
+    a.set_word(job.id, "0:1", "여러분들")
+    other = json.loads(json.dumps(TR))
+    other["segments"][0]["words"][0]["word"] = " 안녕"
+    write_out(job, "a.transcript.json", other)
+    return a, store, job
+
+
+def test_stale_edits_flag_on_set_line_time(tmp_path):
+    a, store, job = _stale(tmp_path)
+    first = a.get_captions(job.id)["captions"][0]       # 이 호출이 버림 알림을 가져가므로 다시 만든다
+    a.set_word(job.id, "0:1", "여러분들")
+    other = json.loads(json.dumps(TR))
+    other["segments"][0]["words"][0]["word"] = " 안녕하"
+    write_out(job, "a.transcript.json", other)
+    r = a.set_line_time(job.id, first["key"], first["start"], first["end"])
+    assert r["edits_dropped"] is True and store.get(job.id).word_edits == {}
+
+
+def test_stale_edits_flag_on_replace_preview(tmp_path):
+    a, store, job = _stale(tmp_path)
+    r = a.replace_text(job.id, "안녕", "X", False)
+    assert r["edits_dropped"] is True and store.get(job.id).word_edits == {}
+    assert a.replace_text(job.id, "안녕", "X", False)["edits_dropped"] is False

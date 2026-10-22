@@ -84,3 +84,15 @@ def test_render_uses_cuts_without_restored(tmp_path):
 def test_old_state_without_restored_loads():
     j = Job.from_dict({"id": "x", "src": "/a.mp4"})
     assert j.restored == []
+
+
+def test_render_command_has_subs_edits(tmp_path):
+    a, store, job, _ = setup(tmp_path)
+    job.word_edits, job.line_times, job.edits_sha1 = {"0:1": "x"}, {"0:0": [0.0, 1.0]}, "abc"
+    cmd, _, _ = pipeline_command(job, RENDER, store, MANIFEST, tmp_path / "data", tmp_path / "saved")
+    p = Path(cmd[cmd.index("--subs-edits") + 1])
+    assert json.loads(p.read_text(encoding="utf-8")) == {"transcript_sha1": "abc", "words": {"0:1": "x"},
+                                                         "lines": {"0:0": [0.0, 1.0]}}
+    job.word_edits, job.line_times = {}, {}
+    cmd, _, _ = pipeline_command(job, RENDER, store, MANIFEST, tmp_path / "data", tmp_path / "saved")
+    assert "--subs-edits" not in cmd and not p.exists()
