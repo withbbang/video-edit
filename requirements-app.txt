@@ -1,0 +1,4 @@
+# 데스크톱 앱 (app/) 실행·묶기용. 파이프라인 의존성은 requirements.txt
+-r requirements.txt
+pywebview>=5.3,<6
+pyinstaller>=6.10

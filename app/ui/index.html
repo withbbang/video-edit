@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>youtube-edit</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="update" class="banner" hidden>
+  <span>새 버전 <b id="up-ver"></b></span> ·
+  <button type="button" class="link" id="up-notes">바뀐 점</button> ·
+  <button type="button" class="link" id="up-get">받기</button>
+  <span id="up-state" class="muted"></span>
+  <button type="button" class="x" id="up-close" title="닫기">✕</button>
+  <pre id="up-body" hidden></pre>
+</div>
+
+<main class="app">
+  <section class="left">
+    <div id="opt-title" class="caption"></div>
+    <div id="options"></div>
+    <button type="button" class="opt adv-toggle" id="adv-toggle"><span id="adv-arrow">▸</span> 고급</button>
+    <div id="adv" hidden></div>
+    <div class="actions"><button type="button" class="primary" id="primary" disabled>시작</button></div>
+  </section>
+
+  <section class="right">
+    <div id="empty" class="drop big">
+      <div>영상을 여기로 끌어다 놓으세요</div>
+      <button type="button" class="primary" id="pick-big">파일 선택</button>
+    </div>
+    <div id="work" hidden>
+      <div id="queue" class="q"></div>
+      <div id="result"></div>
+    </div>
+  </section>
+</main>
+
+<div id="cover" hidden>
+  <div id="cover-progress">
+    <div class="cover-title">모델 내려받는 중</div>
+    <div class="prog"><i id="cover-bar"></i></div>
+    <div class="muted" id="cover-text"></div>
+  </div>
+  <div id="cover-error" hidden>
+    <div class="cover-title">모델 내려받기 실패</div>
+    <div class="muted">인터넷 연결을 확인해 주시기 바랍니다</div>
+    <button type="button" class="primary" id="cover-retry">다시 시도</button>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
