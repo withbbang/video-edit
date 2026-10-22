@@ -111,13 +111,13 @@ def make_execute(store: Store, manifest: dict, data_root: Path, queue_getter: Ca
 class Api:
     def __init__(self, store: Store, queue, push: Push, dialogs: Dialogs, *,
                  manifest: dict, data_root: Path, preview_base: str):
-        self.store = store
-        self.queue = queue
-        self.push = push
-        self.dialogs = dialogs
-        self.manifest = manifest
-        self.data_root = Path(data_root)
-        self.preview_base = preview_base.rstrip("/")
+        self._store = store
+        self._queue = queue
+        self._push = push
+        self._dialogs = dialogs
+        self._manifest = manifest
+        self._data_root = Path(data_root)
+        self._preview_base = preview_base.rstrip("/")
         self._bg = threading.Lock()                 # 내려받기 스레드 시작 판정
         self._download_thread: threading.Thread | None = None
         self._update_thread: threading.Thread | None = None
@@ -125,70 +125,75 @@ class Api:
 
     # ---- 내부 ----------------------------------------------------------------
 
-    def _job(self, job_id: str) -> Job:
-        job = self.store.get(job_id)
-        if job is None:
-            raise ValueError(f"없는 영상: {job_id}")
-        return job
+    def _job(self, job_id: str) -> Job | None:
+        return self._store.get(job_id)
 
     def _save(self) -> None:
-        with self.queue.lock:
-            self.store.save()
+        with self._queue.lock:
+            self._store.save()
 
     # ---- 목록 ----------------------------------------------------------------
 
     def list_jobs(self) -> list[dict]:
-        with self.queue.lock:
-            return [job_view(j) for j in self.store.jobs]
+        with self._queue.lock:
+            return [job_view(j) for j in self._store.jobs]
 
     def add_files(self, paths_: list[str]) -> list[dict]:
         added = False
-        with self.queue.lock:
+        with self._queue.lock:
             for raw in paths_ or []:
                 p = Path(os.path.abspath(str(raw)))
                 if p.suffix.lower() not in MEDIA_EXTS or not p.is_file():
                     continue
-                if self.store.add(p):
+                if self._store.add(p):
                     added = True
             if added:
-                self.store.save()
+                self._store.save()
         return self.list_jobs()
 
     def pick_files(self) -> list[dict]:
-        files = self.dialogs.open_files()
+        files = self._dialogs.open_files()
         return self.add_files(list(files)) if files else self.list_jobs()
 
     def remove_job(self, job_id: str) -> list[dict]:
         """대기 중이면 빼고, 처리·저장 중이면 멈추고 뺀다 (확인은 화면이 먼저 받는다)."""
-        self.queue.cancel(job_id)
+        self._queue.cancel(job_id)
         return self.list_jobs()
 
     def start(self) -> list[dict]:
-        self.queue.start_all()
+        self._queue.start_all()
         return self.list_jobs()
 
-    def save(self, job_id: str) -> dict:
-        self.queue.request_save(job_id)
-        with self.queue.lock:
+    def save(self, job_id: str) -> dict | None:
+        # 락을 쥔 채로 요청해야 작업 스레드가 렌더를 끝내기 전에(그리고 화면이 알림을 받고 결과를 읽기 전에)
+        # prev_cuts 를 지울 수 있다. queue.lock 은 RLock.
+        with self._queue.lock:
             job = self._job(job_id)
-            if job.status == Status.SAVING and job.prev_cuts:
+            if job is None:
+                return None
+            self._queue.request_save(job_id)
+            if job.status in (Status.SAVING, Status.SAVED) and job.prev_cuts:
                 job.prev_cuts = None   # "달라진 곳" 은 저장 때 초기화 (스펙 3.3)
-                self.store.save()
+                self._store.save()
             return job_view(job)
 
     # ---- 옵션 ----------------------------------------------------------------
 
-    def get_options(self, job_id: str) -> dict:
-        with self.queue.lock:
-            return self._job(job_id).options.to_dict()
+    def get_options(self, job_id: str) -> dict | None:
+        with self._queue.lock:
+            job = self._job(job_id)
+            return job.options.to_dict() if job else None
 
-    def set_option(self, job_id: str, key: str, value: str) -> dict:
-        """{"options": 지금 옵션, "accepted": 반영 여부}. 처리·저장 중엔 바꾸지 않는다 (화면이 막는다)."""
+    def set_option(self, job_id: str, key: str, value: str) -> dict | None:
+        """{"options": 지금 옵션, "accepted": 반영 여부}. 처리·저장 중엔 바꾸지 않는다 (화면이 막는다).
+        없는 영상이면 None, 잘못된 key·value 는 ValueError."""
         if key not in ALLOWED or value not in ALLOWED[key]:
             raise ValueError(f"잘못된 옵션: {key}={value!r}")
         rejudge = changed_status = False
-        with self.queue.lock:
+        with self._queue.lock:
             job = self._job(job_id)
+            if job is None:
+                return None
             if job.status in (Status.PROCESSING, Status.SAVING):
                 return {"options": job.options.to_dict(), "accepted": False}
             if getattr(job.options, key) != value:
@@ -198,22 +203,24 @@ class Api:
                 elif job.status == Status.SAVED:
                     job.status = Status.REVIEW
                     changed_status = True
-                self.store.save()
+                self._store.save()
             opts = job.options.to_dict()
             view = job_view(job)
         if rejudge:
-            self.queue.rejudge(job_id)   # 상태 변화는 대기열이 알린다
+            self._queue.rejudge(job_id)   # 상태 변화는 대기열이 알린다
         elif changed_status:
-            self.push("job", view)
+            self._push("job", view)
         return {"options": opts, "accepted": True}
 
     # ---- 결과 ----------------------------------------------------------------
 
-    def get_result(self, job_id: str) -> dict:
-        with self.queue.lock:
+    def get_result(self, job_id: str) -> dict | None:
+        with self._queue.lock:
             job = self._job(job_id)
+            if job is None:
+                return None
             src, summary, prev, status = Path(job.src), job.summary, job.prev_cuts, job.status
-            save_dir = Path(self.store.settings["save_dir"])
+            save_dir = Path(self._store.settings["save_dir"])
         out = paths.job_dir(src) / "out"
         cur = _read_json(out / f"{src.stem}.cuts.json")
         transcript = _read_json(out / f"{src.stem}.transcript.json")
@@ -228,7 +235,7 @@ class Api:
         except (TypeError, ValueError):
             pass
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "changes": changes,
-                  "preview_url": f"{self.preview_base}/{job_id}/preview.mp4", "duration": duration}
+                  "preview_url": f"{self._preview_base}/{job_id}/preview.mp4", "duration": duration}
         if status == Status.SAVED:
             names = [f"{src.stem}_clean.mp4", f"{src.stem}_clean.m4a", f"{src.stem}_clean.srt"]
             result["saved_paths"] = [str(save_dir / n) for n in names if (save_dir / n).is_file()]
@@ -237,16 +244,16 @@ class Api:
     # ---- 설정 ----------------------------------------------------------------
 
     def get_settings(self) -> dict:
-        with self.queue.lock:
-            return {"save_dir": self.store.settings["save_dir"]}
+        with self._queue.lock:
+            return {"save_dir": self._store.settings["save_dir"]}
 
     def set_save_dir(self) -> str:
-        folder = self.dialogs.choose_folder()
-        with self.queue.lock:
+        folder = self._dialogs.choose_folder()
+        with self._queue.lock:
             if folder:
-                self.store.settings["save_dir"] = os.path.abspath(str(folder))
-                self.store.save()
-            return self.store.settings["save_dir"]
+                self._store.settings["save_dir"] = os.path.abspath(str(folder))
+                self._store.save()
+            return self._store.settings["save_dir"]
 
     def get_version(self) -> str:
         return __version__
@@ -258,7 +265,7 @@ class Api:
         return bool(t and t.is_alive())
 
     def model_status(self) -> dict:
-        missing = [m["key"] for m in models.status(self.manifest, self.data_root)]
+        missing = [m["key"] for m in models.status(self._manifest, self._data_root)]
         return {"ready": not missing, "missing": missing, "downloading": self._downloading()}
 
     def download_models(self) -> dict:
@@ -273,41 +280,41 @@ class Api:
 
     def _download_models(self) -> None:
         throttle = _Throttle()
-        settings = dict(self.store.settings)
+        settings = dict(self._store.settings)
 
         def on_progress(done: int, total: int) -> None:
             if throttle.ready(force=done >= total):
-                self.push("models", {"done": done, "total": total})
+                self._push("models", {"done": done, "total": total})
 
         try:
-            models.prepare(self.manifest, self.data_root, settings, on_progress)
+            models.prepare(self._manifest, self._data_root, settings, on_progress)
         except Exception:  # noqa: BLE001 — DownloadError 말고도 화면엔 다시 시도로 보여 준다
             log.exception("모델 준비 실패")
-            self.push("models", {"error": True})
+            self._push("models", {"error": True})
             return
         try:
-            with self.queue.lock:
-                self.store.settings["gpu"] = settings.get("gpu")
-                self.store.save()
+            with self._queue.lock:
+                self._store.settings["gpu"] = settings.get("gpu")
+                self._store.save()
         except Exception:  # noqa: BLE001
             log.exception("설정 저장 실패")
-        self.push("models", {"ready": True})
+        self._push("models", {"ready": True})
 
     # ---- 업데이트 ------------------------------------------------------------
 
     def check_update(self) -> dict | None:
         info = updates.check(__version__)
         self._update = info
-        with self.queue.lock:
-            dismissed = self.store.settings.get("dismissed_version")
+        with self._queue.lock:
+            dismissed = self._store.settings.get("dismissed_version")
         if not info or info["version"] == dismissed:
             return None
         return info
 
     def dismiss_update(self, version: str) -> None:
-        with self.queue.lock:
-            self.store.settings["dismissed_version"] = version
-            self.store.save()
+        with self._queue.lock:
+            self._store.settings["dismissed_version"] = version
+            self._store.save()
 
     def install_update(self) -> dict:
         """마지막으로 찾은 새 버전 설치 파일을 받아 연다 (스레드). 실패는 push("update", {"error"})."""
@@ -325,13 +332,13 @@ class Api:
 
     def _install_update(self, url: str) -> None:
         try:
-            path = updates.download(url, paths.data_dir() / "updates")
+            path = updates.download(url, self._data_root / "updates")
             updates.open_file(path)
         except Exception as e:  # noqa: BLE001
             log.exception("업데이트 설치 파일 받기 실패")
-            self.push("update", {"error": str(e) or type(e).__name__})
+            self._push("update", {"error": str(e) or type(e).__name__})
             return
-        self.push("update", {"opened": True})
+        self._push("update", {"opened": True})
 
 
 def _read_json(p: Path) -> dict | None:

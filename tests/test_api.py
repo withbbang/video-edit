@@ -142,6 +142,23 @@ def test_save_clears_changes_baseline(tmp_path):
     assert job.prev_cuts is None
 
 
+def test_save_clears_baseline_even_if_render_already_finished(tmp_path):
+    a, store, q, _ = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    job.prev_cuts = "/x/prev.cuts.json"
+    q.request_save = lambda jid: setattr(job, "status", Status.SAVED)
+    a.save(job.id)
+    assert job.prev_cuts is None
+
+
+def test_save_rejected_keeps_baseline(tmp_path):
+    a, store, q, _ = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.PROCESSING)
+    job.prev_cuts = "/x/prev.cuts.json"
+    a.save(job.id)
+    assert job.prev_cuts == "/x/prev.cuts.json"
+
+
 # ---- 옵션 --------------------------------------------------------------------
 
 def test_set_fast_option_triggers_rejudge(tmp_path):
@@ -207,8 +224,25 @@ def test_get_options_and_unknown_job(tmp_path):
     a, store, *_ = make(tmp_path)
     job = add_job(tmp_path, a, store)
     assert a.get_options(job.id)["habit"] == "some"
+    assert a.get_options("missing") is None
+
+
+def test_unknown_job_is_noop(tmp_path):
+    a, store, q, _ = make(tmp_path)
+    assert a.get_result("missing") is None
+    assert a.set_option("missing", "habit", "all") is None
+    assert a.save("missing") is None
+    assert a.remove_job("missing") == []
     with pytest.raises(ValueError):
-        a.get_options("missing")
+        a.set_option("missing", "habit", "bogus")
+
+
+def test_only_methods_are_public(tmp_path):
+    import inspect
+    a, *_ = make(tmp_path)
+    public = [n for n in dir(a) if not n.startswith("_")]
+    assert public and all(inspect.ismethod(getattr(a, n)) for n in public), public
+    assert not [n for n in vars(a) if not n.startswith("_")]
 
 
 # ---- 결과 --------------------------------------------------------------------
@@ -360,8 +394,8 @@ def test_install_update(tmp_path, monkeypatch):
     a.check_update()
     assert a.install_update() == {"started": True}
     a._update_thread.join(5)
-    assert got["url"] == INFO["url"] and got["dest"] == paths.data_dir() / "updates"
-    assert got["opened"] == paths.data_dir() / "updates" / "y.dmg"
+    assert got["url"] == INFO["url"] and got["dest"] == tmp_path / "data" / "updates"
+    assert got["opened"] == tmp_path / "data" / "updates" / "y.dmg"
 
 
 def test_install_update_error_pushed(tmp_path, monkeypatch):
