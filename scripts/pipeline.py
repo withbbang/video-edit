@@ -70,9 +70,12 @@ def progress(stage: str, frac: float) -> None:
         print("@progress " + json.dumps({"stage": stage, "frac": round(min(1.0, max(0.0, frac)), 4)}), flush=True)
 
 
-def ffmpeg_with_progress(cmd: list, total_sec: float, stage: str) -> None:
+def ffmpeg_with_progress(cmd: list, total_sec: float, stage: str,
+                         span: tuple[float, float] = (0.0, 1.0)) -> None:
     """ffmpeg 를 돌리며 out_time_us / total_sec 을 진행률로 낸다. 실패하면 CalledProcessError.
-    --progress-json 이 꺼져 있으면 예전처럼 ffmpeg 출력을 터미널에 그대로 둔다."""
+    --progress-json 이 꺼져 있으면 예전처럼 ffmpeg 출력을 터미널에 그대로 둔다.
+    span 은 한 단계를 여러 명령으로 나눌 때 이 명령이 차지하는 진행률 범위."""
+    lo, hi = span
     cmd = [str(c) for c in cmd]
     if not PROGRESS:
         subprocess.run(cmd, check=True)
@@ -88,7 +91,7 @@ def ffmpeg_with_progress(cmd: list, total_sec: float, stage: str) -> None:
             if k == "out_time_us" and v.lstrip("-").isdigit() and total_sec > 0:
                 frac = min(1.0, max(0.0, int(v) / 1e6 / total_sec))
                 if frac - last >= 0.01:
-                    progress(stage, frac)
+                    progress(stage, lo + (hi - lo) * frac)
                     last = frac
         code = p.wait()
         if code != 0:
@@ -97,7 +100,7 @@ def ffmpeg_with_progress(cmd: list, total_sec: float, stage: str) -> None:
             for l in err.read().strip().splitlines()[-15:]:
                 log("  " + l)
             raise subprocess.CalledProcessError(code, cmd)
-    progress(stage, 1.0)
+    progress(stage, hi)
 
 
 def run(cmd: list, cwd: Path | None = None, quiet: bool = False) -> subprocess.CompletedProcess:
@@ -258,9 +261,23 @@ class RunLock:
 # ---------------------------------------------------------------------------
 # 1) 오디오 정리: 노이즈 제거 + 라우드니스
 # ---------------------------------------------------------------------------
-def audio_filter_chain(denoise: str, loudnorm: bool, model_rel: str, offset: float) -> str:
+def denoise_filters(level: int, model_rel: str) -> list[str]:
+    """--denoise-level 0~100 → 노이즈 제거 필터. 0 끔, 1~50 은 RNNoise 섞는 비율 0→0.85 (50 = --denoise rnnoise),
+    51~100 은 비율을 1.0 까지 올리고 계속 깔리는 소리용 afftdn 을 세기에 따라 더한다."""
+    if level <= 0:
+        return []
+    if level <= 50:
+        return [f"arnndn=m={model_rel}:mix={0.85 * level / 50:.3g}"]
+    t = (level - 50) / 50
+    return [f"arnndn=m={model_rel}:mix={0.85 + 0.15 * t:.3g}", f"afftdn=nf=-25:nr={6 + 14 * t:.3g}:tn=1"]
+
+
+def audio_filter_chain(denoise: str, loudnorm: bool, model_rel: str, offset: float,
+                       denoise_level: int | None = None) -> str:
     chain = ["highpass=f=70"]
-    if denoise == "rnnoise":
+    if denoise_level is not None:
+        chain += denoise_filters(denoise_level, model_rel)
+    elif denoise == "rnnoise":
         chain.append(f"arnndn=m={model_rel}:mix=0.85")
     elif denoise == "afftdn":
         chain.append("afftdn=nf=-25:nr=12:tn=1")
@@ -275,18 +292,22 @@ def audio_filter_chain(denoise: str, loudnorm: bool, model_rel: str, offset: flo
     return ",".join(chain)
 
 
-def audio_settings(info: dict, denoise: str, loudnorm: bool) -> tuple[str, list]:
-    """(ffmpeg 오디오 필터 체인, 다운믹스 인자). 분석용·렌더용 오디오가 같은 규칙을 쓴다."""
+def audio_settings(info: dict, denoise: str, loudnorm: bool,
+                   denoise_level: int | None = None) -> tuple[str, list]:
+    """(ffmpeg 오디오 필터 체인, 다운믹스 인자). 분석용·렌더용 오디오가 같은 규칙을 쓴다.
+    denoise_level 이 있으면 denoise 대신 그 세기 (렌더·미리보기 전용)."""
+    if denoise_level is not None:
+        denoise = "rnnoise" if denoise_level > 0 else "none"
     if denoise == "rnnoise" and not (MODELS_DIR / "sh.rnnn").exists():
         log("경고: models/sh.rnnn 이 없어 afftdn 으로 대체합니다")
-        denoise = "afftdn"
+        denoise, denoise_level = "afftdn", None
     if denoise == "rnnoise" and not ffmpeg_has("filters", "arnndn"):
         log("경고: 이 ffmpeg 에 arnndn 필터가 없어 afftdn 으로 대체합니다")
-        denoise = "afftdn"
+        denoise, denoise_level = "afftdn", None
     offset = info["audio_offset"] if info["has_video"] else 0.0
     # ffmpeg 필터 인자에서 백슬래시는 이스케이프 문자라 Windows 에서도 슬래시 경로를 쓴다 (macOS 에선 변화 없음)
     model_rel = os.path.relpath(MODELS_DIR / "sh.rnnn", ROOT).replace(os.sep, "/")
-    af = audio_filter_chain(denoise, loudnorm, model_rel, offset)
+    af = audio_filter_chain(denoise, loudnorm, model_rel, offset, denoise_level)
     # 3채널 이상 WAV 는 WAVE_FORMAT_EXTENSIBLE 헤더라 파이썬 wave 모듈이 못 읽는다 → 스테레오로 다운믹스
     ac = ["-ac", "2"] if info["channels"] > 2 else []
     return af, ac
@@ -334,21 +355,31 @@ def prepare_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: boo
 
 
 def prepare_render_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: bool,
-                         force: bool) -> Path:
+                         force: bool, denoise_level: int | None = None) -> Path:
     """렌더에만 쓰는 오디오. 분석(전사·무음)은 기본 설정 오디오로 해서 캐시를 살리고,
     사용자가 고른 배경 잡음/음량 설정은 여기서만 적용한다. 캐시 방식은 prepare_audio 와 같다."""
+    return render_audio_for(src, work, info, denoise, loudnorm, force, denoise_level)[0]
+
+
+def render_audio_for(src: Path, work: Path, info: dict, denoise: str, loudnorm: bool, force: bool,
+                     denoise_level: int | None = None,
+                     analysis: tuple[Path, dict] | None = None) -> tuple[Path, dict]:
+    """prepare_render_audio 에 캐시 키를 함께 돌려준다 (미리보기가 소리가 바뀌었는지 알도록).
+    analysis=(clean.wav, 그 키) 를 주면 필터가 같을 때 따로 만들지 않고 그것을 쓴다."""
     out, meta = work / "render.wav", work / "render.meta.json"
-    af, ac = audio_settings(info, denoise, loudnorm)
+    af, ac = audio_settings(info, denoise, loudnorm, denoise_level)
     key = {"v": CACHE_VERSION, "src": source_sig(src), "filter": af, "ac": ac}
+    if analysis and analysis[1] == key and analysis[0].exists():
+        return analysis
     if cached_meta(meta, key, [out], force):
         log("렌더용 오디오 재사용 (work/render.wav)")
-        return out
+        return out, key
     log(f"렌더용 오디오 정리: {af}")
     meta.unlink(missing_ok=True)
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src,
          "-vn", "-af", af, "-ar", "48000", *ac, "-c:a", "pcm_s16le", out], cwd=ROOT)
     meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
-    return out
+    return out, key
 
 
 def wav_duration(path: Path) -> float:
@@ -1424,9 +1455,11 @@ def render_video(src: Path, cut_wav: Path, srt: Path | None, out_mp4: Path,
 def make_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out: Path, work: Path,
                  hw: bool, force: bool) -> None:
     """앱 플레이어용 미리보기 사본. 컷을 적용하지 않은 원본 타임라인 그대로라 앱이 컷 구간을 직접 건너뛴다.
-    원본·clean.wav 가 같으면 다시 만들지 않는다 (옵션을 바꿔 다시 판정할 때 몇 초 안에 끝나야 함)."""
+    clean_wav 는 미리보기에 넣을 소리 (기본 clean.wav, --denoise-level 이면 그 세기의 렌더 오디오).
+    영상은 소리 없는 사본 work/preview_video.mp4 로 따로 캐시해 두고 소리만 합친다 → 배경 잡음 세기만 바꾸면
+    영상을 다시 인코딩하지 않는다. 원본·소리가 같으면 아무것도 다시 만들지 않는다."""
     meta = work / "preview.meta.json"
-    key = {"v": 1, "src": source_sig(src), "audio": audio_key, "out": str(out)}
+    key = {"v": 2, "src": source_sig(src), "audio": audio_key, "out": str(out)}
     if cached_meta(meta, key, [out], force):
         log(f"미리보기 사본 재사용: {out}")
         progress("preview", 1.0)
@@ -1440,27 +1473,50 @@ def make_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out: P
     if not info["has_video"]:
         ffmpeg_with_progress([*base, "-i", clean_wav, "-map", "0:a", *audio, tmp], info["duration"], "preview")
     else:
-        # 긴 변 1280 이하, 짝수 크기. 회전 메타데이터는 ffmpeg 가 먼저 적용하므로 식으로 계산한다
-        vf = ("setpts=PTS-STARTPTS,"
-              "scale=w='if(gte(iw,ih),trunc(min(1280,iw)/2)*2,-2)':h='if(gte(iw,ih),-2,trunc(min(1280,ih)/2)*2)'")
-        encoders = run(["ffmpeg", "-hide_banner", "-encoders"], quiet=True).stdout
-        choices = []
-        if hw and re.search(r"\sh264_videotoolbox\s", encoders):
-            choices.append(["-c:v", "h264_videotoolbox", "-b:v", "3M", "-allow_sw", "1"])
-        choices.append(["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"])
-        for i, venc in enumerate(choices):
-            cmd = [*base, "-i", src, "-i", clean_wav, "-map", "0:v:0", "-map", "1:a",
-                   "-vf", vf, *venc, "-pix_fmt", "yuv420p", *audio, tmp]
-            try:
-                ffmpeg_with_progress(cmd, info["duration"], "preview")
-                break
-            except subprocess.CalledProcessError:
-                if i == len(choices) - 1:
-                    tmp.unlink(missing_ok=True)
-                    raise
-                log("미리보기 하드웨어 인코딩 실패 → libx264 로 다시 만듭니다")
+        video = make_preview_video(src, info, work, hw, force)
+        try:
+            ffmpeg_with_progress([*base, "-i", video, "-i", clean_wav, "-map", "0:v:0", "-map", "1:a",
+                                  "-c:v", "copy", *audio, tmp], info["duration"], "preview", span=(0.9, 1.0))
+        except subprocess.CalledProcessError:
+            tmp.unlink(missing_ok=True)
+            raise
     os.replace(tmp, out)
     meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
+
+
+def make_preview_video(src: Path, info: dict, work: Path, hw: bool, force: bool) -> Path:
+    """미리보기용 소리 없는 영상 사본 (긴 변 1280 이하, H.264). 원본 서명으로 캐시."""
+    video, meta = work / "preview_video.mp4", work / "preview_video.meta.json"
+    key = {"v": 1, "src": source_sig(src)}
+    if cached_meta(meta, key, [video], force):
+        log("미리보기 영상 재사용 (소리만 바꿔 끼움)")
+        progress("preview", 0.9)
+        return video
+    meta.unlink(missing_ok=True)
+    tmp = video.with_name("preview_video.part.mp4")
+    base = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    # 긴 변 1280 이하, 짝수 크기. 회전 메타데이터는 ffmpeg 가 먼저 적용하므로 식으로 계산한다
+    vf = ("setpts=PTS-STARTPTS,"
+          "scale=w='if(gte(iw,ih),trunc(min(1280,iw)/2)*2,-2)':h='if(gte(iw,ih),-2,trunc(min(1280,ih)/2)*2)'")
+    encoders = run(["ffmpeg", "-hide_banner", "-encoders"], quiet=True).stdout
+    choices = []
+    if hw and re.search(r"\sh264_videotoolbox\s", encoders):
+        choices.append(["-c:v", "h264_videotoolbox", "-b:v", "3M", "-allow_sw", "1"])
+    choices.append(["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"])
+    for i, venc in enumerate(choices):
+        cmd = [*base, "-i", src, "-map", "0:v:0", "-an", "-vf", vf, *venc, "-pix_fmt", "yuv420p",
+               "-map_chapters", "-1", tmp]
+        try:
+            ffmpeg_with_progress(cmd, info["duration"], "preview", span=(0.0, 0.9))
+            break
+        except subprocess.CalledProcessError:
+            if i == len(choices) - 1:
+                tmp.unlink(missing_ok=True)
+                raise
+            log("미리보기 하드웨어 인코딩 실패 → libx264 로 다시 만듭니다")
+    os.replace(tmp, video)
+    meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
+    return video
 
 
 def try_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out: Path, work: Path,
@@ -1499,10 +1555,19 @@ def write_review(cuts: list[Cut], skipped: list[dict], path: Path) -> None:
 def render_audio_note(args: argparse.Namespace) -> str:
     d = getattr(args, "render_denoise", "same")
     l = getattr(args, "render_loudnorm", "same")
-    if d == "same" and l == "same":
+    level = getattr(args, "denoise_level", None)
+    if d == "same" and l == "same" and level is None:
         return ""
     loud = (not args.no_loudnorm) if l == "same" else l == "on"
-    return f" (결과 영상 오디오: 노이즈 제거 {args.denoise if d == 'same' else d}, 라우드니스 {'켬' if loud else '끔'})"
+    dn = f"세기 {level}" if level is not None else (args.denoise if d == "same" else d)
+    return f" (결과 영상 오디오: 노이즈 제거 {dn}, 라우드니스 {'켬' if loud else '끔'})"
+
+
+def render_audio_args(args: argparse.Namespace) -> tuple[str, bool, int | None]:
+    """결과(렌더·미리보기) 오디오 설정 (노이즈 제거, 라우드니스, 세기). --denoise-level 이 --render-denoise 보다 우선."""
+    r_denoise = args.denoise if args.render_denoise == "same" else args.render_denoise
+    r_loud = (not args.no_loudnorm) if args.render_loudnorm == "same" else args.render_loudnorm == "on"
+    return r_denoise, r_loud, getattr(args, "denoise_level", None)
 
 
 def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: list[dict],
@@ -1613,6 +1678,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="결과 영상 오디오의 노이즈 제거 (기본 same: --denoise 와 같음). 분석은 --denoise 오디오로")
     ap.add_argument("--render-loudnorm", choices=["same", "on", "off"], default="same",
                     help="결과 영상 오디오의 라우드니스 정규화 (기본 same: --no-loudnorm 를 따름)")
+    ap.add_argument("--denoise-level", type=level_0_100, default=None,
+                    help="결과·미리보기 오디오의 배경 잡음 제거 세기 0~100 (데스크톱 앱용, 주면 --render-denoise 대신). "
+                         "0 끔, 50 = rnnoise. 분석 오디오는 --denoise 그대로")
     ap.add_argument("--preview", type=Path, default=None,
                     help="판정 뒤 컷 적용 전 원본 타임라인의 미리보기 사본(긴 변 1280, H.264)을 이 경로에 만듦")
     ap.add_argument("--vbitrate-scale", type=float, default=1.0,
@@ -1739,7 +1807,12 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
             f"총 {removed:.1f}s 제거 예정 (건너뜀 {len(skipped)}건)")
     progress("judge", 1.0)
     if args.preview:
-        try_preview(src, clean_wav, audio_key, info, args.preview.resolve(), work, args.hw == "on", args.force)
+        p_wav, p_key = clean_wav, audio_key
+        if args.denoise_level is not None:  # 세기를 고르면 미리보기도 결과와 같은 소리로
+            r_denoise, r_loud, r_level = render_audio_args(args)
+            p_wav, p_key = render_audio_for(src, work, info, r_denoise, r_loud, args.force, r_level,
+                                            analysis=(clean_wav, audio_key))
+        try_preview(src, p_wav, p_key, info, args.preview.resolve(), work, args.hw == "on", args.force)
     if args.review:
         log(f"--review: 검토표 {out_dir / (stem + '.review.md')} 를 확인한 뒤 "
             f"--apply-cuts {cuts_path} 로 렌더하세요")
@@ -1764,9 +1837,12 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
 
     # 5) 렌더
     render_wav = clean_wav
-    r_denoise = args.denoise if args.render_denoise == "same" else args.render_denoise
-    r_loud = (not args.no_loudnorm) if args.render_loudnorm == "same" else args.render_loudnorm == "on"
-    if (r_denoise, r_loud) != (args.denoise, not args.no_loudnorm):
+    r_denoise, r_loud, r_level = render_audio_args(args)
+    if r_level is not None:
+        # --preview 가 이번 실행에서 같은 설정으로 이미 (--force 면 새로) 만들었으면 그대로 쓴다
+        render_wav, _ = render_audio_for(src, work, info, r_denoise, r_loud, args.force and not args.preview,
+                                         r_level, analysis=(clean_wav, audio_key))
+    elif (r_denoise, r_loud) != (args.denoise, not args.no_loudnorm):
         render_wav = prepare_render_audio(src, work, info, r_denoise, r_loud, args.force)
     cut_wav = work / "cut.wav"
     n_samples, sr = cut_audio(render_wav, cut_wav, keeps, fps)
