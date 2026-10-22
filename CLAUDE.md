@@ -16,6 +16,10 @@ input/                원본 영상 넣는 곳 (절대 수정하지 않는다)
 output/               결과물: <이름>_clean.mp4, <이름>_clean.srt, .cuts.json, .review.md, .report.md, .transcript.json
 work/<이름>/          캐시 (정리된 오디오 등). 지워도 됨
 .claude/skills/youtube-clean/   /youtube-clean 스킬
+app/                  데스크톱 앱 (pywebview + app/ui 웹 화면). 파이프라인을 서브프로세스로 호출
+packaging/            PyInstaller spec, ffmpeg 받기, dmg(macos/), Inno Setup(windows/), 릴리스 노트 틀, THIRD_PARTY.txt
+.github/workflows/release.yml   태그 push → 맥·윈도우 빌드 → 릴리스 초안
+tests/                pytest (requirements-dev.txt)
 ```
 
 ## 실행
@@ -111,3 +115,16 @@ work/<이름>/          캐시 (정리된 오디오 등). 지워도 됨
 - `--hw on` 이면 VideoToolbox(`-allow_sw 1`), 실패하면 자동으로 libx264/libx265 로 다시 렌더한다.
   비트레이트는 기본 auto (1080p30 8M · 1080p60 12M · 4K30 ≈32M · 4K60 ≈48M, 10비트는 ×1.25).
 - 1.3초보다 긴 "필러"는 타임스탬프 오류로 보고 건너뛰며 review.md 에 따로 표시한다.
+
+## 데스크톱 앱
+
+- 실행: `.venv/bin/python -m pip install -r requirements-app.txt` 후 `.venv/bin/python -m app`.
+  테스트: `.venv/bin/python -m pytest` (`pip install -r requirements-dev.txt`). 파이프라인이나 앱을 고친 뒤엔 전체를 돌린다.
+- `pipeline.py` 의 CLI 기본 동작은 그대로다. 앱은 이를 서브프로세스로 부르며 앱 전용 숨은 옵션만 추가돼 있다
+  (기본값은 기존 동작): `--progress-json`(@progress 줄 출력), `--render-denoise`/`--render-loudnorm`(렌더 때만 배경 잡음·음량),
+  `--preview`(미리보기 파일), `--vbitrate-scale`(화질 배율 0.6/1/1.5), `--work-root`(작업 캐시 폴더),
+  `--media-out`(결과 mp4/m4a·srt 저장 폴더), `--ctc-model`(정렬 모델 ID 또는 로컬 폴더).
+- 사용자 데이터: 맥 `~/Library/Application Support/youtube-edit`, 윈도우 `%APPDATA%\youtube-edit` (`YTEDIT_DATA_DIR` 로 덮어씀).
+  앱 설치 폴더에는 쓰지 않는다. 화면 문구는 스펙(`docs/superpowers/specs/2026-10-22-desktop-app-design.md` 3장) 그대로 쓴다.
+- 릴리스: `app/__init__.py` 의 `__version__` 과 같은 `v<버전>` 태그(접미사 `-rc1` 은 prerelease)를 push 하면 CI 가 draft 릴리스를 만든다.
+  같은 태그로 다시 돌리기 전엔 기존 draft 를 지운다. **태그 push·릴리스 공개는 사용자 승인 없이 하지 않는다.**
