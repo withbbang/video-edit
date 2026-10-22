@@ -84,7 +84,7 @@ def ffmpeg_with_progress(cmd: list, total_sec: float, stage: str,
     cmd = [cmd[0], "-progress", "pipe:1", "-nostats", *[c for c in cmd[1:] if c != "-stats"]]
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as err:
         # stderr 를 파이프로 받으면 stdout 을 읽는 동안 가득 차 멈출 수 있다 → 임시 파일로
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True)
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True, encoding="utf-8", errors="replace")
         last = -1.0
         for line in p.stdout:
             k, _, v = line.strip().partition("=")
@@ -108,8 +108,10 @@ def run(cmd: list, cwd: Path | None = None, quiet: bool = False) -> subprocess.C
         shown = " ".join(str(c) for c in cmd)
         log("$ " + (shown if len(shown) < 400 else shown[:400] + " …"))
     try:
+        # 윈도우는 기본이 cp949 라 ffprobe 의 UTF-8(한글 파일명 등)을 못 읽고 stdout 이 None 이 된다
         return subprocess.run([str(c) for c in cmd], cwd=cwd, check=True,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, encoding="utf-8", errors="replace")
     except subprocess.CalledProcessError as e:
         # 캡처한 stderr 를 버리면 "moov atom not found" 같은 원인이 안 보인다
         log(f"명령 실패 (exit {e.returncode}): {Path(str(cmd[0])).name}")
@@ -425,7 +427,8 @@ def probe_whisper_windows(model_name: str, device: str, compute_type: str, threa
     code = ("import numpy as np; from faster_whisper import WhisperModel; "
             f"m = WhisperModel({model_name!r}, device={device!r}, compute_type={compute_type!r}, cpu_threads={threads}); "
             "list(m.transcribe(np.zeros(16000, dtype=np.float32), language='ko', vad_filter=False)[0])")
-    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         encoding="utf-8", errors="replace")
     if res.returncode == 0:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(json.dumps(key), encoding="utf-8")

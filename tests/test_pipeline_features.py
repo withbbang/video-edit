@@ -53,3 +53,16 @@ def test_preview_failure_does_not_fail_analysis(tmp_path, monkeypatch, capsys):
     assert "미리보기를 만들지 못했습니다" in text and '"stage": "preview"' in text.replace("'", '"')
     monkeypatch.setattr(pipeline, "make_preview", lambda *a, **k: None)
     assert pipeline.try_preview(*args) is True
+
+
+def test_run_decodes_utf8_regardless_of_locale(monkeypatch):
+    # 윈도우(cp949)에서 ffprobe 의 UTF-8 한글을 로캘로 읽으면 stdout 이 None → json.loads TypeError
+    import subprocess
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+    pipeline.run(["ffprobe", "영상.mp4"], quiet=True)
+    assert seen["encoding"] == "utf-8" and seen["errors"] == "replace"
