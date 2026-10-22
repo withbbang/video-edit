@@ -62,6 +62,11 @@ def main(argv: list[str] | None = None) -> int:
         _fail("--pipeline --help 실패", r)
     print("확인: --pipeline --help")
 
+    r = _run(exe, "-c", "import ssl; print(ssl.create_default_context().cert_store_stats()['x509_ca'])")
+    if r.returncode != 0 or not r.stdout.strip().isdigit() or int(r.stdout.strip()) == 0:
+        _fail("HTTPS 인증서 목록이 비어 있음 (모델·업데이트 받기가 실패함)", r)
+    print(f"확인: HTTPS 인증서 {r.stdout.strip()}개")
+
     code = ("import shutil; from app import paths; "
             "print(paths.ffmpeg_bin_dir()); print(shutil.which('ffmpeg')); print(shutil.which('ffprobe'))")
     r = _run(exe, "-c", code)

@@ -2,6 +2,8 @@
 -r requirements.txt
 pywebview>=5.3,<6
 pyinstaller>=6.10
+# 묶은 앱의 HTTPS 인증서 목록 (packaging/launcher.py)
+certifi
 # app/manifest.json 의 cuda_win(cuBLAS 12 · cuDNN 9) 과 맞춘 버전. 올리면 manifest 의 CUDA 휠도 같이 확인한다.
 # (CLI 용 requirements.txt 는 묶지 않는다)
 ctranslate2==4.8.3

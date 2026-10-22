@@ -85,3 +85,27 @@ def test_crash_log_failure_keeps_exit_code(tmp_path):
     blocker.write_text("폴더 자리에 파일", encoding="utf-8")  # logs 폴더를 만들 수 없게
     r = _run(FAKE_WINDOW, [], data_dir=tmp_path)
     assert r.returncode == 1 and "RuntimeError: 창 열기 실패" in r.stderr
+
+
+def test_frozen_uses_bundled_ca_certs():
+    """묶은 앱의 파이썬엔 CA 인증서 목록이 없어 HTTPS(모델·업데이트 받기)가 인증서 확인에서 실패한다.
+    certifi 의 목록을 SSL_CERT_FILE 로 알려 준다 (사용자가 이미 정했으면 그대로)."""
+    import certifi
+    code = "import os, ssl; print(os.environ.get('SSL_CERT_FILE')); print(ssl.create_default_context().cert_store_stats()['x509_ca'])"
+    old = os.environ.pop("SSL_CERT_FILE", None)
+    try:
+        r = _run("", ["-c", code])
+    finally:
+        if old is not None:
+            os.environ["SSL_CERT_FILE"] = old
+    lines = r.stdout.split()
+    assert r.returncode == 0, r.stderr
+    assert lines[0] == certifi.where() and int(lines[1]) > 0
+    os.environ["SSL_CERT_FILE"] = "/custom.pem"
+    try:
+        r = _run("", ["-c", "import os; print(os.environ['SSL_CERT_FILE'])"])
+    finally:
+        os.environ.pop("SSL_CERT_FILE")
+        if old is not None:
+            os.environ["SSL_CERT_FILE"] = old
+    assert r.stdout.strip() == "/custom.pem"

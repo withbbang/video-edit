@@ -2,6 +2,7 @@
 패키지로 불러 main() 을 부른다 (`python -m app` 과 같은 동작)."""
 import datetime
 import multiprocessing
+import os
 import sys
 import traceback
 
@@ -25,6 +26,18 @@ def _write_crash_log(text: str) -> None:
             f.write(f"=== {stamp} youtube-edit {__version__} ===\n{text.rstrip()}\n\n")
     except Exception:  # noqa: BLE001
         pass
+
+
+def use_bundled_certs() -> None:
+    """묶은 파이썬(CI 의 python.org 빌드)은 CA 인증서 목록이 없어 HTTPS 가 인증서 확인에서 실패한다
+    (모델·업데이트 받기가 "인터넷 연결" 오류로 보임). certifi 의 목록을 쓰게 한다. 하위 프로세스도 물려받는다."""
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import certifi
+    except ImportError:
+        return
+    os.environ["SSL_CERT_FILE"] = certifi.where()
 
 
 def run() -> None:
@@ -53,4 +66,5 @@ if __name__ == "__main__":
     # torch 가 띄우는 multiprocessing 보조 프로세스(resource_tracker 등)는 이 실행 파일을
     # `-B -S -I -c ...` 로 다시 부른다. freeze_support 가 그걸 처리하고 끝내야 창이 또 뜨지 않는다.
     multiprocessing.freeze_support()
+    use_bundled_certs()
     run()
