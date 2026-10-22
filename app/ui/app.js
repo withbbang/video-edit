@@ -233,8 +233,12 @@ function renderResult(force) {
     parts.push(h('div', { class: 'err' }, `저장 실패 — ${j.error}`));
   }
   if (r) parts.push(...resultParts(j, r));
-  // 재생기는 그대로 두고 나머지만 다시 그린다 (재생 위치 유지)
+  // 재생기는 그대로 두고 나머지만 다시 그린다 (재생 위치·목록 스크롤 위치 유지)
+  const oldList = box.querySelector('.cut-list');
+  const listTop = oldList ? oldList.scrollTop : 0;
   box.replaceChildren(...parts);
+  const newList = box.querySelector('.cut-list');
+  if (newList) newList.scrollTop = listTop;
   if (r && r.preview_url) player.attach(r);
   else if (r) player.detach();
 }
@@ -306,22 +310,24 @@ function cutRows(j, r) {
   const items = r.cut_items || [];
   if (!items.length) return [];
   const n = items.filter((c) => c.restored).length;
-  const out = [h('h3', { class: 'list-title' }, `잘린 곳 ${items.length}` + (n ? ` · 되살림 ${n}` : ''))];
+  const rows = [];
   const shown = S.showAllCuts ? items : items.slice(0, ROWS_FIRST);
   const editable = HAS_RESULT.has(j.status);
   for (const c of shown) {
     const name = c.kind === 'silence' || !c.word ? KIND[c.kind] || '' : `“${c.word}”`;
     const sub = (c.kind === 'silence' || !c.word ? '' : `${KIND[c.kind] || ''} · `) + `${(c.end - c.start).toFixed(1)}초`;
-    out.push(h('div', { class: 'opt row' + (c.restored ? ' undone' : ''), onclick: () => player.clip(c.start, c.end, true) },
+    rows.push(h('div', { class: 'opt row' + (c.restored ? ' undone' : ''), onclick: () => player.clip(c.start, c.end, true) },
       h('span', {}, h('span', { class: 'w' }, `${clock(c.start)} ${name}`), h('span', { class: 'sec' }, sub)),
       h('button', { type: 'button', class: 'btn' + (c.restored ? ' on' : ''), disabled: !editable,
         onclick: (e) => { e.stopPropagation(); setRestored(j.id, c, !c.restored); } },
         c.restored ? '다시 자르기' : '되살리기')));
   }
   if (!S.showAllCuts && items.length > ROWS_FIRST) {
-    out.push(h('div', { class: 'opt more', onclick: () => { S.showAllCuts = true; renderResult(true); } }, h('span', {}, '+ 더 보기'), h('span')));
+    rows.push(h('div', { class: 'opt more', onclick: () => { S.showAllCuts = true; renderResult(true); } }, h('span', {}, '+ 더 보기'), h('span')));
   }
-  return out;
+  // 목록만 따로 스크롤한다 (재생기·타임라인은 그대로 보이게)
+  return [h('h3', { class: 'list-title' }, `잘린 곳 ${items.length}` + (n ? ` · 되살림 ${n}` : '')),
+    h('div', { class: 'cut-list' }, rows)];
 }
 
 async function setRestored(id, c, on) {

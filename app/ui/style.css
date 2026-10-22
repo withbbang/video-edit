@@ -115,6 +115,10 @@ video { display: block; width: 100%; max-height: 42vh; background: #000; border-
 
 /* 잘린 곳 목록 (되살리기) */
 .list-title { font-size: 15px; font-weight: 600; margin: 16px 0 4px; }
+.cut-list { max-height: 320px; overflow-y: auto; flex-shrink: 0; padding-right: 6px; border-top: 1px solid var(--soft); }
+.cut-list::-webkit-scrollbar { width: 8px; }   /* 맥에서도 늘 보이게: 스크롤된다는 걸 알 수 있도록 */
+.cut-list::-webkit-scrollbar-thumb { background: #8886; border-radius: 4px; }
+.cut-list::-webkit-scrollbar-track { background: transparent; }
 .opt.row { cursor: pointer; }
 .opt.row:hover { background: var(--soft); }
 .opt .sec { color: var(--muted); font-size: 11px; margin-left: 6px; }
