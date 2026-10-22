@@ -125,14 +125,15 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
 
 
 def save_cuts(job: Job) -> Path | None:
-    """저장용 컷 목록: 판정 결과에서 되살린 곳만 뺀 <이름>.save.cuts.json. 되살린 곳이 없거나 못 읽으면 None(원본 그대로)."""
+    """저장용 컷 목록: 판정 결과에 되살리기·구간 작업을 반영한 <이름>.save.cuts.json. 반영할 게 없거나 못 읽으면 None(원본 그대로)."""
     src = Path(job.src)
     out = paths.job_dir(src) / "out"
     cur = _read_json(out / f"{src.stem}.cuts.json")
-    if not job.restored or cur is None:
+    if (not job.restored and not job.range_ops) or cur is None:
         return None
+    tr = _read_json(out / f"{src.stem}.transcript.json")
     path = out / f"{src.stem}.save.cuts.json"
-    path.write_text(json.dumps(diff.without_restored(cur, job.restored), ensure_ascii=False, indent=1),
+    path.write_text(json.dumps(diff.effective_cuts(cur, job.restored, job.range_ops, tr), ensure_ascii=False, indent=1),
                     encoding="utf-8")
     return path
 
@@ -301,6 +302,49 @@ class Api:
         self._push("job", view)
         return {"restored": out}
 
+    def _change_ops(self, job_id: str, change: Callable[[Job], bool]) -> dict | None:
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None or job.status not in (Status.REVIEW, Status.SAVED) or not change(job):
+                return None
+            if job.status == Status.SAVED:
+                job.status = Status.REVIEW
+            self._store.save()
+            view, out = job_view(job), [dict(o) for o in job.range_ops]
+        self._push("job", view)
+        return {"range_ops": out}
+
+    def _duration(self, job: Job) -> float:
+        tr = _read_json(paths.job_dir(Path(job.src)) / "out" / f"{Path(job.src).stem}.transcript.json")
+        try:
+            return float((tr or {}).get("duration") or (job.summary or {}).get("orig_sec") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def add_range_op(self, job_id: str, op: str, start: float, end: float) -> dict | None:
+        """원본 시간 [start, end] 를 직접 자르거나(cut) 되살린다(restore). 나중 작업이 이긴다.
+        확인 대기·저장됨에서만, 구간이 0.05초 이상이고 영상 안일 때만. → {"range_ops": [...]}, 안 되면 None."""
+        try:
+            start, end = float(start), float(end)
+        except (TypeError, ValueError):
+            return None
+
+        def change(job: Job) -> bool:
+            if op not in ("cut", "restore") or start < 0 or end - start < 0.05 or end > self._duration(job):
+                return False
+            job.range_ops = [*job.range_ops, {"op": op, "start": start, "end": end}]
+            return True
+        return self._change_ops(job_id, change)
+
+    def remove_range_op(self, job_id: str, index: int) -> dict | None:
+        """index 번째 구간 작업을 지운다."""
+        def change(job: Job) -> bool:
+            if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(job.range_ops):
+                return False
+            job.range_ops = [o for i, o in enumerate(job.range_ops) if i != index]
+            return True
+        return self._change_ops(job_id, change)
+
     # ---- 자막 고치기 ----------------------------------------------------------
 
     def _caption_state(self, job_id: str):
@@ -310,13 +354,14 @@ class Api:
             if job is None:
                 return None
             src, restored = Path(job.src), [list(r) for r in job.restored]
+            ops = [dict(o) for o in job.range_ops]
             edits, times = dict(job.word_edits), {k: list(v) for k, v in job.line_times.items()}
         out = paths.job_dir(src) / "out"
         cuts = _read_json(out / f"{src.stem}.cuts.json")
         tr = _read_json(out / f"{src.stem}.transcript.json")
         if cuts is None or tr is None:
             return None
-        cuts = diff.without_restored(cuts, restored)   # TODO(Task 4): effective_cuts
+        cuts = diff.effective_cuts(cuts, restored, ops, tr)
         try:
             caps = subtitles.captions(cuts, tr, subtitles.load_cfg(), edits, times)
         except Exception:
@@ -440,6 +485,7 @@ class Api:
                 return None
             src, summary, prev, status = Path(job.src), job.summary, job.prev_cuts, job.status
             restored = [list(r) for r in job.restored]
+            ops = [dict(o) for o in job.range_ops]
             save_dir = Path(self._store.settings["save_dir"])
         out = paths.job_dir(src) / "out"
         cur = _read_json(out / f"{src.stem}.cuts.json")
@@ -456,14 +502,14 @@ class Api:
             pass
         # 미리보기를 못 만들었으면(분석은 성공) None — 화면은 재생기 대신 안내를 보여 준다
         preview = paths.job_dir(src) / "preview.mp4"
-        items = diff.cut_items(cur, restored) if cur else []
-        if restored and cur is not None:
+        items = diff.cut_items(cur, restored, ops, transcript) if cur else []
+        if (restored or ops) and cur is not None:
             # 되살린 곳은 미리보기에서 건너뛰지 않고 요약에서도 뺀다 (저장도 같은 목록으로 한다)
-            kept = diff.without_restored(cur, restored)["cuts"]
+            kept = diff.effective_cuts(cur, restored, ops, transcript)["cuts"]
             removed = sum(float(c["end"]) - float(c["start"]) for c in kept)
             orig = float((summary or {}).get("orig_sec") or duration)
             summary = {**(summary or {}), "cuts": len(kept), "removed_sec": removed,
-                       "final_sec": max(orig - removed, 0.0), "restored": len(cur["cuts"]) - len(kept)}
+                       "final_sec": max(orig - removed, 0.0), "restored": sum(1 for c in cur["cuts"] if diff.is_restored(c, restored))}
             cur = {**cur, "cuts": kept}
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "cut_items": items,
                   "changes": changes,

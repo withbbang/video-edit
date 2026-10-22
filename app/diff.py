@@ -105,13 +105,97 @@ def _label(cut: dict) -> str:
     return " ".join(w for w in words if w and not _is_placeholder(w))
 
 
-def cut_items(cuts_json: dict, restored: list) -> list:
-    """결과 화면의 '잘린 곳' 목록: 시간순, 되살렸는지 포함."""
-    return sorted(({"start": c["start"], "end": c["end"], "word": _label(c), "kind": _kind(c),
-                    "restored": is_restored(c, restored)} for c in cuts_json.get("cuts", [])),
-                  key=lambda i: (i["start"], i["end"]))
+MANUAL = "manual"
+MANUAL_LABEL = "직접 자름"
+MIN_PIECE = 0.05
+
+
+def _midpoint_words(transcript, start, end):
+    out = []
+    for seg in (transcript or {}).get("segments", []):
+        for i, w in enumerate(seg.get("words") or []):
+            try:
+                mid = (float(w["start"]) + float(w["end"])) / 2
+            except (KeyError, TypeError, ValueError):
+                continue
+            if start <= mid < end:
+                out.append([seg["id"], i])
+    return out
+
+
+def _word_mids(cut, transcript):
+    mids = {}
+    segs = {s.get("id"): s for s in (transcript or {}).get("segments", [])}
+    for idx in cut.get("words_idx") or []:
+        try:
+            w = segs[idx[0]]["words"][idx[1]]
+            mids[(idx[0], idx[1])] = (float(w["start"]) + float(w["end"])) / 2
+        except (KeyError, IndexError, TypeError, ValueError):
+            mids[(idx[0], idx[1])] = None
+    return mids
+
+
+def _subtract(cut, a, b, transcript):
+    """컷에서 [a, b] 를 뺀 조각들 (0.05초 미만은 버림). 겹치지 않으면 그대로."""
+    s, e = float(cut["start"]), float(cut["end"])
+    if min(e, b) - max(s, a) <= 0:
+        return [cut]
+    mids = _word_mids(cut, transcript)
+    out = []
+    for ps, pe in ((s, min(e, a)), (max(s, b), e)):
+        if pe - ps < MIN_PIECE:
+            continue
+        piece = {**cut, "start": ps, "end": pe}
+        piece.pop("start_frame", None)
+        piece.pop("end_frame", None)
+        if cut.get("words_idx"):
+            piece["words_idx"] = [list(k) for k, m in mids.items() if m is not None and ps <= m < pe]
+        out.append(piece)
+    return out
+
+
+def _apply_ops(cuts, range_ops, transcript):
+    """cuts 에 range_ops 를 순서대로 적용 → [(컷, 직접 자른 작업 인덱스 또는 None)]. 나중 작업이 이긴다."""
+    cur = [(c, None) for c in cuts]
+    for n, op in enumerate(range_ops or []):
+        a, b = float(op["start"]), float(op["end"])
+        if op.get("op") == "restore":
+            cur = [(p, src) for c, src in cur for p in _subtract(c, a, b, transcript)]
+        else:
+            cur.append(({"start": a, "end": b, "word": f"({MANUAL_LABEL})", "reason": MANUAL, "context": "",
+                         "seg": 0, "words_idx": _midpoint_words(transcript, a, b)}, n))
+    return cur
+
+
+def effective_cuts(cuts_json: dict, restored: list, range_ops: list, transcript: dict | None = None) -> dict:
+    """저장·미리보기·요약·자막이 함께 쓰는 컷: 컷 단위 되살리기 -> 구간 작업(자르기/되살리기)을 순서대로."""
+    base = without_restored(cuts_json, restored)
+    if not range_ops:
+        return base
+    return {**base, "cuts": [c for c, _ in _apply_ops(base.get("cuts", []), range_ops, transcript)]}
+
+
+def cut_items(cuts_json: dict, restored: list, range_ops: list | None = None,
+              transcript: dict | None = None) -> list:
+    """결과 화면의 '잘린 곳' 목록: 시간순, 되살렸는지 포함. 구간 작업으로 쪼개진 조각은 원래 컷의 이름·종류를 그대로 쓴다."""
+    items = []
+    live = []
+    for c in cuts_json.get("cuts", []):
+        if is_restored(c, restored):
+            items.append({"start": c["start"], "end": c["end"], "word": _label(c), "kind": _kind(c),
+                          "restored": True})
+        else:
+            live.append(c)
+    for c, op in _apply_ops(live, range_ops, transcript):
+        if op is not None:
+            items.append({"start": c["start"], "end": c["end"], "word": "", "kind": MANUAL, "op": op,
+                          "restored": False})
+        else:
+            items.append({"start": c["start"], "end": c["end"], "word": _label(c), "kind": _kind(c),
+                          "restored": False})
+    return sorted(items, key=lambda i: (i["start"], i["end"]))
 
 
 def without_restored(cuts_json: dict, restored: list) -> dict:
-    """저장(렌더)용 cuts.json: 되살린 컷만 뺀다. 나머지 키(transcript_sha1 등)는 그대로."""
+    """컷 단위 되살리기만 적용한 cuts.json. 나머지 키(transcript_sha1 등)는 그대로."""
     return {**cuts_json, "cuts": [c for c in cuts_json.get("cuts", []) if not is_restored(c, restored)]}
