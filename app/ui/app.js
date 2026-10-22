@@ -43,7 +43,7 @@ const S = {
   tab: 'cuts', renderPending: false, caps: null, capsFor: null, capsVersion: 0, dropped: false, lineSel: null, editing: null,
   findKeys: new Set(), findCount: 0, scroll: {},
   // 타임라인 구간: range 는 {start, end} (원본 초, 한쪽만 정했으면 다른 쪽은 null), rangeBusy 는 요청 중
-  range: null, rangeBusy: false,
+  range: null, rangeBusy: false, rangeErr: false,
 };
 
 // ---- 작은 도우미 ---------------------------------------------------------
@@ -114,7 +114,7 @@ function select(id) {
   S.showAll = false; S.showAllCuts = false; S.changedKey = null;
   S.caps = null; S.capsFor = null; S.dropped = false; S.lineSel = null; S.editing = null; S.scroll = {};
   S.findKeys = new Set(); S.findCount = 0; findBar.find.value = ''; findBar.repl.value = '';
-  S.range = null; tlDrag = null;
+  S.range = null; S.rangeErr = false; tlDrag = null;
   player.detach();
   if (id) {
     call('get_options', id).then((o) => { if (S.sel === id && o) { S.options = o; render(); } });
@@ -378,13 +378,21 @@ function timeline(r) {
   bar.addEventListener('pointerdown', (e) => {
     const d = rangeDur();
     if (e.button !== 0 || !d) return;
-    const hd = e.target.closest('.hd');
-    tlDrag = { rect: bar.getBoundingClientRect(), x0: e.clientX, d, mode: hd ? hd.dataset.end : 'press', anchor: 0 };
+    const rect = bar.getBoundingClientRect();
+    let mode = 'press';
+    if (e.target.closest('.hd') && S.range && S.range.start !== null && S.range.end !== null) {
+      // 짧은 구간은 손잡이가 겹친다 → 누른 곳이 두 손잡이 가운데보다 왼쪽이면 시작, 아니면 끝
+      const mid = rect.left + (((S.range.start + S.range.end) / 2) / d) * rect.width;
+      mode = e.clientX < mid ? 'start' : 'end';
+    }
+    tlDrag = { rect, x0: e.clientX, d, mode, anchor: 0 };
+    S.rangeErr = false;
     try { bar.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ }
     e.preventDefault();
   });
   bar.addEventListener('pointermove', (e) => {
     if (!tlDrag) return;
+    if (e.buttons === 0) { up(e, false); return; }   // 손 뗀 걸 못 받았다 (창 밖 등)
     if (tlDrag.mode === 'press') {
       if (Math.abs(e.clientX - tlDrag.x0) < 4) return;
       tlDrag.mode = 'new';
@@ -399,28 +407,36 @@ function timeline(r) {
     if (!tlDrag) return;
     const g = tlDrag;
     tlDrag = null;
-    if (cancel) { /* 그대로 둔다 */ } else if (g.mode === 'press') player.seek(at(e.clientX, g));
-    else if (g.mode === 'new') {
-      // 최소 0.1초, 영상 안으로
-      const R = S.range;
-      if (R) {
-        let a = q10(R.start), b = q10(R.end);
-        if (b - a < 0.1) { b = Math.min(g.d, a + 0.1); a = Math.max(0, b - 0.1); }
-        S.range = { start: a, end: b };
-        player.seek(a);
-      }
-    } else if (S.range && S.range[g.mode] !== null) player.seek(S.range[g.mode]);
+    if (g.mode === 'new' && S.range) {
+      // 0.1초 격자, 영상 안, 최소 0.1초 (손을 놓친 경우에도 맞춰 둔다)
+      let a = snapT(S.range.start, g.d), b = snapT(S.range.end, g.d);
+      if (b - a < 0.1 - EPS) { b = snapT(ceil10(a + 0.1), g.d); a = Math.max(0, floor10(b - 0.1)); }
+      S.range = { start: a, end: b };
+    }
+    if (cancel) { /* 이동하지 않는다 */ } else if (g.mode === 'press') player.seek(at(e.clientX, g));
+    else if (g.mode === 'new') { if (S.range) player.seek(S.range.start); }
+    else if (S.range && S.range[g.mode] !== null) player.seek(S.range[g.mode]);
     drawRange();
     flushRender();
   };
   bar.addEventListener('pointerup', (e) => up(e, false));
   bar.addEventListener('pointercancel', (e) => up(e, true));
+  bar.addEventListener('lostpointercapture', (e) => up(e, true));   // pointerup 뒤에도 오지만 그땐 tlDrag 가 비어 있다
   return bar;
 }
 
 // ---- 구간 직접 자르기·되살리기 -------------------------------------------------
 let tlDrag = null;   // 타임라인을 누르고 있는 동안 {rect, x0, d, mode: 'press'|'new'|'start'|'end', anchor}
+const EPS = 1e-6;
 const q10 = (t) => Math.round(t * 10) / 10;
+const floor10 = (t) => Math.floor(t * 10 + EPS) / 10;
+const ceil10 = (t) => Math.ceil(t * 10 - EPS) / 10;
+// 0.1초 격자에 맞추되 영상 끝을 넘지 않게: 끝 근처(0.05초 안)는 영상 끝 그대로 (API 가 길이를 넘으면 거절한다)
+function snapT(t, d) {
+  t = q10(Math.min(d, Math.max(0, t)));
+  if (t > d || d - t < 0.05) t = d;
+  return t < 0 ? 0 : t;
+}
 const restoreOps = (r) => ((r && r.range_ops) || []).map((o, i) => ({ ...o, i })).filter((o) => o.op === 'restore');
 function rangeDur() {
   const r = S.resultFor === S.sel ? S.result : null;
@@ -432,16 +448,17 @@ function rangeDur() {
 function setRangeEnd(which, t, keep) {
   const d = rangeDur();
   if (!d || t === null || !isFinite(t)) return;
-  t = q10(Math.min(d, Math.max(0, t)));
+  t = snapT(t, d);
   const R = { ...(S.range || { start: null, end: null }) };
   const other = which === 'start' ? R.end : R.start;
   if (other !== null) {
-    const bad = which === 'start' ? t > other - 0.1 + 1e-9 : t < other + 0.1 - 1e-9;
-    if (bad && keep) t = which === 'start' ? q10(Math.max(0, other - 0.1)) : q10(Math.min(d, other + 0.1));
+    const bad = which === 'start' ? t > other - 0.1 + EPS : t < other + 0.1 - EPS;
+    if (bad && keep) t = which === 'start' ? Math.max(0, floor10(other - 0.1)) : snapT(ceil10(other + 0.1), d);
     else if (bad) R[which === 'start' ? 'end' : 'start'] = null;
   }
   R[which] = t;
   S.range = R;
+  S.rangeErr = false;
 }
 
 // 구간 [a, b] 중 지금 잘린 곳에 들어간 길이
@@ -474,13 +491,14 @@ const rangeBar = (() => {
     len: h('span', { class: 'muted' }),
     cut: btn('자르기', 'cut', () => rangeOp('cut')),
     back: btn('되살리기', 'on', () => rangeOp('restore')),
-    cancel: btn('취소', null, () => { S.range = null; drawRange(); }),
+    cancel: btn('취소', null, () => { S.range = null; S.rangeErr = false; drawRange(); }),
     hint: h('span', { class: 'muted hint' }, '타임라인을 끌어 구간을 고르세요'),
+    err: h('span', { class: 'err' }, '구간을 바꾸지 못했습니다'),
   };
   b.times = h('span', { class: 'rt' }, h('span', { class: 'lt' }, b.a, b.aDown, b.aUp), h('span', { class: 'muted' }, '~'),
     h('span', { class: 'lt' }, b.z, b.zDown, b.zUp), b.len);
   b.acts = h('span', { class: 'lt' }, b.cut, b.back, b.cancel);
-  b.el = h('div', { class: 'range-bar' }, h('span', { class: 'lt' }, b.from, b.to), b.hint, b.times, b.acts);
+  b.el = h('div', { class: 'range-bar' }, h('span', { class: 'lt' }, b.from, b.to), b.hint, b.times, b.acts, b.err);
   return b;
 })();
 
@@ -504,7 +522,8 @@ function drawRange() {
   if (b.el.hidden) return;
   const can = HAS_RESULT.has(j.status) && !BUSY.has(j.status) && !S.rangeBusy;
   b.from.disabled = b.to.disabled = !player.video;
-  b.hint.hidden = has;
+  b.err.hidden = !S.rangeErr;
+  b.hint.hidden = has || S.rangeErr;
   b.times.hidden = b.acts.hidden = !has;
   if (!has) return;
   const full = R.start !== null && R.end !== null;
@@ -524,13 +543,14 @@ async function rangeOp(kind) {
   const R = S.range;
   if (!j || S.rangeBusy || !R || R.start === null || R.end === null) return;
   S.rangeBusy = true;
+  S.rangeErr = false;
   drawRange();
   try {
     const res = await call('add_range_op', j.id, kind, R.start, R.end);
-    if (res && S.sel === j.id) {
-      if (S.range === R) S.range = null;
-      await loadResult(j.id);
-    }
+    if (S.sel !== j.id) return;
+    if (!res) { S.rangeErr = true; return; }   // 거절됨 (영상 밖·상태 등) — 구간은 그대로 둔다
+    if (S.range === R) S.range = null;
+    await loadResult(j.id);
   } finally {
     S.rangeBusy = false;
     drawRange();
@@ -541,10 +561,13 @@ async function rangeOp(kind) {
 async function removeOp(id, index) {
   if (S.rangeBusy) return;
   S.rangeBusy = true;
+  S.rangeErr = false;
   drawRange();
   try {
     const res = await call('remove_range_op', id, index);
-    if (res && S.sel === id) await loadResult(id);
+    if (S.sel !== id) return;
+    if (!res) { S.rangeErr = true; return; }
+    await loadResult(id);
   } finally {
     S.rangeBusy = false;
     drawRange();
@@ -554,7 +577,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || !S.range || S.editing || tlDrag) return;
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
-  S.range = null;
+  S.range = null; S.rangeErr = false;
   drawRange();
 });
 
@@ -595,7 +618,7 @@ function cutRows(j, r) {
       rows.push(h('div', { class: 'opt row' + (back ? ' op-back' : ''), onclick: () => player.clip(c.start, c.end, true) },
         h('span', {}, h('span', { class: 'w' }, `${clock(c.start)} ${back ? '직접 되살림' : '직접 자름'}`),
           h('span', { class: 'sec' }, `${(c.end - c.start).toFixed(1)}초`)),
-        h('button', { type: 'button', class: 'btn' + (back ? ' on' : ''), disabled: !editable || S.rangeBusy,
+        h('button', { type: 'button', class: 'btn' + (back ? ' on' : ''), disabled: !editable,
           onclick: (e) => { e.stopPropagation(); removeOp(j.id, c.op); } }, back ? '다시 자르기' : '되살리기')));
       continue;
     }
