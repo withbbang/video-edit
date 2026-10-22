@@ -8,10 +8,16 @@ import pytest
 from app import window
 
 
-def _req(base, path, method="GET", headers=None):
+def _req(base, path, method="GET", headers=None, skip_host=False):
     u = urlsplit(base)
     conn = http.client.HTTPConnection(u.hostname, u.port, timeout=5)
-    conn.request(method, path, headers=headers or {})
+    if skip_host:
+        conn.putrequest(method, path, skip_host=True)
+        for k, v in (headers or {}).items():
+            conn.putheader(k, v)
+        conn.endheaders()
+    else:
+        conn.request(method, path, headers=headers or {})
     r = conn.getresponse()
     body = r.read()
     conn.close()
@@ -78,6 +84,21 @@ def test_preview_other_paths_404(served, path):
     assert r.status == 404
 
 
+@pytest.mark.parametrize("host", ["evil.example:80", "127.0.0.1", "127.0.0.1:1", "attacker.localhost", None])
+def test_preview_rejects_other_hosts(served, host):
+    base, _ = served
+    headers = {"Host": host} if host else {}
+    r, _ = _req(base, "/0123456789ab/preview.mp4", headers=headers, skip_host=True)
+    assert r.status == 403
+
+
+def test_preview_accepts_localhost_name(served):
+    base, data = served
+    port = urlsplit(base).port
+    r, body = _req(base, "/0123456789ab/preview.mp4", headers={"Host": f"localhost:{port}"}, skip_host=True)
+    assert r.status == 200 and body == data
+
+
 def test_parse_range():
     assert window.parse_range(None, 10) is None
     assert window.parse_range("bytes=0-4", 10) == (0, 4)
@@ -125,6 +146,17 @@ def test_bridge_swallows_eval_errors():
     b.window = Broken()
     b.loaded()
     b.push("job", {})   # 예외가 밖으로 나오지 않는다
+
+
+def test_bridge_close_drops_pushes():
+    b = window.Bridge()
+    w = FakeWindow()
+    b.window = w
+    b.push("job", {})
+    b.close()
+    b.loaded()
+    b.push("job", {})
+    assert w.scripts == []
 
 
 def test_dropped_paths():

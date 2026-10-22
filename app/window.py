@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 TITLE = "youtube-edit"
 SIZE = (1100, 720)
 MIN_SIZE = (900, 600)
+SHUTDOWN_WAIT = 3.0
 FILE_TYPES = ("영상과 오디오 (" + ";".join(f"*{e}" for e in sorted(api_mod.MEDIA_EXTS)) + ")",
               "모든 파일 (*.*)")
 
@@ -85,7 +86,16 @@ def _handler(root: Path):
             f = jobs / m.group(1) / "preview.mp4"
             return f if f.is_file() else None
 
+        def _host_ok(self) -> bool:
+            """DNS 리바인딩 막기: 이 서버 주소로 온 요청만 받는다."""
+            port = self.server.server_address[1]
+            host = (self.headers.get("Host") or "").strip().lower()
+            return host in (f"127.0.0.1:{port}", f"localhost:{port}")
+
         def _serve(self, body: bool) -> None:
+            if not self._host_ok():
+                self.send_error(403)
+                return
             f = self._file()
             if f is None:
                 self.send_error(404)
@@ -153,6 +163,7 @@ class Bridge:
     def __init__(self, max_pending: int = 500):
         self.window = None
         self._loaded = False
+        self._closed = False
         self._pending: deque[str] = deque(maxlen=max_pending)
         self._lock = threading.Lock()
 
@@ -164,6 +175,8 @@ class Bridge:
     def push(self, event: str, data) -> None:
         s = self.script(event, data)
         with self._lock:
+            if self._closed:
+                return
             if not self._loaded or self.window is None:
                 self._pending.append(s)
                 return
@@ -178,6 +191,12 @@ class Bridge:
             window = self.window
         for s in pending:
             self._eval(window, s)
+
+    def close(self, *_args) -> None:
+        """창이 닫히면 알림을 버린다 (닫힌 창의 evaluate_js 는 멈출 수 있다)."""
+        with self._lock:
+            self._closed = True
+            self._pending.clear()
 
     @staticmethod
     def _eval(window, script: str) -> None:
@@ -239,7 +258,7 @@ def run(debug: bool = False) -> None:
     data_root = paths.data_dir()
     bridge = Bridge()
     base = serve_previews(data_root)
-    _store, _queue, api = build(data_root, bridge.push, Dialogs(bridge), base)
+    _store, queue, api = build(data_root, bridge.push, Dialogs(bridge), base)
 
     window = webview.create_window(TITLE, url=str(ui_index()), js_api=api, width=SIZE[0], height=SIZE[1],
                                    min_size=MIN_SIZE)
@@ -253,10 +272,23 @@ def run(debug: bool = False) -> None:
             bridge.push("jobs", {})
 
     def on_loaded() -> None:
+        bridge.loaded()
         if not drop_ready.is_set():
             drop_ready.set()
-            window.dom.document.events.drop += DOMEventHandler(on_drop, prevent_default=True)
-        bridge.loaded()
+            try:
+                window.dom.document.events.drop += DOMEventHandler(on_drop, prevent_default=True)
+            except Exception:  # noqa: BLE001 — 끌어다 놓기가 안 돼도 파일 선택은 된다
+                log.exception("끌어다 놓기 등록 실패")
+
+    def stop() -> None:
+        # 창을 닫으면 돌던 파이프라인(과 ffmpeg)을 멈추고 그 영상은 대기로 저장한다. 여러 번 불려도 된다.
+        bridge.close()
+        if not queue.shutdown(SHUTDOWN_WAIT):
+            log.warning("처리를 %s초 안에 멈추지 못했습니다", SHUTDOWN_WAIT)
 
     window.events.loaded += on_loaded
-    webview.start(debug=debug or bool(os.environ.get("YTEDIT_DEBUG")))
+    window.events.closed += stop          # 앱 종료(⌘Q) 경로에서도 창 닫힘은 온다
+    try:
+        webview.start(debug=debug or bool(os.environ.get("YTEDIT_DEBUG")))
+    finally:
+        stop()

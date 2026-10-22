@@ -52,6 +52,7 @@ class Queue:
         self._handles: dict[str, Cancellable] = {}
         self._cancel: set[str] = set()
         self._worker: threading.Thread | None = None
+        self._stopping = False                          # shutdown() 뒤엔 아무것도 새로 시작하지 않는다
 
     # ---- 공개 API ----------------------------------------------------------
 
@@ -92,7 +93,7 @@ class Queue:
     def rejudge(self, job_id: str) -> None:
         with self.lock:
             job = self.store.get(job_id)
-            if not job:
+            if not job or self._stopping:
                 return
             if job_id in self._rejudging:
                 self._rejudging[job_id] = True   # 후속 한 번만; 옵션은 실행 시점 것을 읽음
@@ -133,6 +134,35 @@ class Queue:
         else:
             self._notify(job)
 
+    def shutdown(self, timeout: float = 3.0) -> bool:
+        """앱을 닫을 때. 대기열을 비우고 실행 중인 분석·렌더·재판정을 멈춘다. cancel() 과 달리 목록에서 빼지 않고
+        멈춘 영상은 대기(waiting)로 되돌려 저장한다 (다음 실행 때 다시 처리). 모두 멈췄으면 True."""
+        with self.lock:
+            self._stopping = True
+            self._items.clear()
+            running = [jid for jid in ([self._current] if self._current else []) + list(self._rejudging)]
+            handles = []
+            for jid in running:
+                self._cancel.add(jid)          # 아직 on_start 전이면 on_start 가 멈춘다
+                if jid in self._rejudging:
+                    self._rejudging[jid] = False
+                if jid in self._handles:
+                    handles.append(self._handles[jid])
+            self._cv.notify_all()
+        for h in handles:
+            try:
+                h.cancel()
+            except Exception:  # noqa: BLE001
+                log.exception("멈추기 실패")
+        with self._cv:
+            done = self._cv.wait_for(lambda: self._current is None and not self._rejudging, timeout)
+            for jid in running:      # 시간 안에 안 끝난 것도 대기로 저장해 둔다
+                job = self.store.get(jid)
+                if job and job.status in (Status.PROCESSING, Status.SAVING):
+                    job.status, job.progress = Status.WAITING, 0.0
+            self._save()
+        return done
+
     def set_progress(self, job_id: str, value: float) -> None:
         """진행률만 갱신 (저장하지 않음). runner 의 on_progress 에 연결한다."""
         with self.lock:
@@ -163,6 +193,10 @@ class Queue:
             log.exception("작업 목록 저장 실패")
 
     def _wake(self) -> None:
+        if self._stopping:
+            self._items.clear()
+            self._cv.notify_all()
+            return
         if self._items and (self._worker is None or not self._worker.is_alive()):
             self._worker = threading.Thread(target=self._work, daemon=True, name="jobqueue")
             self._worker.start()
@@ -255,6 +289,11 @@ class Queue:
     def _finish(self, job: Job, kind: str, result: RunResult) -> None:
         """lock 안에서 부른다."""
         self._handles.pop(job.id, None)
+        if self._stopping:
+            self._cancel.discard(job.id)
+            if job.status in (Status.PROCESSING, Status.SAVING):
+                self._set(job, Status.WAITING, progress=0.0)
+            return
         if job.id in self._cancel or (not result.ok and result.error == CANCELLED):
             self._cancel.discard(job.id)
             self.store.remove(job.id)

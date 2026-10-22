@@ -115,9 +115,12 @@ function syncResult() {
   }
 }
 
+let resultSeq = 0;
 async function loadResult(id) {
+  const seq = ++resultSeq;
   const r = await call('get_result', id);
-  if (S.sel !== id || !r) return;
+  if (seq !== resultSeq || S.sel !== id) return;   // 늦게 온 옛 응답은 버린다
+  if (!r) { S.resultKey = null; return; }          // 다음 알림 때 다시 읽는다
   S.result = r; S.resultFor = id; S.resultVersion++;
   if (!r.changes) S.changedKey = null;
   render();
@@ -131,21 +134,45 @@ function render() {
   renderResult();
 }
 
+// 목록 줄은 영상 id 마다 한 번 만들고 진행 알림 때는 글자·막대만 고친다 (누르는 도중 다시 만들면 클릭이 사라진다)
+const rows = new Map();
+const addBox = h('div', { class: 'qi add', onclick: () => pickFiles() }, '＋ 끌어다 놓거나 ', h('u', {}, '파일 선택'));
+
+function queueRow(id) {
+  const r = { name: h('span', { class: 'name' }), st: h('span', { class: 'st' }), bar: h('i') };
+  r.mini = h('span', { class: 'mini' }, r.bar);
+  r.x = h('button', { type: 'button', class: 'x', title: '빼기', onclick: (e) => {
+    e.stopPropagation();
+    const j = S.jobs.find((x) => x.id === id);
+    if (j) removeJob(j);
+  } }, '✕');
+  r.el = h('div', { class: 'qi', onclick: () => select(id) }, r.name, r.st, r.mini, r.x);
+  return r;
+}
+
 function renderQueue() {
   const empty = S.jobs.length === 0;
   $('empty').hidden = !empty;
   $('work').hidden = empty;
+  const ids = new Set(S.jobs.map((j) => j.id));
+  for (const id of [...rows.keys()]) if (!ids.has(id)) { rows.get(id).el.remove(); rows.delete(id); }
+  for (const j of S.jobs) {
+    if (!rows.has(j.id)) rows.set(j.id, queueRow(j.id));
+    const r = rows.get(j.id);
+    r.el.classList.toggle('cur', j.id === S.sel);
+    r.el.title = j.name;
+    if (r.name.textContent !== j.name) r.name.textContent = j.name;
+    const text = statusText(j);
+    if (r.st.textContent !== text) r.st.textContent = text;
+    r.st.className = `st ${j.status}`;
+    r.st.title = j.status === 'failed' ? (j.error || '') : '';
+    r.mini.hidden = !BUSY.has(j.status);
+    r.bar.style.transform = `scaleX(${pct(j.progress) / 100})`;
+  }
+  // 영상이 늘거나 줄었을 때만 순서를 맞춘다
   const q = $('queue');
-  q.replaceChildren(
-    ...S.jobs.map((j) => {
-      const busy = BUSY.has(j.status);
-      return h('div', { class: 'qi' + (j.id === S.sel ? ' cur' : ''), onclick: () => select(j.id), title: j.name },
-        h('span', { class: 'name' }, j.name),
-        h('span', { class: `st ${j.status}`, title: j.status === 'failed' ? (j.error || '') : null }, statusText(j)),
-        busy ? h('span', { class: 'mini' }, h('i', { style: `width:${pct(j.progress)}%` })) : null,
-        h('button', { type: 'button', class: 'x', title: '빼기', onclick: (e) => { e.stopPropagation(); removeJob(j); } }, '✕'));
-    }),
-    h('div', { class: 'qi add', onclick: pickFiles }, '＋ 끌어다 놓거나 ', h('u', {}, '파일 선택')));
+  const want = [...S.jobs.map((j) => rows.get(j.id).el), addBox];
+  if (q.children.length !== want.length || want.some((e, i) => q.children[i] !== e)) q.replaceChildren(...want);
 }
 
 function segRow(def, value, disabled, onPick, changed) {
@@ -156,10 +183,15 @@ function segRow(def, value, disabled, onPick, changed) {
         onclick: () => onPick(def.key, v) }, text))));
 }
 
-function renderOptions() {
+// 선택한 영상·옵션·바쁜 상태 등이 바뀔 때만 다시 만든다
+let optionsDrawn = null;
+function renderOptions(force) {
   const j = selected();
   const o = S.options || DEFAULTS;
   const disabled = !j || !S.options || BUSY.has(j.status) || j.status === 'missing';
+  const key = JSON.stringify([j && j.id, j && j.name, o, disabled, S.changedKey, S.advOpen, S.saveDir]);
+  if (!force && key === optionsDrawn) return;
+  optionsDrawn = key;
   $('opt-title').textContent = j ? `${j.name} 옵션` : '';
   $('options').replaceChildren(...OPTS.map((d) => segRow(d, o[d.key], disabled, setOption, S.changedKey === d.key)));
   $('adv-arrow').textContent = S.advOpen ? '▾' : '▸';
@@ -262,7 +294,7 @@ function changeRows(ch) {
 
 // ---- 미리보기 재생기: 잘린 구간을 건너뛰며 재생 ---------------------------
 const player = {
-  video: null, url: null, ranges: [], win: null, raf: 0,
+  video: null, url: null, ranges: [], win: null, raf: 0, ownSeek: false,
   head: h('i', { class: 'head', style: 'left:0' }),
 
   slot() {
@@ -271,6 +303,10 @@ const player = {
       v.addEventListener('timeupdate', () => this.tick());
       v.addEventListener('play', () => this.loop());
       v.addEventListener('seeked', () => this.drawHead());
+      v.addEventListener('seeking', () => {
+        if (!this.ownSeek) this.win = null;   // 사용자가 직접 옮기면 들어보기 구간을 끝낸다
+        this.ownSeek = false;
+      });
       v.addEventListener('loadedmetadata', () => { if (!(S.result && S.result.duration)) renderResult(true); });
       this.video = v;
     }
@@ -287,14 +323,15 @@ const player = {
     this.video = null; this.url = null; this.ranges = []; this.win = null;
   },
   duration() { return this.video && isFinite(this.video.duration) ? this.video.duration : 0; },
-  seek(t) { if (!this.video) return; this.win = null; this.video.currentTime = Math.max(0, t); },
+  move(t) { this.ownSeek = true; this.video.currentTime = t; },
+  seek(t) { if (!this.video) return; this.win = null; this.move(Math.max(0, t)); },
   clip(start, end, skip) {
     const v = this.video;
     if (!v) return;
     const from = Math.max(0, start - 2);
     const to = Math.min(this.duration() || end + 2, end + 2);
     this.win = { to, skip };
-    v.currentTime = from;
+    this.move(from);
     v.play().catch(() => {});
   },
   loop() {
@@ -317,7 +354,7 @@ const player = {
     }
     for (const [a, b] of this.ranges) {
       if (a > t) break;
-      if (t >= a && t < b - 0.01) { v.currentTime = Math.min(b, this.duration() || b); break; }
+      if (t >= a && t < b - 0.01) { this.move(Math.min(b, this.duration() || b)); break; }
     }
   },
   drawHead() {
@@ -387,7 +424,7 @@ function coverProgress(done, total) {
   $('cover').hidden = false;
   $('cover-progress').hidden = false;
   $('cover-error').hidden = true;
-  if (!total) { $('cover-bar').style.width = '0'; $('cover-text').textContent = ''; return; }
+  if (!total) { $('cover-bar').style.transform = 'scaleX(0)'; $('cover-text').textContent = ''; return; }
   const now = performance.now() / 1000;
   dl.samples.push([now, done]);
   while (dl.samples.length > 2 && now - dl.samples[0][0] > 20) dl.samples.shift();
@@ -397,7 +434,7 @@ function coverProgress(done, total) {
     const left = (total - done) / ((done - d0) / (now - t0));
     eta = ` · 약 ${Math.max(1, Math.round(left / 60))}분 남음`;
   }
-  $('cover-bar').style.width = `${Math.min(100, (done / total) * 100)}%`;
+  $('cover-bar').style.transform = `scaleX(${Math.min(1, done / total)})`;
   $('cover-text').textContent = `${gb(done)} / ${gb(total)}${eta}`;
 }
 function coverError() {
@@ -445,7 +482,7 @@ function wire() {
   $('up-get').addEventListener('click', async () => {
     $('up-state').textContent = '받는 중…';
     const r = await call('install_update');
-    if (!r || !r.started) $('up-state').textContent = '';
+    if (!r || !r.started) $('up-state').textContent = '받지 못했습니다';
   });
   $('up-close').addEventListener('click', () => {
     if (S.update) call('dismiss_update', S.update.version);

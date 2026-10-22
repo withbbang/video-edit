@@ -465,3 +465,64 @@ def test_rejudge_from_on_change_after_rejudge(tmp_path):
     assert q.join(WAIT)
     assert fx.calls == [(a.id, "analyze")] * 2
     assert a.status == Status.REVIEW and len(reviews) == 2
+
+
+def test_shutdown_stops_running_and_keeps_jobs_waiting(tmp_path):
+    store, (a, b), fx, q, changes = make(tmp_path, ("a", "b"))
+    fx.gate(a.id, "analyze")
+    q.start_all()
+    assert fx.started[(a.id, "analyze")].wait(WAIT)
+    assert q.shutdown(WAIT) is True
+    assert [j.id for j in store.jobs] == [a.id, b.id]          # cancel() 과 달리 빼지 않는다
+    assert a.status == Status.WAITING and a.progress == 0.0
+    assert b.status == Status.WAITING
+    assert fx.calls == [(a.id, "analyze")]                      # 다음 항목은 시작하지 않는다
+    saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert [j["status"] for j in saved["jobs"]] == ["waiting", "waiting"]
+    q.start_all()                                                # 닫은 뒤엔 아무것도 돌지 않는다
+    assert q.join(WAIT) and fx.calls == [(a.id, "analyze")]
+
+
+def test_shutdown_stops_saving_and_rejudge(tmp_path):
+    store, (a, b), fx, q, _ = make(tmp_path, ("a", "b"))
+    for j in (a, b):
+        j.status = Status.REVIEW
+        write_cuts(j, [{"start": 1.0, "end": 2.0}])
+    fx.gate(a.id, "render")
+    fx.gate(b.id, "analyze")
+    q.request_save(a.id)
+    q.rejudge(b.id)
+    assert fx.started[(a.id, "render")].wait(WAIT)
+    assert fx.started[(b.id, "analyze")].wait(WAIT)
+    assert q.shutdown(WAIT) is True
+    assert a.status == Status.WAITING and b.status == Status.WAITING
+    assert store.get(a.id) and store.get(b.id)
+    q.rejudge(b.id)
+    assert q.join(WAIT)
+
+
+def test_shutdown_idle_and_cancel_before_on_start(tmp_path):
+    store, (a,), fx, q, _ = make(tmp_path, ("a",))
+    assert q.shutdown(WAIT) is True
+    assert a.status == Status.WAITING
+
+
+def test_shutdown_timeout_still_saves_waiting(tmp_path):
+    store, (a,), fx, q, _ = make(tmp_path, ("a",))
+    started, release = threading.Event(), threading.Event()
+
+    def stuck(job, kind, on_start):
+        on_start(type("H", (), {"cancel": lambda self: None})())   # 멈추지 않는 프로세스
+        started.set()
+        release.wait(WAIT)
+        return RunResult(False, "cancelled")
+    q.execute = stuck
+    q.start_all()
+    assert started.wait(WAIT)
+    assert q.shutdown(0.2) is False
+    assert a.status == Status.WAITING
+    saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert saved["jobs"][0]["status"] == "waiting"
+    release.set()
+    assert q.join(WAIT)
+    assert store.get(a.id) is a and a.status == Status.WAITING
