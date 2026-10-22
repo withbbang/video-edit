@@ -75,6 +75,31 @@
   윈도우 `%APPDATA%\youtube-edit\`. 지워도 되지만 모델은 다시 받아야 합니다. 환경 변수 `YTEDIT_DATA_DIR` 로 위치를 바꿀 수 있습니다.
 - 사용자 데이터 폴더에 `fillers.json` 을 두면 앱에 든 필러 사전보다 우선합니다.
 
+### 완전히 지우기 (모델 포함)
+
+앱을 지워도 모델(약 2.8GB)·작업 캐시·설정이 든 앱 데이터 폴더는 남습니다. 앱을 끈 뒤 아래를 지우세요.
+저장 결과 폴더(`~/Movies/youtube-edit`, `%USERPROFILE%\Videos\youtube-edit`)는 직접 만든 영상이니 필요할 때만 지웁니다.
+
+**맥** — `응용 프로그램` 폴더의 `youtube-edit` 을 휴지통으로 옮긴 뒤 터미널에서:
+
+```bash
+rm -rf ~/Library/Application\ Support/youtube-edit          # 모델·작업 캐시·설정·오류 기록
+rm -rf ~/Library/Caches/com.withbbang.youtube-edit \
+       ~/Library/WebKit/com.withbbang.youtube-edit \
+       ~/Library/HTTPStorages/com.withbbang.youtube-edit \
+       ~/Library/Saved\ Application\ State/com.withbbang.youtube-edit.savedState
+rm -f  ~/Library/Preferences/com.withbbang.youtube-edit.plist
+```
+
+**윈도우** — `설정 › 앱 › 설치된 앱` 에서 `youtube-edit` 을 제거한 뒤 PowerShell 에서:
+
+```powershell
+Remove-Item -Recurse -Force "$env:APPDATA\youtube-edit"                    # 모델·작업 캐시·설정·오류 기록
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\youtube-edit" -ErrorAction SilentlyContinue   # 제거 뒤 남은 설치 폴더
+```
+
+`YTEDIT_DATA_DIR` 로 데이터 위치를 바꿨다면 그 폴더를 지웁니다. 명령줄 버전의 모델은 아래 [명령줄 버전 지우기](#명령줄-버전-지우기)를 보세요.
+
 ### 라이선스
 
 GPL-3.0 (`LICENSE`). 설치 파일에는 정적 빌드 ffmpeg 가 들어 있고, 서드파티 고지는 `packaging/THIRD_PARTY.txt`,
@@ -143,6 +168,26 @@ python -m venv .venv
 - 일부 PC 에선 ctranslate2 4.5 이상이 모델 로드 때 메시지 없이 죽는다. 처음 실행 때 파이프라인이 별도 프로세스로 미리 띄워 보고, 죽으면 멈추면서 `.venv\Scripts\python -m pip install "ctranslate2==4.4.0"` 으로 내리라고 알려 준다 (`--device cpu` 를 안 붙였으면 그걸 먼저 안내). 정상인 PC 는 최신 버전을 그대로 쓴다
 - 첫 실행 때 Whisper 모델(약 1.6GB)과 정렬 모델(약 1.2GB)을 내려받는 건 맥과 같다
 - `python` 이 없다고 나오면 Microsoft Store 가 가로챈 것일 수 있다. `py -3 -m venv .venv` 로 바꿔 쓰거나, 설정 > 앱 > 앱 실행 별칭에서 python 항목을 끈다
+
+### 명령줄 버전 지우기
+
+명령줄 버전은 모델을 Hugging Face 캐시에 받는다 (앱 데이터 폴더와 따로). 프로젝트 폴더(`.venv`·`work/`·`output/` 포함)를 지운 뒤
+캐시에서 이 프로젝트가 받은 모델만 지운다. 다른 프로그램이 같은 캐시를 쓸 수 있으니 `hub` 폴더 통째로는 지우지 않는다.
+
+```bash
+# 맥
+rm -rf ~/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo \
+       ~/.cache/huggingface/hub/models--kresnik--wav2vec2-large-xlsr-korean
+```
+
+```powershell
+# 윈도우 (PowerShell)
+Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\hub\models--mobiuslabsgmbh--faster-whisper-large-v3-turbo",
+  "$env:USERPROFILE\.cache\huggingface\hub\models--kresnik--wav2vec2-large-xlsr-korean"
+```
+
+`--model medium` 등 다른 모델을 썼다면 같은 폴더의 `models--Systran--faster-whisper-<이름>` 도 지운다.
+`HF_HOME` 을 바꿨다면 `~/.cache/huggingface` 대신 그 폴더다.
 
 ## 쓰는 법
 
