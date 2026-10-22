@@ -25,7 +25,7 @@ class FakeQueue:
     def start_all(self):
         self.calls.append(("start_all",))
 
-    def request_save(self, job_id):
+    def request_save(self, job_id, notify=True):
         self.calls.append(("request_save", job_id))
 
     def rejudge(self, job_id):
@@ -137,7 +137,7 @@ def test_save_clears_changes_baseline(tmp_path):
     a, store, q, _ = make(tmp_path)
     job = add_job(tmp_path, a, store, status=Status.REVIEW)
     job.prev_cuts = "/x/prev.cuts.json"
-    q.request_save = lambda jid: setattr(job, "status", Status.SAVING)
+    q.request_save = lambda jid, notify=True: setattr(job, "status", Status.SAVING)
     a.save(job.id)
     assert job.prev_cuts is None
 
@@ -146,7 +146,7 @@ def test_save_clears_baseline_even_if_render_already_finished(tmp_path):
     a, store, q, _ = make(tmp_path)
     job = add_job(tmp_path, a, store, status=Status.REVIEW)
     job.prev_cuts = "/x/prev.cuts.json"
-    q.request_save = lambda jid: setattr(job, "status", Status.SAVED)
+    q.request_save = lambda jid, notify=True: setattr(job, "status", Status.SAVED)
     a.save(job.id)
     assert job.prev_cuts is None
 
@@ -229,10 +229,15 @@ def test_get_options_and_unknown_job(tmp_path):
 
 def test_unknown_job_is_noop(tmp_path):
     a, store, q, _ = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    before = (job.to_dict(), store.path.read_text())
+    assert a.get_options("missing") is None
     assert a.get_result("missing") is None
     assert a.set_option("missing", "habit", "all") is None
     assert a.save("missing") is None
-    assert a.remove_job("missing") == []
+    assert [j["id"] for j in a.remove_job("missing")] == [job.id]
+    assert (job.to_dict(), store.path.read_text()) == before
+    assert [c for c in q.calls if c[0] != "cancel"] == []
     with pytest.raises(ValueError):
         a.set_option("missing", "habit", "bogus")
 
@@ -475,3 +480,44 @@ def test_make_execute_runs_and_throttles_progress(tmp_path, monkeypatch):
     prog = [c for c in q.calls if c[0] == "set_progress"]
     assert 1 <= len(prog) <= 3
     assert prog[0] == ("set_progress", job.id, 0.0)
+
+
+def _lock_free(lock) -> bool:
+    """다른 스레드에서 lock 을 잡을 수 있으면 True (지금 스레드가 쥐고 있지 않음)."""
+    got = []
+    t = threading.Thread(target=lambda: got.append(lock.acquire(timeout=1) and (lock.release() or True)))
+    t.start()
+    t.join(5)
+    return got == [True]
+
+
+def test_save_notifies_outside_queue_lock(tmp_path):
+    from app.jobqueue import Queue
+    store = Store(tmp_path / "state.json")
+    store.settings["save_dir"] = str(tmp_path / "saved")
+    gate = threading.Event()
+
+    def execute(job, kind, on_start):
+        assert gate.wait(5)
+        return RunResult(True)
+
+    seen = []
+    holder = {}
+
+    def push(event, data):
+        if event == "job":
+            seen.append((data["status"], _lock_free(holder["q"].lock)))
+
+    q = Queue(store, execute, api_mod.make_on_change(push), read_summary=lambda j: {})
+    holder["q"] = q
+    a = Api(store, q, push, FakeDialogs(), manifest=MANIFEST, data_root=tmp_path / "data",
+            preview_base="http://x")
+    job = store.add(video(tmp_path))
+    job.status = Status.REVIEW
+    job.prev_cuts = "/x/prev.cuts.json"
+    view = a.save(job.id)
+    assert view["status"] == Status.SAVING and job.prev_cuts is None
+    gate.set()
+    assert q.join(5)
+    assert seen[0] == (Status.SAVING, True)
+    assert all(free for _, free in seen)

@@ -165,17 +165,22 @@ class Api:
         return self.list_jobs()
 
     def save(self, job_id: str) -> dict | None:
-        # 락을 쥔 채로 요청해야 작업 스레드가 렌더를 끝내기 전에(그리고 화면이 알림을 받고 결과를 읽기 전에)
-        # prev_cuts 를 지울 수 있다. queue.lock 은 RLock.
+        # 락을 쥔 채로 요청해야 작업 스레드가 렌더를 끝내기 전에 prev_cuts 를 지울 수 있다 (queue.lock 은 RLock).
+        # 알림(evaluate_js)은 락을 놓은 뒤에 보낸다 — 맥에선 메인 스레드를 기다리므로 락을 쥐고 보내면 교착 위험.
         with self._queue.lock:
             job = self._job(job_id)
             if job is None:
                 return None
-            self._queue.request_save(job_id)
+            before = job.status
+            self._queue.request_save(job_id, notify=False)
             if job.status in (Status.SAVING, Status.SAVED) and job.prev_cuts:
                 job.prev_cuts = None   # "달라진 곳" 은 저장 때 초기화 (스펙 3.3)
                 self._store.save()
-            return job_view(job)
+            changed = job.status != before
+            view = job_view(job)
+        if changed:
+            self._push("job", view)
+        return view
 
     # ---- 옵션 ----------------------------------------------------------------
 

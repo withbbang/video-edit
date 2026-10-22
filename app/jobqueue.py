@@ -74,7 +74,8 @@ class Queue:
         for job in retried:
             self._notify(job)
 
-    def request_save(self, job_id: str) -> None:
+    def request_save(self, job_id: str, notify: bool = True) -> None:
+        """notify=False 면 on_change 를 부르지 않는다 — 락을 쥔 채 부르는 쪽이 락을 놓은 뒤 직접 알린다."""
         with self.lock:
             job = self.store.get(job_id)
             if not job or job.status not in (Status.REVIEW, Status.SAVED) or job_id in self._rejudging:
@@ -85,7 +86,8 @@ class Queue:
             self._items.insert(pos, (job_id, RENDER))
             self._set(job, Status.SAVING, progress=0.0, error="")
             self._wake()
-        self._notify(job)
+        if notify:
+            self._notify(job)
 
     def rejudge(self, job_id: str) -> None:
         with self.lock:
