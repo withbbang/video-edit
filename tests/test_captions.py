@@ -112,3 +112,29 @@ def test_load_subs_edits_stale_ignored(tmp_path):
 
 def test_load_subs_edits_none():
     assert pipeline.load_subs_edits(None, _tr()) == ({}, {})
+
+
+def test_load_subs_edits_missing_file(tmp_path):
+    assert pipeline.load_subs_edits(tmp_path / "none.json", _tr()) == ({}, {})
+
+
+def test_load_subs_edits_invalid_json_and_non_dict(tmp_path):
+    p = tmp_path / "b.json"
+    p.write_text("{oops", encoding="utf-8")
+    assert pipeline.load_subs_edits(p, _tr()) == ({}, {})
+    p.write_text("[1, 2]", encoding="utf-8")
+    assert pipeline.load_subs_edits(p, _tr()) == ({}, {})
+
+
+def test_load_subs_edits_malformed_entries_dropped(tmp_path):
+    import json
+    tr = _tr()
+    p = tmp_path / "m.json"
+    p.write_text(json.dumps({"transcript_sha1": pipeline.transcript_sha1(tr),
+                             "words": {"0:0": "ok", "0:1": 5},
+                             "lines": {"0:0": [1, 2], "0:1": [1], "0:2": "xy", "0:3": [1, "a"]}}),
+                 encoding="utf-8")
+    assert pipeline.load_subs_edits(p, tr) == ({"0:0": "ok"}, {"0:0": [1.0, 2.0]})
+    p.write_text(json.dumps({"transcript_sha1": pipeline.transcript_sha1(tr), "words": [], "lines": 3}),
+                 encoding="utf-8")
+    assert pipeline.load_subs_edits(p, tr) == ({}, {})

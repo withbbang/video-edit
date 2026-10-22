@@ -1139,11 +1139,25 @@ def load_subs_edits(path: Path | None, tr: dict) -> tuple[dict, dict]:
     """앱이 넘긴 자막 수정 파일 → (어절 글자, 줄 시간). 받아쓰기가 달라졌으면 버린다."""
     if not path:
         return {}, {}
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        log("자막 수정 파일을 읽지 못해 무시합니다")
+        return {}, {}
     if data.get("transcript_sha1") != transcript_sha1(tr):
         log("자막 수정이 지금 받아쓰기와 맞지 않아 무시합니다")
         return {}, {}
-    return dict(data.get("words") or {}), dict(data.get("lines") or {})
+    raw_w, raw_l = data.get("words"), data.get("lines")
+    words = {k: v for k, v in raw_w.items() if isinstance(v, str)} if isinstance(raw_w, dict) else {}
+    lines = {}
+    if isinstance(raw_l, dict):
+        for k, v in raw_l.items():
+            if (isinstance(v, (list, tuple)) and len(v) == 2
+                    and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)):
+                lines[k] = [float(v[0]), float(v[1])]
+    return words, lines
 
 
 def build_srt(tr: dict, remap: TimeRemap, final_dur: float, always_fillers: set[str] = frozenset(),
