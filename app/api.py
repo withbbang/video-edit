@@ -404,9 +404,8 @@ class Api:
         st = self._caption_state_ex(job_id)
         return st[:4] if st else None
 
-    def _edit_subs(self, job_id: str, change: Callable[[Job, dict], bool]) -> list | dict | None:
-        """자막 수정 공통: 확인 대기·저장됨에서만. change(job, tr) 가 False 면 거절. → 새 자막 목록
-        (고치기 직전에 낡은 수정을 버렸으면 get_captions 와 같이 {"captions", "edits_dropped"})."""
+    def _edit_subs(self, job_id: str, change: Callable[[Job, dict], bool]) -> dict | None:
+        """자막 수정 공통: 확인 대기·저장됨에서만. change(job, tr) 가 False 면 거절. → {"captions": 새 자막 목록, "edits_dropped": 고치기 직전에 낡은 수정을 버렸는가}."""
         st = self._caption_state_ex(job_id)
         if st is None:
             return None
@@ -426,19 +425,19 @@ class Api:
             self._store.save()
             view = job_view(job)
         self._push("job", view)
-        caps = self.get_captions(job_id)
-        if dropped and caps is not None:
-            return {"captions": caps, "edits_dropped": True}
-        return caps
-
-    def get_captions(self, job_id: str) -> list | dict | None:
-        """자막 목록. 받아쓰기가 바뀌어 고친 자막을 버린 그 한 번만 {"captions": 목록, "edits_dropped": True}."""
         st = self._caption_state_ex(job_id)
         if st is None:
             return None
-        return {"captions": st[3], "edits_dropped": True} if st[4] else st[3]
+        return {"captions": st[3], "edits_dropped": dropped or st[4]}
 
-    def set_word(self, job_id: str, key: str, text: str | None) -> list | None:
+    def get_captions(self, job_id: str) -> dict | None:
+        """{"captions": 목록, "edits_dropped": 받아쓰기가 바뀌어 고친 자막을 버린 그 한 번만 True}."""
+        st = self._caption_state_ex(job_id)
+        if st is None:
+            return None
+        return {"captions": st[3], "edits_dropped": st[4]}
+
+    def set_word(self, job_id: str, key: str, text: str | None) -> dict | None:
         """어절 글자를 고친다. text 가 None 이거나 원래 글자와 같으면 원래대로."""
         if not isinstance(key, str) or not (text is None or isinstance(text, str)):
             return None
@@ -456,7 +455,7 @@ class Api:
 
     def replace_text(self, job_id: str, find: str, repl: str, apply: bool) -> dict | None:
         """찾아 바꾸기. apply=False 면 몇 곳인지만 알려 준다. → {"count": 곳, "keys": [바뀔 어절 키]}"""
-        st = self._caption_state(job_id)
+        st = self._caption_state_ex(job_id)
         if st is None or not isinstance(find, str) or not isinstance(repl, str):
             return None
         plan, count = subtitles.plan_replace(st[3], find, repl)
@@ -470,11 +469,13 @@ class Api:
                     else:
                         job.word_edits[k] = v.strip()
                 return True
-            if self._edit_subs(job_id, change) is None:
+            edited = self._edit_subs(job_id, change)
+            if edited is None:
                 return None
+            result.update(captions=edited["captions"], edits_dropped=edited["edits_dropped"] or st[4])
         return result
 
-    def set_line_time(self, job_id: str, key: str, start: float | None, end: float | None) -> list | None:
+    def set_line_time(self, job_id: str, key: str, start: float | None, end: float | None) -> dict | None:
         """자막 줄의 시작·끝(원본 초)을 맞춘다. 둘 다 None 이면 원래대로. 앞 줄 끝~다음 줄 시작,
         0~영상 길이 안으로 자르고 길이는 0.3초 이상."""
         import math

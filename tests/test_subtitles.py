@@ -71,18 +71,18 @@ def setup(tmp_path, status=Status.REVIEW):
 
 def test_line_time_clamped(tmp_path):
     a, store, job, _ = setup(tmp_path)
-    caps = a.get_captions(job.id)
+    caps = a.get_captions(job.id)["captions"]
     assert len(caps) >= 2
     first, second = caps[0], caps[1]
     r = a.set_line_time(job.id, first["key"], None, second["start"] + 5)
-    got = next(c for c in r if c["key"] == first["key"])
+    got = next(c for c in r["captions"] if c["key"] == first["key"])
     assert got["end"] == second["start"] and got["timed"] is True
     r = a.set_line_time(job.id, first["key"], first["start"], first["start"] + 0.1)
-    got = next(c for c in r if c["key"] == first["key"])
+    got = next(c for c in r["captions"] if c["key"] == first["key"])
     assert abs(got["end"] - got["start"] - 0.3) < 1e-9
     assert a.set_line_time(job.id, first["key"], float("nan"), 1.0) is None
     r = a.set_line_time(job.id, first["key"], None, None)
-    assert next(c for c in r if c["key"] == first["key"])["timed"] is False
+    assert next(c for c in r["captions"] if c["key"] == first["key"])["timed"] is False
     assert first["key"] not in store.get(job.id).line_times
 
 
@@ -90,7 +90,7 @@ def test_set_word_marks_review(tmp_path):
     a, store, job, push = setup(tmp_path, Status.SAVED)
     r = a.set_word(job.id, "0:1", "여러분들")
     assert store.get(job.id).status == Status.REVIEW
-    words = {w["key"]: w for c in r for w in c["words"]}
+    words = {w["key"]: w for c in r["captions"] for w in c["words"]}
     assert words["0:1"]["edited"] is True and words["0:1"]["text"] == "여러분들"
     assert store.get(job.id).edits_sha1 == subtitles.transcript_sha1(TR)
     assert push.of("job")
@@ -109,7 +109,8 @@ def test_replace_text_api(tmp_path):
     assert a.replace_text(job.id, "여러분", "분들", False) == {"count": 1, "keys": ["0:1"]}
     assert store.get(job.id).word_edits == {}
     assert a.replace_text(job.id, "  ", "x", True) == {"count": 0, "keys": []}
-    assert a.replace_text(job.id, "여러분", "분들", True)["count"] == 1
+    r = a.replace_text(job.id, "여러분", "분들", True)
+    assert r["count"] == 1 and r["edits_dropped"] is False and r["captions"]
     assert store.get(job.id).word_edits == {"0:1": "분들"}
 
 
@@ -144,7 +145,7 @@ def test_save_subs_edits_writes_and_cleans(tmp_path):
     a, store, job, _ = setup(tmp_path)
     assert api_mod.save_subs_edits(job) is None
     a.set_word(job.id, "0:1", "여러분들")
-    a.set_line_time(job.id, a.get_captions(job.id)[0]["key"], 0.0, 1.0)
+    a.set_line_time(job.id, a.get_captions(job.id)["captions"][0]["key"], 0.0, 1.0)
     p = api_mod.save_subs_edits(job)
     data = json.loads(p.read_text(encoding="utf-8"))
     assert data["transcript_sha1"] == subtitles.transcript_sha1(TR)
@@ -162,7 +163,7 @@ def test_edits_survive_rejudge(tmp_path):
     job.range_ops = list(ops)
     write_out(job, "a.cuts.json", {"cuts": [{"start": 1.0, "end": 1.5, "kind": "silence", "word": "", "reason": "silence",
                                              "context": "", "seg": -1}]})  # 다시 판정
-    caps = a.get_captions(job.id)
+    caps = a.get_captions(job.id)["captions"]
     words = {w["key"]: w for c in caps for w in c["words"]}
     assert words["0:1"]["text"] == "여러분들" and store.get(job.id).word_edits == {"0:1": "여러분들"}
     assert store.get(job.id).range_ops == ops
@@ -175,9 +176,9 @@ def test_stale_edits_dropped(tmp_path):
     other["segments"][0]["words"][0]["word"] = " 안녕"
     write_out(job, "a.transcript.json", other)
     r = a.get_captions(job.id)
-    assert isinstance(r, dict) and r["edits_dropped"] is True
+    assert r["edits_dropped"] is True
     assert store.get(job.id).word_edits == {} and store.get(job.id).edits_sha1 is None
-    assert isinstance(a.get_captions(job.id), list)          # 한 번만
+    assert a.get_captions(job.id)["edits_dropped"] is False          # 한 번만
 
     a.set_word(job.id, "0:1", "여러분들")
     write_out(job, "a.transcript.json", TR)
