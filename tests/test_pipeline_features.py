@@ -24,3 +24,12 @@ def test_bitrate_scale():
     assert pipeline.auto_bitrate(info) == "8M"
     assert pipeline.auto_bitrate(info, scale=0.6) == "4M"   # 하한 4M
     assert pipeline.auto_bitrate(info, scale=1.5) == "12M"
+
+
+def test_scale_applies_to_software_crf():
+    info = {"width": 1920, "height": 1080, "fps": Fraction(30), "high_bit": False, "color": {}}
+    def crf(scale, vbitrate="auto"):
+        _, a = pipeline.video_encoder_args(info, False, " libx264 ", 18, vbitrate, "medium", scale)
+        return a[a.index("-crf") + 1]
+    assert (crf(0.6), crf(1.0), crf(1.5)) == ("22", "18", "14")
+    assert crf(0.6, vbitrate="20M") == "18"   # 비트레이트를 직접 정하면 배율 무시

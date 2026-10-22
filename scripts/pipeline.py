@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import wave
 from dataclasses import dataclass, asdict
@@ -78,7 +79,6 @@ def ffmpeg_with_progress(cmd: list, total_sec: float, stage: str) -> None:
         return
     # -progress 는 전역 옵션이라 맨 앞에. -stats 는 사람이 보는 줄이라 뺀다
     cmd = [cmd[0], "-progress", "pipe:1", "-nostats", *[c for c in cmd[1:] if c != "-stats"]]
-    import tempfile
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as err:
         # stderr 를 파이프로 받으면 stdout 을 읽는 동안 가득 차 멈출 수 있다 → 임시 파일로
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True)
@@ -1126,6 +1126,9 @@ def video_encoder_args(info: dict, hw: bool, encoders: str, crf: int, vbitrate: 
         return re.search(rf"\s{name}\s", encoders) is not None
 
     bitrate = auto_bitrate(info, vbitrate_scale) if vbitrate == "auto" else vbitrate
+    if vbitrate == "auto" and vbitrate_scale > 0 and vbitrate_scale != 1.0:
+        # 소프트웨어 인코더는 비트레이트 대신 CRF 를 쓴다 → 배율을 CRF 차이로 (CRF 6 ≈ 비트레이트 2배)
+        crf -= round(6 * math.log2(vbitrate_scale))
     color = []
     for opt, key in (("-color_primaries", "color_primaries"), ("-color_trc", "color_transfer"),
                      ("-colorspace", "color_space")):
