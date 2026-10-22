@@ -1231,9 +1231,12 @@ class TimeRemap:
 
 def build_captions(tr: dict, cut_words: set, remap: TimeRemap, always_fillers: set[str] = frozenset(),
                    single_only: set[str] = frozenset(), word_edits: dict[str, str] | None = None,
-                   max_chars: int = 28, max_dur: float = 5.0, gap_break: float = 0.7) -> list[dict]:
+                   max_chars: int = 28, max_dur: float = 5.0, gap_break: float = 0.7,
+                   keep_empty: bool = False) -> list[dict]:
     """자막 줄 계산. 줄 나눔은 원래 Whisper 글자로 하고(고쳐도 줄이 다시 나뉘지 않게),
-    고친 글자는 words[].text 에만 반영한다. 시간(start/end)은 원본 영상 기준 초."""
+    고친 글자는 words[].text 에만 반영한다. 시간(start/end)은 원본 영상 기준 초.
+    keep_empty=True 는 화면용: 글자를 비운 어절(text "")과 어절이 모두 빈 줄도 남긴다 (되돌릴 수 있게).
+    줄 시간은 그래도 남은 어절 기준이고, 모두 빈 줄만 원래 어절 기준. SRT 는 기본값(False)으로 만든다."""
     word_edits = word_edits or {}
     groups: list[list[dict]] = []
     cur: list[dict] = []
@@ -1269,8 +1272,11 @@ def build_captions(tr: dict, cut_words: set, remap: TimeRemap, always_fillers: s
     for g in groups:
         ws = [x for x in g if x["text"]]   # 글자를 비운 어절은 빠진다 (줄 key 는 원래 첫 어절이라 안 바뀐다)
         if not ws or not " ".join(x["text"] for x in ws).strip():
+            if keep_empty:
+                caps.append({"key": g[0]["key"], "start": g[0]["start"], "end": g[-1]["end"], "words": g})
             continue
-        caps.append({"key": g[0]["key"], "start": ws[0]["start"], "end": ws[-1]["end"], "words": ws})
+        caps.append({"key": g[0]["key"], "start": ws[0]["start"], "end": ws[-1]["end"],
+                     "words": g if keep_empty else ws})
     return caps
 
 

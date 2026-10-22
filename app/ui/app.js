@@ -40,7 +40,7 @@ const S = {
   showAll: false, showAllCuts: false, changedKey: null, saveDir: '', advOpen: false, update: null,
   resultVersion: 0, drawn: null,
   // 자막: caps 는 선택한 영상의 자막 줄(원본 초), tab 은 'cuts' | 'subs', editing 은 열린 어절 입력칸 {key}
-  tab: 'cuts', caps: null, capsFor: null, capsVersion: 0, dropped: false, lineSel: null, editing: null,
+  tab: 'cuts', renderPending: false, caps: null, capsFor: null, capsVersion: 0, dropped: false, lineSel: null, editing: null,
   findKeys: new Set(), findCount: 0, scroll: {},
 };
 
@@ -138,10 +138,10 @@ async function loadResult(id) {
   const seq = ++resultSeq;
   loadCaptions(id);                                 // 다시 판정·되살리기로 잘린 곳이 바뀌면 자막 줄도 바뀐다
   const r = await call('get_result', id);
+  if (r && r.edits_dropped) markDropped(id);        // 서버는 한 번만 알려 준다 — 버리는 응답에서도 받아 둔다
   if (seq !== resultSeq || S.sel !== id) return;   // 늦게 온 옛 응답은 버린다
   if (!r) { S.resultKey = null; return; }          // 다음 알림 때 다시 읽는다
   S.result = r; S.resultFor = id; S.resultVersion++;
-  if (r.edits_dropped) S.dropped = true;
   if (!r.changes) S.changedKey = null;
   render();
 }
@@ -150,8 +150,16 @@ let capsSeq = 0;
 async function loadCaptions(id) {
   const seq = ++capsSeq;
   const r = await call('get_captions', id);
+  if (r && r.edits_dropped) markDropped(id);
   if (seq !== capsSeq || S.sel !== id || !r) return;
   applyCaps(id, r);
+}
+
+// 받아쓰기가 바뀌어 고친 자막을 버렸다는 알림 (그 영상을 보고 있을 때만)
+function markDropped(id) {
+  if (S.sel !== id || S.dropped) return;
+  S.dropped = true;
+  renderResult();
 }
 
 // 자막 API 응답 {captions, edits_dropped} 을 받아 목록·영상 위 자막을 다시 그린다
@@ -159,7 +167,7 @@ function applyCaps(id, r) {
   if (S.sel !== id || !r || !Array.isArray(r.captions)) return;
   capsSeq++;                                        // 고친 뒤의 자막이 늦게 온 옛 get_captions 에 덮이지 않게
   S.caps = r.captions; S.capsFor = id; S.capsVersion++;
-  if (r.edits_dropped) S.dropped = true;
+  if (r.edits_dropped) markDropped(id);
   if (S.lineSel && !S.caps.some((c) => c.key === S.lineSel)) S.lineSel = null;
   renderResult();
   if (findBar.find.value.trim()) findPreview();
@@ -290,7 +298,8 @@ function renderResult(force) {
   const j = selected();
   const key = j ? [j.id, j.status, j.error, S.resultVersion, S.showAll, S.showAllCuts,
     S.capsVersion, S.tab, S.lineSel, S.dropped].join('|') : '';
-  if (S.editing) return;                            // 열린 어절 입력칸을 지우지 않는다 (닫을 때 다시 그림)
+  if (S.editing) { S.renderPending = true; return; }   // 열린 어절 입력칸을 지우지 않는다 (닫을 때 다시 그림)
+  S.renderPending = false;
   if (!force && key === S.drawn) return;
   S.drawn = key;
   if (!j) { box.replaceChildren(); return; }
@@ -418,7 +427,7 @@ function listParts(j, r) {
     onclick: () => { if (S.tab !== key) { S.tab = key; renderResult(); } } }, text);
   const out = [h('div', { class: 'tabs', role: 'tablist' },
     tab('cuts', `잘린 곳 ${items.length}` + (n ? ` · 되살림 ${n}` : '')),
-    tab('subs', caps ? `자막 ${caps.length}줄` : '자막'))];
+    tab('subs', caps ? `자막 ${caps.filter((c) => !c.empty).length}줄` : '자막'))];
   if (S.tab === 'subs') {
     syncFindBar(HAS_RESULT.has(j.status));
     out.push(findBar.el, h('div', { class: 'cut-list subs', 'data-tab': 'subs' }, (caps || []).map((c) => capRow(j, c))));
@@ -438,31 +447,57 @@ function clock1(sec) {
 // 자막 탭의 한 줄: 시간(누르면 그 줄 들어보기 + 줄 시간 편집기) + 어절들
 function capRow(j, c) {
   const sel = S.lineSel === c.key;
-  return h('div', { class: 'cap' + (sel ? ' sel' : '') + (c.timed ? ' timed' : '') },
+  return h('div', { class: 'cap' + (sel ? ' sel' : '') + (c.timed ? ' timed' : '') + (c.empty ? ' empty' : '') },
     h('button', { type: 'button', class: 't', title: c.timed ? '시간을 고친 줄' : null, onclick: () => {
       player.clip(c.start, c.end, true);
       if (S.lineSel !== c.key) { S.lineSel = c.key; renderResult(); }
     } }, clock(c.start)),
     h('span', { class: 'ws' }, c.words.map((w) => wordEl(w, 'list'))),
-    sel ? lineEditor(j, c) : null);
+    sel && !c.empty ? lineEditor(j, c) : null);
 }
 
-// 어절 하나. 자막 탭과 영상 위 자막이 같이 쓴다 (영상 위는 멈췄을 때만 고침)
+// 어절 하나. 자막 탭과 영상 위 자막이 같이 쓴다 (영상 위는 멈췄을 때만 고침).
+// 빈칸으로 뺀 어절(text "")은 원래 글자에 줄을 그어 남긴다 (눌러서 원래대로 되돌릴 수 있게)
 function wordEl(w, where) {
   const j = selected();
   const can = !!j && HAS_RESULT.has(j.status);
-  const el = h('span', { class: 'w' + (can ? ' can' : '') + (w.edited ? ' edited' : '') + (S.findKeys.has(w.key) ? ' hit' : ''),
-    'data-k': w.key, title: w.edited ? `원래: ${w.orig}` : null }, w.text);
+  const gone = !w.text;
+  const el = h('span', { class: 'w' + (can ? ' can' : '') + (w.edited ? ' edited' : '') + (gone ? ' gone' : '') +
+    (S.findKeys.has(w.key) ? ' hit' : ''),
+    'data-k': w.key, title: gone ? '자막에서 뺀 어절' : w.edited ? `원래: ${w.orig}` : null }, gone ? w.orig : w.text);
   el.addEventListener('click', (e) => {
     e.stopPropagation();
     if (where === 'over' && player.video && !player.video.paused) return;   // 재생 중엔 보기만
-    editWord(el, w);
+    editWord(el, w, where);
   });
   return el;
 }
 
+// 누르고 있는 동안 그 아래 버튼을 바꾸면 클릭이 사라진다 → 손을 뗀 뒤(클릭까지 끝난 뒤)에 고친다
+let pointerDown = false;
+document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
+for (const ev of ['pointerup', 'pointercancel']) document.addEventListener(ev, () => { pointerDown = false; }, true);
+function afterPointer(fn) {
+  if (!pointerDown) { fn(); return; }
+  let fired = false;
+  const go = () => {
+    if (fired) return;
+    fired = true;
+    document.removeEventListener('pointerup', go, true);
+    document.removeEventListener('pointercancel', go, true);
+    setTimeout(fn, 0);
+  };
+  document.addEventListener('pointerup', go, true);
+  document.addEventListener('pointercancel', go, true);
+  setTimeout(go, 2000);   // 창 밖에서 손을 떼 pointerup 을 못 받은 경우
+}
+// 입력칸이 열려 있어 미뤄 둔 다시 그리기
+function flushRender() {
+  if (S.renderPending && !S.editing) renderResult(true);
+}
+
 // 그 자리를 입력칸으로: Enter·바깥 클릭 확정, Esc 취소, 빈칸 확정 = 그 어절 빼기
-function editWord(el, w) {
+function editWord(el, w, where) {
   const j = selected();
   if (!j || !HAS_RESULT.has(j.status) || S.editing) return;
   const id = j.id;
@@ -471,29 +506,39 @@ function editWord(el, w) {
   const fit = () => { input.style.width = `${Math.max(2, input.value.length) + 1.5}em`; };
   fit();
   let done = false;
-  const finish = async (mode) => {
+  let wrap = null;
+  // 닫으면 바로 다른 어절을 열 수 있다 (S.editing 을 먼저 비움). 그 자리는 고친 글자로 바로 바꿔 두고,
+  // 서버 응답(전체 다시 그리기)은 손을 뗀 뒤에 반영한다
+  const finish = (mode) => {
     if (done) return;
     done = true;
-    const text = mode === 'orig' ? null : input.value;
-    if (mode !== 'cancel' && (text === null || text.trim() !== w.text)) {
-      const r = await call('set_word', id, w.key, text);
-      S.editing = null;
-      if (r) { applyCaps(id, r); return; }
-    }
     S.editing = null;
-    renderResult(true);
+    const text = mode === 'orig' ? null : input.value;
+    const change = mode !== 'cancel' && (text === null || text.trim() !== w.text);
+    const shown = !change ? w : text === null ? { ...w, text: w.orig, edited: false } : { ...w, text: text.trim(), edited: true };
+    input.readOnly = true;
+    afterPointer(() => {
+      if (wrap.isConnected) wrap.replaceWith(wordEl(shown, where));
+      flushRender();
+    });
+    if (!change) return;
+    call('set_word', id, w.key, text).then((r) => afterPointer(() => {
+      if (r) applyCaps(id, r);
+      else if (S.sel === id) renderResult(true);   // 거절됨 → 서버 상태대로 다시 그림
+    }));
   };
   input.addEventListener('input', fit);
   input.addEventListener('keydown', (e) => {
     e.stopPropagation();
-    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); finish('ok'); }
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); finish('ok'); }
     else if (e.key === 'Escape') { e.preventDefault(); finish('cancel'); }
   });
   input.addEventListener('blur', () => finish('ok'));
   input.addEventListener('click', (e) => e.stopPropagation());
   const back = w.edited ? h('button', { type: 'button', class: 'btn', onmousedown: (e) => e.preventDefault(),
     onclick: (e) => { e.stopPropagation(); finish('orig'); } }, '원래대로') : null;
-  el.replaceWith(h('span', { class: 'w-edit' }, input, back));
+  wrap = h('span', { class: 'w-edit' }, input, back);
+  el.replaceWith(wrap);
   input.focus();
   input.select();
 }
@@ -531,7 +576,7 @@ const findBar = (() => {
 let findTimer = 0, findSeq = 0;
 function syncFindBar(can) {
   findBar.find.disabled = !can; findBar.repl.disabled = !can;
-  findBar.btn.disabled = !can || S.findCount <= 0;
+  findBar.btn.disabled = !can || S.findCount <= 0 || applying;
   findBar.n.textContent = `· ${S.findCount}곳`;
 }
 async function findPreview() {
@@ -540,8 +585,9 @@ async function findPreview() {
   let keys = [], count = 0;
   if (id && q.trim()) {
     const r = await call('replace_text', id, q, rp, false);
+    if (r && r.edits_dropped) markDropped(id);
     if (seq !== findSeq || S.sel !== id) return;
-    if (r) { keys = r.keys || []; count = r.count || 0; if (r.edits_dropped && !S.dropped) { S.dropped = true; renderResult(); } }
+    if (r) { keys = r.keys || []; count = r.count || 0; }
   }
   S.findKeys = new Set(keys); S.findCount = count;
   paintHits();
@@ -552,19 +598,31 @@ function paintHits() {
   syncFindBar(!!j && HAS_RESULT.has(j.status));
   for (const el of $('result').querySelectorAll('.w[data-k]')) el.classList.toggle('hit', S.findKeys.has(el.dataset.k));
 }
+// 버튼은 곳 수가 0이면 꺼져 있다. Enter 는 미리보기 대기 중에도 바로 바꾼다 (빈칸이면 서버가 아무것도 안 함)
+let applying = false;
 async function applyReplace() {
   const j = selected();
   const q = findBar.find.value;
-  if (!j || !HAS_RESULT.has(j.status) || !q.trim() || S.findCount <= 0) return;
+  if (applying || !j || !HAS_RESULT.has(j.status) || !q.trim()) return;
+  applying = true;
+  findBar.btn.disabled = true;
   clearTimeout(findTimer);
   findSeq++;
-  const r = await call('replace_text', j.id, q, findBar.repl.value, true);
-  if (r && r.captions) applyCaps(j.id, { captions: r.captions, edits_dropped: r.edits_dropped });
-  else findPreview();
+  try {
+    const r = await call('replace_text', j.id, q, findBar.repl.value, true);
+    if (r && r.edits_dropped) markDropped(j.id);
+    if (r && r.captions) applyCaps(j.id, { captions: r.captions, edits_dropped: r.edits_dropped });
+    else findPreview();
+  } finally {
+    applying = false;
+    paintHits();
+  }
 }
 for (const inp of [findBar.find, findBar.repl]) {
   inp.addEventListener('input', () => { clearTimeout(findTimer); findTimer = setTimeout(findPreview, 150); });
-  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); applyReplace(); } });
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); applyReplace(); }
+  });
 }
 findBar.btn.addEventListener('click', applyReplace);
 
@@ -660,7 +718,7 @@ const player = {
   drawSub(t) {
     if (S.editing) return;
     const caps = (S.capsFor === S.sel && S.caps) || [];
-    const line = this.video ? caps.find((c) => c.start <= t && t < c.end) : null;
+    const line = this.video ? caps.find((c) => !c.empty && c.start <= t && t < c.end) : null;
     const key = line ? `${line.key}|${S.capsVersion}` : '';
     if (key === this.subKey) return;
     this.subKey = key;

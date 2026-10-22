@@ -58,10 +58,12 @@ def captions(cuts_json: dict, transcript: dict, cfg: dict, word_edits: dict, lin
     cuts = pl.cuts_from_dicts(cuts_json.get("cuts", []), _fps(cuts_json), _total_frames(cuts_json, transcript))
     remap = pl.TimeRemap(cuts)
     caps = pl.build_captions(transcript, remap.cut_words, remap, cfg["_always"], cfg["_single_only"],
-                             word_edits=word_edits or {})
+                             word_edits=word_edits or {}, keep_empty=True)
     for c in caps:
         for w in c["words"]:
             w["edited"] = w["key"] in (word_edits or {})
+        # 어절을 모두 비운 줄: 화면에서 되돌릴 수 있게 남기지만 SRT 에는 없다
+        c["empty"] = not "".join(w["text"] for w in c["words"]).strip()
         t = (line_times or {}).get(c["key"])
         c["timed"] = t is not None
         if t is not None:
@@ -117,7 +119,8 @@ def replace_plan(caps: list[dict], find: str, repl: str) -> dict[str, str]:
 
 
 def line_bounds(caps: list[dict], key: str) -> tuple[float, float]:
-    """줄 시간을 옮길 수 있는 범위: (앞 줄 끝, 다음 줄 시작). 없으면 (0.0, inf)."""
+    """줄 시간을 옮길 수 있는 범위: (앞 줄 끝, 다음 줄 시작). 없으면 (0.0, inf). SRT 에 없는 빈 줄은 이웃으로 치지 않는다."""
+    caps = [c for c in caps if c["key"] == key or not c.get("empty")]
     for i, c in enumerate(caps):
         if c["key"] == key:
             lo = caps[i - 1]["end"] if i > 0 else 0.0

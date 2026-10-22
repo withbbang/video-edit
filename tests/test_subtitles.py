@@ -211,3 +211,39 @@ def test_stale_edits_flag_on_replace_preview(tmp_path):
     r = a.replace_text(job.id, "안녕", "X", False)
     assert r["edits_dropped"] is True and store.get(job.id).word_edits == {}
     assert a.replace_text(job.id, "안녕", "X", False)["edits_dropped"] is False
+
+
+def test_dropped_word_stays_in_ui_captions(tmp_path):
+    """빈칸으로 확정한 어절은 화면 자막에 text "" 로 남아 되돌릴 수 있다 (SRT 에선 빠짐)"""
+    a, store, job, _ = setup(tmp_path)
+    r = a.set_word(job.id, "0:1", "")
+    words = {w["key"]: w for c in r["captions"] for w in c["words"]}
+    assert words["0:1"]["text"] == "" and words["0:1"]["edited"] is True and words["0:1"]["orig"] == "여러분"
+    line = next(c for c in r["captions"] if c["key"] == "0:0")
+    assert line["end"] == 0.5 and line["empty"] is False          # 줄 시간은 남은 어절 기준
+    r = a.set_word(job.id, "0:1", None)
+    assert {w["key"]: w for c in r["captions"] for w in c["words"]}["0:1"]["text"] == "여러분"
+
+
+def test_all_dropped_line_stays_in_ui(tmp_path):
+    a, store, job, _ = setup(tmp_path)
+    r = a.set_word(job.id, "0:4", "")
+    last = r["captions"][-1]
+    assert last["key"] == "0:4" and last["empty"] is True and last["words"][0]["text"] == ""
+    # 빈 줄은 SRT 에 없으므로 앞 줄 끝을 막지 않는다
+    second = r["captions"][-2]
+    r = a.set_line_time(job.id, second["key"], None, 9.0)
+    assert next(c for c in r["captions"] if c["key"] == second["key"])["end"] == 9.0
+
+
+def test_srt_drops_emptied_words_and_lines():
+    import pipeline
+    remap = pipeline.TimeRemap([])
+    edits = {"0:1": "", "0:4": ""}
+    caps = pipeline.build_captions(TR, remap.cut_words, remap, set(), set(), word_edits=edits)
+    srt = pipeline.captions_to_srt(caps, remap, 20.0)
+    assert "여러분" not in srt and "날" not in srt and srt.count("-->") == 2
+    ui = pipeline.build_captions(TR, remap.cut_words, remap, set(), set(), word_edits=edits, keep_empty=True)
+    assert len(ui) == 3 and [w["key"] for w in ui[0]["words"]] == ["0:0", "0:1"]
+    plain = pipeline.build_captions(TR, remap.cut_words, remap, set(), set())
+    assert pipeline.build_captions(TR, remap.cut_words, remap, set(), set(), keep_empty=True) == plain
