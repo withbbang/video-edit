@@ -140,9 +140,10 @@ class Gapless {
   fail(e) {
     if (this.dead) return;
     console.warn('미리보기 이어 붙이기 실패', e);
+    // 비우기(currentTime 이 0 이 됨) 전에 알린다 — 앱이 같은 원본 위치·재생 여부로 예전 방식을 연다
     const cb = this.onerror;
-    this.destroy();
-    if (cb) cb(e);
+    this.onerror = null;
+    try { if (cb) cb(e); } finally { this.destroy(); }
   }
 
   // 한 트랙을 채우는 반복. 이미 돌고 있으면 한 번 더 돌라고만 표시한다

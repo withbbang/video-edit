@@ -85,3 +85,20 @@ def test_plan_audio_last_piece_ends_at_duration():
     p = run("out = P.planAudio([[0, 10, 20], [0.5, 20, 30]], 0.8);")
     assert [v for x in p for v in (x["from"], x["to"])] == pytest.approx([0, 0.5, 0.5, 0.8])
     assert [[x["a"], x["b"]] for x in p] == [[10, 19], [20, 29]]
+
+
+@needs_node
+def test_fail_reports_before_teardown():
+    # 재생 중 오류: 앱이 원본 위치·재생 여부를 기억할 수 있게 onerror 를 요소를 비우기(currentTime 0) 전에 부른다
+    out = run("""
+const v = { currentTime: 12.5, paused: false, listeners: 0,
+  removeEventListener() {}, pause() { this.paused = true; },
+  removeAttribute() { this.currentTime = 0; }, load() {} };
+const g = new P.Gapless(v);
+let seen = null;
+g.onerror = () => { seen = { t: v.currentTime, paused: v.paused, dead: g.dead }; };
+g.fail(new Error('x'));
+out = { seen, after: v.currentTime, dead: g.dead };
+""")
+    assert out["seen"] == {"t": 12.5, "paused": False, "dead": False}
+    assert out["after"] == 0 and out["dead"] is True
