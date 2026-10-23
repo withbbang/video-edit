@@ -189,10 +189,27 @@ def save_subs_edits(job: Job, lock=None) -> Path | None:
     return path
 
 
-def make_execute(store: Store, manifest: dict, data_root: Path, queue_getter: Callable[[], object]):
+CUT_AUDIO_WAIT = 10.0   # 분석·저장 전에 그 영상의 미리보기 소리 만들기가 멈추길 기다리는 최대 초
+
+
+def make_execute(store: Store, manifest: dict, data_root: Path, queue_getter: Callable[[], object],
+                 cut_audio_getter: Callable[[], "preview.CutAudio | None"] | None = None):
     """Queue(execute=...) 에 넘긴다. queue_getter 는 Queue 를 만든 뒤에 돌려줄 수 있게 함수로 받는다.
-    진행률은 queue.set_progress 로 넘기고(그게 on_change → push("job") 로 이어진다) 작업마다 초당 5번까지만."""
+    진행률은 queue.set_progress 로 넘기고(그게 on_change → push("job") 로 이어진다) 작업마다 초당 5번까지만.
+    cut_audio_getter 가 주는 CutAudio 의 그 영상 작업은 실행 전에 멈추고(같은 영상 잠금을 쥐고 있으면 파이프라인이
+    "이미 처리 중" 으로 멈춘다) 끝나면 다시 받는다."""
     def execute(job: Job, kind: str, on_start) -> RunResult:
+        cut_audio = cut_audio_getter() if cut_audio_getter else None
+        if cut_audio is None:
+            return _execute(job, kind, on_start)
+        if not cut_audio.cancel(job.id, CUT_AUDIO_WAIT):
+            log.warning("미리보기 소리 만들기를 %s초 안에 멈추지 못했습니다: %s", CUT_AUDIO_WAIT, job.id)
+        try:
+            return _execute(job, kind, on_start)
+        finally:
+            cut_audio.release(job.id)
+
+    def _execute(job: Job, kind: str, on_start) -> RunResult:
         save_dir = Path(store.settings["save_dir"]) if kind == RENDER else None
         cmd, weights, env = pipeline_command(job, kind, store, manifest, data_root, save_dir, queue_getter().lock)
         throttle = _Throttle()

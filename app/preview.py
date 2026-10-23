@@ -47,6 +47,8 @@ class CutAudio:
         self._current: tuple[str, str] | None = None   # 지금 만드는 (job_id, key)
         self._running = None                     # 지금 도는 프로세스 (runner.Running)
         self._failed: set[tuple[str, str]] = set()
+        self._held: dict[str, int] = {}           # cancel() 로 막은 job → 막은 횟수 (release 까지 새 요청을 받지 않는다)
+        self._cancel_current = False             # 지금 도는 것을 cancel() 이 멈췄다 → 실패로 기억·알림 안 함
         self._thread: threading.Thread | None = None
         self._stopped = False
 
@@ -58,6 +60,8 @@ class CutAudio:
         with self._cv:
             if self._stopped or (job_id, key) in self._failed:
                 return "failed"
+            if job_id in self._held:
+                return "failed"   # 분석·저장 중 — 기억하지 않으니 끝난 뒤 요청은 다시 만든다
             if self._current == (job_id, key):
                 self._pending.pop(job_id, None)   # 도는 것이 최신이면 대기 중인 옛 요청은 필요 없다
                 return "pending"
@@ -72,9 +76,33 @@ class CutAudio:
         """run 콜백이 프로세스를 띄우면 부른다. 이미 멈추는 중이면 바로 멈춘다."""
         with self._cv:
             self._running = handle
-            stopped = self._stopped
-        if stopped:
+            stop = self._stopped or self._cancel_current
+        if stop:
             handle.cancel()
+
+    def cancel(self, job_id: str, timeout: float = 10.0) -> bool:
+        """분석·저장 전에 부른다: 그 job 의 대기 요청을 버리고 돌고 있으면 멈춘 뒤 끝날 때까지(최대 timeout 초) 기다린다.
+        release(job_id) 까지 그 job 의 새 요청은 받지 않는다 (같은 영상 잠금을 놓고 다투지 않게). 멈췄으면 True."""
+        with self._cv:
+            self._held[job_id] = self._held.get(job_id, 0) + 1
+            self._pending.pop(job_id, None)
+            handle = None
+            if self._current is not None and self._current[0] == job_id:
+                self._cancel_current = True
+                handle = self._running
+        if handle is not None:
+            handle.cancel()
+        with self._cv:
+            return self._cv.wait_for(lambda: self._current is None or self._current[0] != job_id, timeout)
+
+    def release(self, job_id: str) -> None:
+        """cancel() 로 막은 job 을 다시 받는다."""
+        with self._cv:
+            n = self._held.get(job_id, 0) - 1
+            if n > 0:
+                self._held[job_id] = n
+            else:
+                self._held.pop(job_id, None)
 
     def wait_idle(self, timeout: float | None = None) -> bool:
         """대기·실행 중인 것이 없어질 때까지 기다린다 (테스트용)."""
@@ -100,11 +128,13 @@ class CutAudio:
                 job_id = next(iter(self._pending))
                 key, cmd, out, prepare = self._pending.pop(job_id)
                 self._current = (job_id, key)
+                self._cancel_current = False
             res = self._build(cmd, out, prepare)
             with self._cv:
                 self._running = None
-                stopped = self._stopped
-                remember = not res.ok and res.error != "cancelled" and not res.error.startswith(BUSY_ERROR)
+                stopped = self._stopped or self._cancel_current
+                remember = (not stopped and not res.ok and res.error != "cancelled"
+                            and not res.error.startswith(BUSY_ERROR))
                 if remember:
                     self._failed.add((job_id, key))
             if not stopped:
@@ -118,9 +148,10 @@ class CutAudio:
                         log.exception("미리보기 소리 알림 실패")
             with self._cv:
                 self._current = None
+                self._cancel_current = False
                 self._cv.notify_all()
-            if stopped:
-                return
+                if self._stopped:
+                    return
 
     def _build(self, cmd: list[str], out: Path, prepare) -> RunResult:
         try:

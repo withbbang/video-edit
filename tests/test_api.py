@@ -664,6 +664,77 @@ def test_make_execute_runs_and_throttles_progress(tmp_path, monkeypatch):
     assert prog[0] == ("set_progress", job.id, 0.0)
 
 
+class FakeCutAudio:
+    def __init__(self, log):
+        self.log = log
+
+    def cancel(self, job_id, timeout):
+        self.log.append(("cancel", job_id, timeout))
+        return True
+
+    def release(self, job_id):
+        self.log.append(("release", job_id))
+
+
+@pytest.mark.parametrize("kind", [ANALYZE, RENDER])
+def test_make_execute_stops_cut_audio_first(tmp_path, monkeypatch, kind):
+    """분석·저장 전에 그 영상의 미리보기 소리 만들기를 멈추고 기다린 뒤, 끝나면 다시 받는다."""
+    store = Store(tmp_path / "s.json")
+    store.settings["save_dir"] = str(tmp_path / "saved")
+    job = _job(tmp_path, store)
+    order = []
+
+    def fake_run(cmd, weights, on_progress, env=None, on_start=None):
+        order.append(("run",))
+        return RunResult(False, "x")
+
+    monkeypatch.setattr(api_mod.runner, "run", fake_run)
+    execute = make_execute(store, MANIFEST, tmp_path / "data", lambda: FakeQueue(), lambda: FakeCutAudio(order))
+    execute(job, kind, lambda h: None)
+    assert order == [("cancel", job.id, api_mod.CUT_AUDIO_WAIT), ("run",), ("release", job.id)]
+
+
+def test_make_execute_waits_for_real_cut_audio(tmp_path, monkeypatch):
+    """실제 CutAudio: 돌던 그 영상의 소리 만들기가 멈춘 뒤에야 분석이 돈다. 대기 요청은 버려지고 다른 영상 것은 그대로."""
+    from app import preview
+    store = Store(tmp_path / "s.json")
+    job = _job(tmp_path, store)
+    events, gates, running = [], {}, threading.Event()
+    ca = None
+
+    def cut_run(cmd):
+        jid = cmd[0]
+        events.append(("cut-start", jid))
+        gate = gates.setdefault(jid, threading.Event())
+
+        class H:
+            def cancel(self):
+                gate.set()
+
+        ca.started(H())
+        running.set()
+        gate.wait(5)
+        events.append(("cut-end", jid))
+        return RunResult(False, "cancelled")
+
+    ca = preview.CutAudio(cut_run, lambda j: events.append(("ready", j)))
+    o = tmp_path / "audio_cut.aaaaaaaaaaaaaaaa.m4a"
+    ca.request(job.id, "a" * 16, [job.id, str(o)], o)
+    assert running.wait(5)
+    ca.request(job.id, "b" * 16, [job.id, str(o)], o)   # 돌던 것 뒤에 대기 → 버려져야 함
+
+    def fake_run(cmd, weights, on_progress, env=None, on_start=None):
+        events.append(("run",))
+        return RunResult(True)
+
+    monkeypatch.setattr(api_mod.runner, "run", fake_run)
+    execute = make_execute(store, MANIFEST, tmp_path / "data", lambda: FakeQueue(), lambda: ca)
+    assert execute(job, ANALYZE, lambda h: None) == RunResult(True)
+    assert ca.wait_idle(5)
+    assert events == [("cut-start", job.id), ("cut-end", job.id), ("run",)]
+    ca.shutdown()
+
+
 def _lock_free(lock) -> bool:
     """다른 스레드에서 lock 을 잡을 수 있으면 True (지금 스레드가 쥐고 있지 않음)."""
     got = []

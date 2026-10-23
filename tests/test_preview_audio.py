@@ -201,3 +201,109 @@ def test_preview_audio_command(tmp_path, monkeypatch):
                          "--out", str(jd / "out"), "--work-root", str(jd / "work"), "--model"]
     assert cmd[-4:] == ["--denoise-level", "70", "--render-loudnorm", "off"]
     assert "--ctc-model" in cmd and "--device" in cmd
+
+
+class CancellableRun:
+    """job 마다 gate 를 기다린다. started 로 handle 을 알리고, cancel 되면 "cancelled"."""
+
+    def __init__(self):
+        self.ca = None
+        self.calls = []
+        self.gates: dict[str, threading.Event] = {}
+        self.running = threading.Event()
+        self.stopped_at = []
+
+    def __call__(self, cmd):
+        job = cmd[0]
+        self.calls.append(job)
+        gate = self.gates.setdefault(job, threading.Event())
+        state = {"cancelled": False}
+
+        class Handle:
+            def cancel(h):
+                state["cancelled"] = True
+                gate.set()
+
+        self.ca.started(Handle())
+        self.running.set()
+        gate.wait(WAIT)
+        self.stopped_at.append(job)
+        if state["cancelled"]:
+            return RunResult(False, "cancelled")
+        _make(Path(cmd[-1]))
+        return RunResult(True)
+
+
+def _cancellable():
+    run, ready = CancellableRun(), Ready()
+    ca = preview.CutAudio(run, ready)
+    run.ca = ca
+    return ca, run, ready
+
+
+def test_cancel_drops_pending_build_for_job(tmp_path):
+    ca, run, ready = _cancellable()
+    o2, o1 = tmp_path / "audio_cut.bbbbbbbbbbbbbbbb.m4a", tmp_path / "audio_cut.aaaaaaaaaaaaaaaa.m4a"
+    ca.request("j2", "b" * 16, ["j2", str(o2)], o2)
+    assert run.running.wait(WAIT)
+    ca.request("j1", "a" * 16, ["j1", str(o1)], o1)     # j2 뒤에서 대기
+    assert ca.cancel("j1", 1.0) is True
+    run.gates["j2"].set()
+    _wait_idle(ca)
+    assert run.calls == ["j2"] and ready == ["j2"]
+    # 막힌 동안 새 요청은 받지 않고, 실패로 기억하지도 않는다
+    assert ca.request("j1", "a" * 16, ["j1", str(o1)], o1) == "failed"
+    ca.release("j1")
+    run.gates["j1"] = threading.Event()
+    run.gates["j1"].set()
+    assert ca.request("j1", "a" * 16, ["j1", str(o1)], o1) == "pending"
+    _wait_idle(ca)
+    assert run.calls == ["j2", "j1"]
+    ca.shutdown()
+
+
+def test_cancel_stops_running_build_and_waits(tmp_path):
+    ca, run, ready = _cancellable()
+    o1 = tmp_path / "audio_cut.aaaaaaaaaaaaaaaa.m4a"
+    ca.request("j1", "a" * 16, ["j1", str(o1)], o1)
+    assert run.running.wait(WAIT)
+    assert ca.cancel("j1", WAIT) is True
+    assert run.stopped_at == ["j1"]          # 돌아올 때는 이미 멈춰 있다
+    _wait_idle(ca)
+    assert ready == []                       # 멈춘 것은 알리지 않는다
+    ca.release("j1")
+    run.gates["j1"] = threading.Event()
+    run.gates["j1"].set()
+    assert ca.request("j1", "a" * 16, ["j1", str(o1)], o1) == "pending"   # 실패로 기억 안 함
+    _wait_idle(ca)
+    assert ready == ["j1"]
+    ca.shutdown()
+
+
+def test_cancel_leaves_other_jobs_alone(tmp_path):
+    ca, run, ready = _cancellable()
+    o2 = tmp_path / "audio_cut.bbbbbbbbbbbbbbbb.m4a"
+    ca.request("j2", "b" * 16, ["j2", str(o2)], o2)
+    assert run.running.wait(WAIT)
+    assert ca.cancel("j1", 1.0) is True
+    assert run.stopped_at == []              # j2 는 계속 돈다
+    run.gates["j2"].set()
+    _wait_idle(ca)
+    assert ready == ["j2"] and preview.is_ready(o2)
+    ca.release("j1")
+    ca.shutdown()
+
+
+def test_cancel_times_out(tmp_path):
+    gate = threading.Event()
+    run, ready = FakeRun(gate=gate), Ready()     # handle 을 알리지 않는 run — 멈출 수 없다
+    ca = preview.CutAudio(run, ready)
+    o1 = tmp_path / "audio_cut.aaaaaaaaaaaaaaaa.m4a"
+    ca.request("j1", "a" * 16, ["j1", str(o1)], o1)
+    assert run.started.wait(WAIT)
+    assert ca.cancel("j1", 0.1) is False
+    gate.set()
+    _wait_idle(ca)
+    assert ready == []
+    ca.release("j1")
+    ca.shutdown()

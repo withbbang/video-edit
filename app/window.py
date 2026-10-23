@@ -243,7 +243,9 @@ def build(data_root: Path, push, dialogs, preview_base: str):
     prune_job_dirs(store, data_root / "jobs")   # 목록에서 빠진 영상의 캐시를 지운다
     manifest = models.load_manifest()
     queue = None
-    execute = api_mod.make_execute(store, manifest, data_root, lambda: queue)
+    api = None
+    execute = api_mod.make_execute(store, manifest, data_root, lambda: queue,
+                                   lambda: api._cut_audio if api is not None else None)
     queue = Queue(store, execute, api_mod.make_on_change(push))
     api = api_mod.Api(store, queue, push, dialogs, manifest=manifest, data_root=data_root,
                       preview_base=preview_base)
