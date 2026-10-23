@@ -32,6 +32,8 @@ FILE_TYPES = ("영상과 오디오 (" + ";".join(f"*{e}" for e in sorted(api_mod
 # ---------------------------------------------------------------------------
 # 미리보기 사본 서버: <data_root>/jobs/<id>/ 의 preview.mp4(예전 방식)와 preview/ 폴더의 정해진 파일만 내보낸다
 # ---------------------------------------------------------------------------
+# 미리보기를 fetch 로 받아도 되는 화면 출처: file://("null") 이나 pywebview 가 화면을 띄우는 자기 루프백 서버(포트는 매번 다름)
+_UI_ORIGIN = re.compile(r"null|http://(?:127\.0\.0\.1|localhost):[0-9]{1,5}")
 _PREVIEW_PATH = re.compile(
     r"/([0-9a-f]{12})/(preview\.mp4|preview/(?:video\.mp4|video\.index\.json|audio_full\.m4a|audio_full\.index\.json"
     r"|audio_cut\.[0-9a-f]{16}\.m4a|audio_cut\.[0-9a-f]{16}\.index\.json))")
@@ -81,20 +83,23 @@ def _handler(root: Path):
         def do_HEAD(self):  # noqa: N802
             self._serve(body=False)
 
-        def _null_origin(self) -> bool:
-            # 화면은 file:// 에서 떠서 Origin 이 "null" 이다. 다른 Origin 엔 CORS 를 열지 않는다 ("*" 는 안 씀)
-            return self.headers.get("Origin") == "null"
+        def _ui_origin(self) -> str | None:
+            # pywebview 는 화면을 자기 루프백 서버(임의 포트)에서 띄우고, file:// 이면 "null" 이다.
+            # 그 출처만 그대로 돌려 준다 ("*" 는 안 씀). 다른 Origin 엔 CORS 를 열지 않는다
+            origin = self.headers.get("Origin")
+            return origin if origin and _UI_ORIGIN.fullmatch(origin) else None
 
         def end_headers(self):
             # 오류 응답(send_error)까지 모든 응답에 붙인다 — MediaSource 재생기가 fetch + Range 로 조각을 받는다
-            if self._null_origin():
-                self.send_header("Access-Control-Allow-Origin", "null")
+            origin = self._ui_origin()
+            if origin:
+                self.send_header("Access-Control-Allow-Origin", origin)
                 self.send_header("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges")
                 self.send_header("Vary", "Origin")
             super().end_headers()
 
         def do_OPTIONS(self):  # noqa: N802 — Range 머리 때문에 오는 사전 요청
-            if not self._host_ok() or not self._null_origin():
+            if not self._host_ok() or not self._ui_origin():
                 self.send_error(403)
                 return
             if not _PREVIEW_PATH.fullmatch(urllib.parse.urlsplit(self.path).path):
