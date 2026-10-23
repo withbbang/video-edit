@@ -302,6 +302,18 @@ Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\hub\models--mob
 YTEDIT_E2E_MODELS=<모델 받은 데이터 폴더> .venv/bin/python -m pytest tests/test_e2e_app.py   # e2e
 ```
 
+### 테스트용으로 앱 켜기
+
+```bash
+.venv/bin/python -m app                                   # 설치한 앱과 같은 데이터 폴더(모델·설정·대기열)를 씀
+YTEDIT_DEBUG=1 .venv/bin/python -m app                    # 웹 개발자 도구(우클릭 → 검사) 켜기
+YTEDIT_DATA_DIR=/tmp/ytedit-test .venv/bin/python -m app  # 따로 떼어 놓은 데이터 폴더로 (첫 실행처럼 모델부터 받음)
+```
+
+`YTEDIT_DATA_DIR` 를 안 주면 맥 `~/Library/Application Support/youtube-edit`,
+윈도우 `%APPDATA%\youtube-edit` 를 설치한 앱과 같이 씁니다. 윈도우 PowerShell 에선
+`$env:YTEDIT_DEBUG=1; .venv\Scripts\python -m app` 처럼 환경 변수를 먼저 설정합니다.
+
 테스트는 CI 에서 윈도우로도 돕니다. 경로는 `as_posix()` 로, 출력은 `\r\n` 을 맞춰 비교하고,
 `sys.platform` 에 따라 갈리는 코드는 테스트에서 플랫폼을 고정합니다. CI 의 pytest 단계엔 ffmpeg 가 없습니다.
 
