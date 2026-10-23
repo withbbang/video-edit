@@ -134,6 +134,49 @@ def test_preview_accepts_localhost_name(served):
     assert r.status == 200 and body == data
 
 
+# 화면은 file:// (Origin null) 에서 뜨고, MediaSource 재생기는 fetch + Range 로 조각을 받는다 → CORS 필요
+def test_preview_cors_for_null_origin(preview_folder):
+    r, body = _req(preview_folder, "/0123456789ab/preview/video.mp4", headers={"Origin": "null", "Range": "bytes=1-2"})
+    assert r.status == 206 and body == b"id"
+    assert r.getheader("Access-Control-Allow-Origin") == "null"
+    assert r.getheader("Access-Control-Expose-Headers") == "Content-Range, Content-Length, Accept-Ranges"
+    assert r.getheader("Vary") == "Origin"
+    r, _ = _req(preview_folder, "/0123456789ab/preview/missing.mp4", headers={"Origin": "null"})
+    assert r.status == 404 and r.getheader("Access-Control-Allow-Origin") == "null"
+
+
+@pytest.mark.parametrize("origin", ["https://evil.example", "http://127.0.0.1", "*", None])
+def test_preview_no_cors_for_other_origins(preview_folder, origin):
+    headers = {"Range": "bytes=1-2"} | ({"Origin": origin} if origin else {})
+    r, _ = _req(preview_folder, "/0123456789ab/preview/video.mp4", headers=headers)
+    assert r.status == 206
+    assert r.getheader("Access-Control-Allow-Origin") is None
+    assert r.getheader("Access-Control-Expose-Headers") is None
+
+
+def test_preview_preflight(preview_folder):
+    r, body = _req(preview_folder, "/0123456789ab/preview/video.mp4", method="OPTIONS",
+                   headers={"Origin": "null", "Access-Control-Request-Method": "GET",
+                            "Access-Control-Request-Headers": "range"})
+    assert r.status == 204 and body == b""
+    assert r.getheader("Access-Control-Allow-Origin") == "null"
+    assert r.getheader("Access-Control-Allow-Methods") == "GET, HEAD"
+    assert r.getheader("Access-Control-Allow-Headers") == "Range"
+    assert r.getheader("Access-Control-Max-Age") == "600"
+    assert r.getheader("Content-Length") == "0"
+
+
+def test_preview_preflight_rejects(preview_folder):
+    r, _ = _req(preview_folder, "/0123456789ab/preview/video.mp4", method="OPTIONS",
+                headers={"Host": "evil.example:80", "Origin": "null"}, skip_host=True)
+    assert r.status == 403
+    r, _ = _req(preview_folder, "/0123456789ab/preview/../state.json", method="OPTIONS", headers={"Origin": "null"})
+    assert r.status == 404
+    r, _ = _req(preview_folder, "/0123456789ab/preview/video.mp4", method="OPTIONS",
+                headers={"Origin": "https://evil.example"})
+    assert r.status == 403 and r.getheader("Access-Control-Allow-Origin") is None
+
+
 def test_parse_range():
     assert window.parse_range(None, 10) is None
     assert window.parse_range("bytes=0-4", 10) == (0, 4)

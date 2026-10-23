@@ -81,6 +81,32 @@ def _handler(root: Path):
         def do_HEAD(self):  # noqa: N802
             self._serve(body=False)
 
+        def _null_origin(self) -> bool:
+            # 화면은 file:// 에서 떠서 Origin 이 "null" 이다. 다른 Origin 엔 CORS 를 열지 않는다 ("*" 는 안 씀)
+            return self.headers.get("Origin") == "null"
+
+        def end_headers(self):
+            # 오류 응답(send_error)까지 모든 응답에 붙인다 — MediaSource 재생기가 fetch + Range 로 조각을 받는다
+            if self._null_origin():
+                self.send_header("Access-Control-Allow-Origin", "null")
+                self.send_header("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges")
+                self.send_header("Vary", "Origin")
+            super().end_headers()
+
+        def do_OPTIONS(self):  # noqa: N802 — Range 머리 때문에 오는 사전 요청
+            if not self._host_ok() or not self._null_origin():
+                self.send_error(403)
+                return
+            if not _PREVIEW_PATH.fullmatch(urllib.parse.urlsplit(self.path).path):
+                self.send_error(404)
+                return
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD")
+            self.send_header("Access-Control-Allow-Headers", "Range")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def _file(self) -> Path | None:
             path = urllib.parse.urlsplit(self.path).path
             m = _PREVIEW_PATH.fullmatch(path)
