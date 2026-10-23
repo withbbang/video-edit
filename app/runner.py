@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import paths
+from . import models, paths
 from .options import analysis_args, render_args
 from .paths import ModelPaths
 from .progress import Tracker
@@ -31,7 +31,11 @@ def pipeline_cmd() -> list[str]:
 
 
 def _tail(model: ModelPaths, device: str) -> list[str]:
+    """분석·저장·미리보기 소리가 함께 쓰는 모델·장치·사전 옵션. 전사 캐시 키(모델·compute type)가
+    셋 다 같아야 하므로 여기 한 곳에서만 만든다."""
     args = ["--model", model.whisper, "--ctc-model", model.ctc, "--device", device]
+    if device == "cuda":
+        args += ["--compute-type", models.CUDA_COMPUTE_TYPE]
     fillers = paths.data_dir() / "fillers.json"
     if fillers.is_file():
         args += ["--fillers", str(fillers)]

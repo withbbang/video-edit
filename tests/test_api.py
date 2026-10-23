@@ -637,9 +637,29 @@ def test_pipeline_command_cuda_adds_compute_type(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "pipeline_env", lambda m, r, s: {"YTEDIT_CUDA_DIR": "/c"})
     for kind in (ANALYZE, RENDER):
         cmd, _, env = pipeline_command(job, kind, store, MANIFEST, tmp_path / "data")
-        assert cmd[-2:] == ["--compute-type", models.CUDA_COMPUTE_TYPE]
+        assert cmd[cmd.index("--compute-type") + 1] == models.CUDA_COMPUTE_TYPE
+        assert cmd.count("--compute-type") == 1
         assert cmd[cmd.index("--device") + 1] == "cuda"
         assert env == {"YTEDIT_CUDA_DIR": "/c"}
+
+
+def test_preview_audio_command_shares_model_tail_with_analyze(tmp_path, monkeypatch):
+    """미리보기 소리도 분석과 같은 모델·장치·compute type 을 넘겨야 전사 캐시 키가 맞는다."""
+    store = Store(tmp_path / "s.json")
+    job = _job(tmp_path, store)
+    monkeypatch.setattr(models, "pipeline_env", lambda m, r, s: {})
+    for device in ("cuda", "auto"):
+        monkeypatch.setattr(models, "device", lambda settings, manifest: device)
+        cmd, _, _ = pipeline_command(job, ANALYZE, store, MANIFEST, tmp_path / "data")
+        pcmd = api_mod.runner.preview_audio_command(job, models.paths(MANIFEST, tmp_path / "data"), device,
+                                                    tmp_path / "c.json", tmp_path / "o.m4a")
+
+        def opt(c, name):
+            return c[c.index(name) + 1] if name in c else None
+
+        for name in ("--model", "--ctc-model", "--device", "--compute-type", "--fillers"):
+            assert opt(pcmd, name) == opt(cmd, name), name
+        assert opt(pcmd, "--compute-type") == (models.CUDA_COMPUTE_TYPE if device == "cuda" else None)
 
 
 def test_make_execute_runs_and_throttles_progress(tmp_path, monkeypatch):

@@ -142,8 +142,6 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
         cmd, weights = runner.render_command(job, model, device, media, save_cuts(job, lock), save_subs_edits(job, lock)), RENDER_WEIGHTS
     else:
         raise ValueError(f"알 수 없는 작업 종류: {kind}")
-    if device == "cuda":
-        cmd += ["--compute-type", models.CUDA_COMPUTE_TYPE]
     return cmd, weights, models.pipeline_env(manifest, data_root, store.settings)
 
 
