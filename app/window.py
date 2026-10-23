@@ -320,7 +320,7 @@ def run(debug: bool = False) -> None:
     def stop() -> None:
         # 창을 닫으면 돌던 파이프라인(과 ffmpeg)을 멈추고 그 영상은 대기로 저장한다. 여러 번 불려도 된다.
         bridge.close()
-        api.shutdown()
+        api._shutdown()
         if not queue.shutdown(SHUTDOWN_WAIT):
             log.warning("처리를 %s초 안에 멈추지 못했습니다", SHUTDOWN_WAIT)
 

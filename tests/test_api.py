@@ -427,7 +427,7 @@ def test_get_result_preview_fields_and_pending(tmp_path, monkeypatch):
     assert r["cut_audio"] == _url(job, d, f"audio_cut.{key}.m4a")
     assert r["cut_index"] == _url(job, d, f"audio_cut.{key}.index.json")
     assert len(run.calls) == 1
-    a.shutdown()
+    a._shutdown()
 
 
 def test_remove_job_drops_its_queued_cut_audio(tmp_path, monkeypatch):
@@ -448,7 +448,7 @@ def test_remove_job_drops_its_queued_cut_audio(tmp_path, monkeypatch):
     run.gate.set()
     assert a._cut_audio.wait_idle(5)
     assert len(run.calls) == 1 and str(j1.src) in run.calls[0]
-    a.shutdown()
+    a._shutdown()
 
 
 def test_get_result_skips_cut_audio_while_processing(tmp_path):
@@ -461,7 +461,7 @@ def test_get_result_skips_cut_audio_while_processing(tmp_path):
     time.sleep(0.05)
     assert run.calls == []
     assert not (paths.job_dir(Path(job.src)) / "out" / "a.preview.cuts.json").exists()
-    a.shutdown()
+    a._shutdown()
 
 
 def test_get_result_audio_only(tmp_path):
@@ -472,7 +472,7 @@ def test_get_result_audio_only(tmp_path):
     p = a.get_result(job.id)["preview"]
     assert p["video"] is None and p["video_index"] is None
     assert p["audio_full"] == _url(job, d, "audio_full.m4a")
-    a.shutdown()
+    a._shutdown()
 
 
 def test_get_result_old_preview_only(tmp_path):
@@ -485,7 +485,7 @@ def test_get_result_old_preview_only(tmp_path):
     assert r["preview"] is None
     assert r["preview_url"] == f"http://127.0.0.1:9999/jobs/{job.id}/preview.mp4?v={old.stat().st_mtime_ns}"
     assert run.calls == []
-    a.shutdown()
+    a._shutdown()
 
 
 def test_get_result_removes_old_preview_mp4(tmp_path):
@@ -499,7 +499,7 @@ def test_get_result_removes_old_preview_mp4(tmp_path):
     r = a.get_result(job.id)
     assert r["preview"] is not None and r["preview_url"] is None
     assert not old.exists()
-    a.shutdown()
+    a._shutdown()
 
 
 # ---- 설정 --------------------------------------------------------------------
@@ -943,3 +943,8 @@ def test_install_update_asks_when_busy(tmp_path, monkeypatch, status):
     assert a.install_update(True) == {"started": True}
     a._update_thread.join(5)
     assert order == ["shutdown", "open"]
+
+
+def test_shutdown_is_not_exposed_to_page():
+    """pywebview 는 Api 의 공개 메서드를 모두 화면 JS 에 내보낸다 — 종료는 창(window.stop)만 부른다."""
+    assert not hasattr(Api, "shutdown") and callable(Api._shutdown)

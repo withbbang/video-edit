@@ -264,7 +264,7 @@ class Api:
         env = models.pipeline_env(self._manifest, self._data_root, settings)
         return runner.run(cmd, {"preview": 1.0}, lambda p: None, env=env, on_start=self._cut_audio.started)
 
-    def shutdown(self) -> None:
+    def _shutdown(self) -> None:
         """창을 닫을 때: 미리보기 소리를 만들던 프로세스를 멈춘다."""
         self._cut_audio.shutdown()
 
