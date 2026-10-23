@@ -76,28 +76,28 @@ def test_preview_audio_swap_reuses_video(tmp_path):
     synth_video(src)
     work = tmp_path / "work"
     work.mkdir()
-    out = tmp_path / "job" / "preview.mp4"
+    out = tmp_path / "job" / "preview"
     info = pipeline.ffprobe(src)
 
     wav_a, key_a = pipeline.render_audio_for(src, work, info, "none", False, False, denoise_level=0)
     pipeline.make_preview(src, wav_a, key_a, info, out, work, False, False)
-    video = work / "preview_video.mp4"
-    assert video.exists() and out.exists()
-    v1, p1 = video.stat(), out.stat()
+    video, audio = out / "video.mp4", out / "audio_full.m4a"
+    assert video.exists() and audio.exists()
+    v1, p1 = video.stat(), audio.stat()
 
     # 같은 소리로 다시 → 아무것도 안 씀
     pipeline.make_preview(src, wav_a, key_a, info, out, work, False, False)
-    assert out.stat().st_ino == p1.st_ino and out.stat().st_mtime_ns == p1.st_mtime_ns
+    assert audio.stat().st_ino == p1.st_ino and audio.stat().st_mtime_ns == p1.st_mtime_ns
 
     wav_b, key_b = pipeline.render_audio_for(src, work, info, "none", False, False, denoise_level=30)
     assert key_b != key_a
     pipeline.make_preview(src, wav_b, key_b, info, out, work, False, False)
-    v2, p2 = video.stat(), out.stat()
+    v2, p2 = video.stat(), audio.stat()
     assert (v2.st_ino, v2.st_mtime_ns) == (v1.st_ino, v1.st_mtime_ns)   # 영상은 다시 인코딩하지 않음
-    assert (p2.st_ino, p2.st_mtime_ns) != (p1.st_ino, p1.st_mtime_ns)   # 미리보기는 새로 씀
+    assert (p2.st_ino, p2.st_mtime_ns) != (p1.st_ino, p1.st_mtime_ns)   # 소리는 새로 씀
     probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
-                            "-of", "csv=p=0", out], capture_output=True, text=True, check=True).stdout.split()
-    assert sorted(probe) == ["audio", "video"]
+                            "-of", "csv=p=0", audio], capture_output=True, text=True, check=True).stdout.split()
+    assert probe == ["audio"]
 
 
 @needs_ffmpeg

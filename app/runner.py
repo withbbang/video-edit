@@ -42,7 +42,7 @@ def analyze_command(job: Job, model: ModelPaths, device: str) -> list[str]:
     jd = paths.job_dir(Path(job.src))
     return (pipeline_cmd() + [job.src, "--review", "--progress-json",
                               "--out", str(jd / "out"), "--work-root", str(jd / "work"),
-                              "--preview", str(jd / "preview.mp4")]
+                              "--preview", str(jd / "preview")]
             + _tail(model, device) + analysis_args(job.options))
 
 

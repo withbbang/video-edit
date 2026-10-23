@@ -67,6 +67,7 @@ def test_command_unicode_path(tmp_path):
     job = _job(tmp_path)
     cmd = runner.analyze_command(job, ModelPaths("/m/w", "/m/c"), "cpu")
     assert job.src in cmd and "--review" in cmd and "--preview" in cmd
+    assert cmd[cmd.index("--preview") + 1] == str(paths.job_dir(Path(job.src)) / "preview")
     assert all(isinstance(c, str) for c in cmd)
 
 

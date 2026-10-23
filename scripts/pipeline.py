@@ -1563,83 +1563,100 @@ def write_index(media: Path, extra: dict | None = None) -> Path:
     return path
 
 
-def make_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out: Path, work: Path,
+PREVIEW_VERSION = 3
+# 미리보기 조각 컨테이너: 앱이 MediaSource 에 조각 단위로 넣을 수 있게 fragmented MP4
+PREVIEW_MOVFLAGS = ["-movflags", "empty_moov+default_base_moof", "-frag_duration", "500000"]
+PREVIEW_AUDIO_ARGS = ["-c:a", "aac", "-aac_coder", "fast", "-b:a", "128k", "-map_chapters", "-1", *PREVIEW_MOVFLAGS]
+
+
+def make_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out_dir: Path, work: Path,
                  hw: bool, force: bool) -> None:
-    """앱 플레이어용 미리보기 사본. 컷을 적용하지 않은 원본 타임라인 그대로라 앱이 컷 구간을 직접 건너뛴다.
+    """앱 플레이어용 미리보기 폴더. 컷을 적용하지 않은 원본 타임라인 그대로라 앱이 컷 구간을 직접 건너뛴다.
+    video.mp4(소리 없음, 모든 프레임이 기준 프레임인 조각 영상) + audio_full.m4a(전체 소리) 와 각 index.json·meta.json.
     clean_wav 는 미리보기에 넣을 소리 (기본 clean.wav, --denoise-level 이면 그 세기의 렌더 오디오).
-    영상은 소리 없는 사본 work/preview_video.mp4 로 따로 캐시해 두고 소리만 합친다 → 배경 잡음 세기만 바꾸면
-    영상을 다시 인코딩하지 않는다. 원본·소리가 같으면 아무것도 다시 만들지 않는다."""
-    meta = work / "preview.meta.json"
-    key = {"v": 2, "src": source_sig(src), "audio": audio_key, "out": str(out)}
-    if cached_meta(meta, key, [out], force):
-        log(f"미리보기 사본 재사용: {out}")
+    영상과 소리는 따로 캐시한다 → 배경 잡음 세기만 바꾸면 영상을 다시 인코딩하지 않는다.
+    쓰는 순서: *.part.* → 완성본 → index → meta (meta 가 있으면 한 벌이 다 만들어진 것)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if info["has_video"]:
+        make_preview_video(src, info, out_dir, force)
+    else:
+        for n in ("video.mp4", "video.index.json", "video.meta.json"):
+            (out_dir / n).unlink(missing_ok=True)
+    audio, meta = out_dir / "audio_full.m4a", out_dir / "audio_full.meta.json"
+    key = {"v": PREVIEW_VERSION, "src": source_sig(src), "audio": audio_key}
+    if cached_meta(meta, key, [audio, audio.with_suffix(".index.json")], force):
+        log(f"미리보기 소리 재사용: {audio}")
         progress("preview", 1.0)
         return
-    out.parent.mkdir(parents=True, exist_ok=True)
     meta.unlink(missing_ok=True)
-    tmp = out.with_name(out.stem + ".part" + out.suffix)  # 중간에 끊긴 파일이 완성본으로 보이지 않게
-    base = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
-    audio = ["-c:a", "aac", "-b:a", "128k", "-map_chapters", "-1", "-movflags", "+faststart"]
-    log(f"미리보기 사본 만들기: {out}")
-    if not info["has_video"]:
-        ffmpeg_with_progress([*base, "-i", clean_wav, "-map", "0:a", *audio, tmp], info["duration"], "preview")
-    else:
-        video = make_preview_video(src, info, work, hw, force)
-        try:
-            ffmpeg_with_progress([*base, "-i", video, "-i", clean_wav, "-map", "0:v:0", "-map", "1:a",
-                                  "-c:v", "copy", *audio, tmp], info["duration"], "preview", span=(0.9, 1.0))
-        except subprocess.CalledProcessError:
-            tmp.unlink(missing_ok=True)
-            raise
-    os.replace(tmp, out)
+    tmp = audio.with_name("audio_full.part.m4a")  # 중간에 끊긴 파일이 완성본으로 보이지 않게
+    log(f"미리보기 소리 만들기: {audio}")
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", clean_wav, "-map", "0:a",
+           *PREVIEW_AUDIO_ARGS, tmp]
+    try:
+        ffmpeg_with_progress(cmd, info["duration"], "preview", span=(0.9, 1.0) if info["has_video"] else (0.0, 1.0))
+    except subprocess.CalledProcessError:
+        tmp.unlink(missing_ok=True)
+        raise
+    os.replace(tmp, audio)
+    write_index(audio)
     meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
 
 
-def make_preview_video(src: Path, info: dict, work: Path, hw: bool, force: bool) -> Path:
-    """미리보기용 소리 없는 영상 사본 (긴 변 1280 이하, H.264). 원본 서명으로 캐시."""
-    video, meta = work / "preview_video.mp4", work / "preview_video.meta.json"
-    key = {"v": 1, "src": source_sig(src)}
-    if cached_meta(meta, key, [video], force):
+def make_preview_video(src: Path, info: dict, out_dir: Path, force: bool) -> Path:
+    """미리보기용 소리 없는 영상 (긴 변 960 이하, H.264, 모든 프레임이 기준 프레임인 fMP4). 원본 서명으로 캐시.
+    기준 프레임뿐이라 아무 프레임에서나 디코딩을 시작할 수 있다 (하드웨어 인코더는 -g 1 에서 오히려 느려 쓰지 않음)."""
+    video, meta = out_dir / "video.mp4", out_dir / "video.meta.json"
+    key = {"v": PREVIEW_VERSION, "src": source_sig(src)}
+    if cached_meta(meta, key, [video, video.with_suffix(".index.json")], force):
         log("미리보기 영상 재사용 (소리만 바꿔 끼움)")
         progress("preview", 0.9)
         return video
     meta.unlink(missing_ok=True)
-    tmp = video.with_name("preview_video.part.mp4")
-    base = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
-    # 긴 변 1280 이하, 짝수 크기. 회전 메타데이터는 ffmpeg 가 먼저 적용하므로 식으로 계산한다
+    tmp = video.with_name("video.part.mp4")
+    # 긴 변 960 이하, 짝수 크기. 회전 메타데이터는 ffmpeg 가 먼저 적용하므로 식으로 계산한다
     vf = ("setpts=PTS-STARTPTS,"
-          "scale=w='if(gte(iw,ih),trunc(min(1280,iw)/2)*2,-2)':h='if(gte(iw,ih),-2,trunc(min(1280,ih)/2)*2)'")
-    encoders = run(["ffmpeg", "-hide_banner", "-encoders"], quiet=True).stdout
-    choices = []
-    if hw and re.search(r"\sh264_videotoolbox\s", encoders):
-        choices.append(["-c:v", "h264_videotoolbox", "-b:v", "3M", "-allow_sw", "1"])
-    choices.append(["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"])
-    for i, venc in enumerate(choices):
-        cmd = [*base, "-i", src, "-map", "0:v:0", "-an", "-vf", vf, *venc, "-pix_fmt", "yuv420p",
-               "-map_chapters", "-1", tmp]
-        try:
-            ffmpeg_with_progress(cmd, info["duration"], "preview", span=(0.0, 0.9))
-            break
-        except subprocess.CalledProcessError:
-            if i == len(choices) - 1:
-                tmp.unlink(missing_ok=True)
-                raise
-            log("미리보기 하드웨어 인코딩 실패 → libx264 로 다시 만듭니다")
+          "scale=w='if(gte(iw,ih),trunc(min(960,iw)/2)*2,-2)':h='if(gte(iw,ih),-2,trunc(min(960,ih)/2)*2)'")
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-map", "0:v:0", "-an", "-vf", vf,
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-g", "1", "-bf", "0", "-pix_fmt", "yuv420p",
+           "-map_chapters", "-1", *PREVIEW_MOVFLAGS, tmp]
+    try:
+        ffmpeg_with_progress(cmd, info["duration"], "preview", span=(0.0, 0.9))
+    except subprocess.CalledProcessError:
+        tmp.unlink(missing_ok=True)
+        raise
     os.replace(tmp, video)
+    # 한 프레임의 길이 = 만든 파일의 실제 프레임 속도 (앱이 appendWindowEnd 에 더한다)
+    rate = _frac(run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate",
+                      "-of", "csv=p=0", video], quiet=True).stdout.strip())
+    write_index(video, {"frame": float(1 / rate) if rate else 1 / 30})
     meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
     return video
 
 
-def try_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out: Path, work: Path,
+def preview_audio_source(args: argparse.Namespace, src: Path, work: Path, info: dict, clean_wav: Path,
+                         audio_key: dict) -> tuple[Path, dict]:
+    """미리보기·잘린 소리에 쓸 오디오 (wav, 캐시 키). 결과 영상과 같은 소리:
+    --denoise-level / --render-denoise / --render-loudnorm 을 적용하고, 분석 오디오와 같으면 그대로 쓴다."""
+    r_denoise, r_loud, r_level = render_audio_args(args)
+    if r_level is None and (r_denoise, r_loud) == (args.denoise, not args.no_loudnorm):
+        return clean_wav, audio_key
+    return render_audio_for(src, work, info, r_denoise, r_loud, args.force, r_level,
+                            analysis=(clean_wav, audio_key))
+
+
+def try_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out_dir: Path, work: Path,
                 hw: bool, force: bool) -> bool:
     """--preview 용. 미리보기는 앱 재생기용 덤이라, 못 만들어도 컷 리스트·전사는 쓸 수 있으니 분석을 실패로
-    만들지 않는다. 실패하면 (옛 것과 섞이지 않게) 미리보기 파일을 지우고 False."""
+    만들지 않는다. 실패하면 (옛 것과 섞이지 않게) 미완성 파일과 결과 파일을 지우고 False."""
     try:
-        make_preview(src, clean_wav, audio_key, info, out, work, hw, force)
+        make_preview(src, clean_wav, audio_key, info, out_dir, work, hw, force)
         return True
     except (subprocess.CalledProcessError, OSError) as e:
         log(f"미리보기를 만들지 못했습니다 (분석 결과는 그대로 씀): {e}")
-        for f in (out, out.with_name(out.stem + ".part" + out.suffix)):
+        for f in [*out_dir.glob("*.part.*"), *(out_dir / n for n in (
+                "video.mp4", "video.index.json", "video.meta.json",
+                "audio_full.m4a", "audio_full.index.json", "audio_full.meta.json"))]:
             f.unlink(missing_ok=True)
         progress("preview", 1.0)
         return False
@@ -1793,7 +1810,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="결과·미리보기 오디오의 배경 잡음 제거 세기 0~100 (데스크톱 앱용, 주면 --render-denoise 대신). "
                          "0 끔, 50 = rnnoise. 분석 오디오는 --denoise 그대로")
     ap.add_argument("--preview", type=Path, default=None,
-                    help="판정 뒤 컷 적용 전 원본 타임라인의 미리보기 사본(긴 변 1280, H.264)을 이 경로에 만듦")
+                    help="판정 뒤 컷 적용 전 원본 타임라인의 미리보기(기준 프레임 조각 영상 video.mp4, 긴 변 960 + 전체 소리 audio_full.m4a)를 이 폴더에 만듦")
     ap.add_argument("--vbitrate-scale", type=float, default=1.0,
                     help="--vbitrate auto 일 때 자동 비트레이트에 곱할 배율 (기본 1.0)")
     ap.add_argument("--subs-edits", type=Path, default=None,
@@ -1918,11 +1935,7 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
             f"총 {removed:.1f}s 제거 예정 (건너뜀 {len(skipped)}건)")
     progress("judge", 1.0)
     if args.preview:
-        p_wav, p_key = clean_wav, audio_key
-        if args.denoise_level is not None:  # 세기를 고르면 미리보기도 결과와 같은 소리로
-            r_denoise, r_loud, r_level = render_audio_args(args)
-            p_wav, p_key = render_audio_for(src, work, info, r_denoise, r_loud, args.force, r_level,
-                                            analysis=(clean_wav, audio_key))
+        p_wav, p_key = preview_audio_source(args, src, work, info, clean_wav, audio_key)
         try_preview(src, p_wav, p_key, info, args.preview.resolve(), work, args.hw == "on", args.force)
     if args.review:
         log(f"--review: 검토표 {out_dir / (stem + '.review.md')} 를 확인한 뒤 "
