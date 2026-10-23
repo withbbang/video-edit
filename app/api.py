@@ -354,6 +354,7 @@ class Api:
     def remove_job(self, job_id: str) -> list[dict]:
         """대기 중이면 빼고, 처리·저장 중이면 멈추고 뺀다 (확인은 화면이 먼저 받는다)."""
         self._queue.cancel(job_id)
+        self._cut_audio.drop(job_id)
         with self._queue.lock:
             self._history.pop(job_id, None)
         return self.list_jobs()

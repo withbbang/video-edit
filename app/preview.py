@@ -95,6 +95,18 @@ class CutAudio:
         with self._cv:
             return self._cv.wait_for(lambda: self._current is None or self._current[0] != job_id, timeout)
 
+    def drop(self, job_id: str) -> None:
+        """영상을 목록에서 뺄 때: 그 job 의 대기 요청을 버리고 돌고 있으면 멈추되 기다리지 않는다. 막아 두지도 않는다."""
+        with self._cv:
+            self._pending.pop(job_id, None)
+            self._failed = {f for f in self._failed if f[0] != job_id}
+            handle = None
+            if self._current is not None and self._current[0] == job_id:
+                self._cancel_current = True
+                handle = self._running
+        if handle is not None:
+            handle.cancel()
+
     def release(self, job_id: str) -> None:
         """cancel() 로 막은 job 을 다시 받는다."""
         with self._cv:

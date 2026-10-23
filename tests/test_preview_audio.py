@@ -320,3 +320,29 @@ def test_cancel_times_out(tmp_path):
     assert ready == []
     ca.release("j1")
     ca.shutdown()
+
+
+def test_drop_forgets_queued_build_without_holding(tmp_path):
+    ca, run, ready = _cancellable()
+    o2, o1 = tmp_path / "audio_cut.bbbbbbbbbbbbbbbb.m4a", tmp_path / "audio_cut.aaaaaaaaaaaaaaaa.m4a"
+    ca.request("j2", "b" * 16, ["j2", str(o2)], o2)
+    assert run.running.wait(WAIT)
+    ca.request("j1", "a" * 16, ["j1", str(o1)], o1)     # j2 뒤에서 대기
+    ca.drop("j1")
+    run.gates["j2"].set()
+    _wait_idle(ca)
+    assert run.calls == ["j2"] and ready == ["j2"]
+    assert "j1" not in ca._held                          # 막아 두지 않는다
+    ca.shutdown()
+
+
+def test_drop_stops_running_build_without_waiting(tmp_path):
+    ca, run, ready = _cancellable()
+    o1 = tmp_path / "audio_cut.aaaaaaaaaaaaaaaa.m4a"
+    ca.request("j1", "a" * 16, ["j1", str(o1)], o1)
+    assert run.running.wait(WAIT)
+    ca.drop("j1")
+    _wait_idle(ca)
+    assert run.stopped_at == ["j1"] and ready == [] and not preview.is_ready(o1)
+    assert "j1" not in ca._held and not ca._failed
+    ca.shutdown()

@@ -430,6 +430,27 @@ def test_get_result_preview_fields_and_pending(tmp_path, monkeypatch):
     a.shutdown()
 
 
+def test_remove_job_drops_its_queued_cut_audio(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_mod.runner, "pipeline_cmd", lambda: ["PY", "pipeline.py"])
+    a, store, push, run = make_gated(tmp_path)
+    j1 = add_job(tmp_path, a, store, status=Status.REVIEW)
+    j2 = add_job(tmp_path, a, store, name="b.mp4", status=Status.REVIEW)
+    write_out(j1, "a.cuts.json", {"cuts": [{"start": 1, "end": 1.5}]})
+    write_out(j2, "b.cuts.json", {"cuts": [{"start": 1, "end": 1.5}]})
+    preview_dir(j1), preview_dir(j2)
+    assert a.get_result(j1.id)["preview"]["pending"] is True
+    for _ in range(250):
+        if run.calls:
+            break
+        time.sleep(0.02)
+    assert a.get_result(j2.id)["preview"]["pending"] is True    # j1 뒤에서 대기
+    a.remove_job(j2.id)
+    run.gate.set()
+    assert a._cut_audio.wait_idle(5)
+    assert len(run.calls) == 1 and str(j1.src) in run.calls[0]
+    a.shutdown()
+
+
 def test_get_result_skips_cut_audio_while_processing(tmp_path):
     a, store, push, run = make_gated(tmp_path)
     job = add_job(tmp_path, a, store, status=Status.PROCESSING)
