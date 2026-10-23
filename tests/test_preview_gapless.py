@@ -176,3 +176,84 @@ def test_make_cut_preview_audio_matches_keeps(tmp_path):
     assert idx["frags"] and idx["codec"] == "mp4a.40.2"
     assert json.loads(out.with_suffix(".index.json").read_text(encoding="utf-8")) == idx
     assert not list(out.parent.glob("*.part.*"))
+
+
+# ---- --preview-cut-audio 는 전사·분석 오디오를 새로 만들지 않는다 -------------------------------
+
+def _no_whisper(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("Whisper 를 불러오면 안 된다")
+    monkeypatch.setattr(pipeline, "load_whisper", boom)
+
+
+def _cut_audio_setup(tmp_path, *, audio=True, transcript="ok"):
+    """작은 합성 영상 + (선택) 분석 오디오 캐시 + 전사 캐시(ok | stale | None) + 컷 목록. argv 를 돌려준다."""
+    src = tmp_path / "s.mp4"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc=size=160x90:rate=30:duration=2",
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", src], check=True)
+    out, work_root = tmp_path / "out", tmp_path / "work"
+    out.mkdir()
+    work = work_root / "s"
+    work.mkdir(parents=True)
+    info = pipeline.ffprobe(src)
+    _, _, audio_key = pipeline.prepare_audio(src, work, info, "none", True, False)
+    if not audio:
+        (work / "audio.meta.json").unlink()
+    tr = {"language": "ko", "duration": 2.0, "model": "large-v3-turbo",
+          "cache_key": {"audio": audio_key, "model": "large-v3-turbo", "compute_type": "int8",
+                        "hotwords": pipeline.load_fillers(pipeline.DEFAULT_FILLERS).get("prompt", "")},
+          "segments": [{"id": 0, "start": 0.1, "end": 1.9, "text": "안녕",
+                        "words": [{"word": " 안녕", "start": 0.1, "end": 1.9, "prob": 0.9}]}]}
+    if transcript == "stale":
+        tr["cache_key"]["compute_type"] = "int8_float16"
+    tr_path = out / "s.transcript.json"
+    if transcript:
+        tr_path.write_text(json.dumps(tr, ensure_ascii=False, indent=1), encoding="utf-8")
+    cuts = out / "s.cuts.json"
+    cuts.write_text(json.dumps({"fps": "30/1", "transcript_sha1": pipeline.transcript_sha1(tr),
+                                "cuts": [{"start": 0.5, "end": 1.0, "word": "어", "reason": "filler",
+                                          "context": "", "seg": 0}]}), encoding="utf-8")
+    m4a = tmp_path / "preview" / "audio_cut.k.m4a"
+    argv = ["pipeline.py", str(src), "--apply-cuts", str(cuts), "--preview-cut-audio", str(m4a),
+            "--out", str(out), "--work-root", str(work_root), "--denoise", "none"]
+    return argv, tr_path, m4a, work
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("transcript", ["stale", None])
+def test_preview_cut_audio_never_transcribes(tmp_path, monkeypatch, transcript):
+    argv, tr_path, m4a, _ = _cut_audio_setup(tmp_path, transcript=transcript)
+    before = tr_path.read_bytes() if transcript else None
+    _no_whisper(monkeypatch)
+    monkeypatch.setattr(pipeline.sys, "argv", argv)
+    with pytest.raises(SystemExit) as e:
+        pipeline.main()
+    assert e.value.code == "오류: 미리보기 소리: 전사 캐시가 없거나 맞지 않습니다"
+    assert (tr_path.read_bytes() if tr_path.exists() else None) == before
+    assert not m4a.exists()
+
+
+@needs_ffmpeg
+def test_preview_cut_audio_needs_analysis_audio_cache(tmp_path, monkeypatch):
+    argv, tr_path, m4a, work = _cut_audio_setup(tmp_path, audio=False)
+    wav = (work / "clean.wav").stat().st_mtime_ns
+    _no_whisper(monkeypatch)
+    monkeypatch.setattr(pipeline.sys, "argv", argv)
+    with pytest.raises(SystemExit) as e:
+        pipeline.main()
+    assert e.value.code == "오류: 미리보기 소리: 분석 오디오 캐시가 없거나 맞지 않습니다"
+    assert (work / "clean.wav").stat().st_mtime_ns == wav and not (work / "audio.meta.json").exists()
+    assert not m4a.exists()
+
+
+@needs_ffmpeg
+def test_preview_cut_audio_uses_caches(tmp_path, monkeypatch):
+    argv, tr_path, m4a, _ = _cut_audio_setup(tmp_path)
+    before = tr_path.read_bytes()
+    _no_whisper(monkeypatch)
+    monkeypatch.setattr(pipeline.sys, "argv", argv + ["--force"])   # --force 여도 캐시만 쓴다
+    pipeline.main()
+    assert m4a.is_file() and m4a.with_suffix(".index.json").is_file()
+    assert tr_path.read_bytes() == before

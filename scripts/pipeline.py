@@ -327,7 +327,8 @@ def cached_meta(meta: Path, key: dict, outputs: list[Path], force: bool) -> bool
 
 
 def prepare_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: bool,
-                  force: bool) -> tuple[Path, Path, dict]:
+                  force: bool, cached_only: bool = False) -> tuple[Path, Path, dict]:
+    """cached_only 면 (--preview-cut-audio) 캐시만 쓴다 — 없거나 맞지 않으면 만들지 않고 멈춘다 (force 무시)."""
     clean = work / "clean.wav"   # 48k, 스테레오 이하 — 최종 영상에 들어갈 오디오
     asr = work / "asr.wav"       # 16k mono — 전사/무음 분석용
     meta = work / "audio.meta.json"
@@ -336,10 +337,12 @@ def prepare_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: boo
     # 필터 체인 문자열 자체를 키에 넣어 처리 방식이 바뀌면 캐시도 자동으로 무효가 되게 한다
     key = {"v": CACHE_VERSION, "src": source_sig(src), "filter": af, "ac": ac}
 
-    if cached_meta(meta, key, [clean, asr], force):
+    if cached_meta(meta, key, [clean, asr], force and not cached_only):
         log("오디오 정리 결과 재사용 (work/ 에 이미 있음)")
         progress("audio", 1.0)
         return clean, asr, key
+    if cached_only:
+        sys.exit("오류: 미리보기 소리: 분석 오디오 캐시가 없거나 맞지 않습니다")
     if meta.exists() and not force:
         log("원본이나 오디오 설정이 바뀌어 오디오를 다시 정리합니다")
 
@@ -475,9 +478,12 @@ def load_whisper(model_name: str, device: str, compute_type: str, probe_marker: 
 
 
 def transcribe(asr_wav: Path, out_json: Path, audio_key: dict, model_name: str, device: str,
-               compute_type: str, prompt: str, force: bool, probe_marker: Path) -> dict:
+               compute_type: str, prompt: str, force: bool, probe_marker: Path,
+               cached_only: bool = False) -> dict:
+    """cached_only 면 (--preview-cut-audio) 캐시만 쓴다 — 없거나 키가 다르면 Whisper 를 불러오기 전에 멈추고
+    transcript.json 은 건드리지 않는다 (force 무시)."""
     key = {"audio": audio_key, "model": model_name, "compute_type": compute_type, "hotwords": prompt}
-    if out_json.exists() and not force:
+    if out_json.exists() and (cached_only or not force):
         try:
             cached = json.loads(out_json.read_text(encoding="utf-8"))
             if cached.get("cache_key") == key:
@@ -486,7 +492,10 @@ def transcribe(asr_wav: Path, out_json: Path, audio_key: dict, model_name: str, 
                 return cached
         except json.JSONDecodeError:
             pass
-        log("원본·오디오·모델·프롬프트 중 바뀐 것이 있어 전사를 다시 합니다")
+        if not cached_only:
+            log("원본·오디오·모델·프롬프트 중 바뀐 것이 있어 전사를 다시 합니다")
+    if cached_only:
+        sys.exit("오류: 미리보기 소리: 전사 캐시가 없거나 맞지 않습니다")
 
     log("  처음 한 번은 모델 다운로드(1~3GB)로 시간이 걸립니다")
     model = load_whisper(model_name, device, compute_type, probe_marker)
@@ -1879,8 +1888,9 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         f"{info['sample_rate']}Hz/{info['channels']}ch  {info['pix_fmt']}")
 
     # 1) 오디오
+    cut_only = bool(args.preview_cut_audio)   # 잘린 미리보기 소리만: 전사·분석 오디오는 캐시만 쓴다
     clean_wav, asr_wav, audio_key = prepare_audio(src, work, info, args.denoise,
-                                                  not args.no_loudnorm, args.force)
+                                                  not args.no_loudnorm, args.force, cut_only)
     if info["duration"] <= 0:  # 길이 정보가 없는 컨테이너(일부 webm 등)
         info["duration"] = wav_duration(clean_wav)
     total_frames = int(round(info["duration"] * float(fps)))
@@ -1888,7 +1898,7 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     # 2) 전사
     tr_path = out_dir / f"{stem}.transcript.json"
     tr = transcribe(asr_wav, tr_path, audio_key, args.model, args.device, args.compute_type,
-                    cfg.get("prompt", ""), args.force, args.work_root / ".whisper_probe.json")
+                    cfg.get("prompt", ""), args.force, args.work_root / ".whisper_probe.json", cut_only)
     rms, hop = load_rms(asr_wav)
     sil_base = dict(cfg)  # --silence-level 은 자동 무음 기준 전 설정에서 무음 판정만 따로 한다 (정렬·필러 판정은 그대로)
     if not args.apply_cuts:

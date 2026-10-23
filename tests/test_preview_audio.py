@@ -133,6 +133,19 @@ def test_failed_key_is_remembered(tmp_path):
     ca.shutdown()
 
 
+def test_missing_cache_is_a_real_failure(tmp_path):
+    """전사·분석 오디오 캐시가 없으면 파이프라인이 멈춘다 → 실패로 기억하고 화면에 알린다."""
+    run, ready = FakeRun(RunResult(False, "오류: 미리보기 소리: 전사 캐시가 없거나 맞지 않습니다")), Ready()
+    ca = preview.CutAudio(run, ready)
+    out = tmp_path / "audio_cut.aaaaaaaaaaaaaaaa.m4a"
+    assert ca.request("j1", "a" * 16, ["x", str(out)], out) == "pending"
+    _wait_idle(ca)
+    assert ready == ["j1"]
+    assert ca.request("j1", "a" * 16, ["x", str(out)], out) == "failed"
+    assert len(run.calls) == 1
+    ca.shutdown()
+
+
 def test_busy_lock_is_not_remembered_as_failed(tmp_path):
     run = FakeRun(RunResult(False, "오류: 같은 영상을 이미 처리 중입니다 (pid 1). 끝날 때까지 기다리세요."))
     ca = preview.CutAudio(run, Ready())
