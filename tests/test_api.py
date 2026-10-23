@@ -354,6 +354,133 @@ def test_get_result_saved_paths(tmp_path):
     assert r["saved_paths"] == [str(save / "a_clean.mp4"), str(save / "a_clean.srt")]
 
 
+# ---- 미리보기 폴더 (조각 영상·소리) ----------------------------------------------
+
+class GatedRun:
+    """잘린 소리 만들기 가짜: gate 가 풀릴 때까지 기다렸다가 cmd 의 --preview-cut-audio 파일을 만든다."""
+
+    def __init__(self):
+        self.calls, self.gate = [], threading.Event()
+
+    def __call__(self, cmd):
+        self.calls.append(cmd)
+        self.gate.wait(5)
+        out = Path(cmd[cmd.index("--preview-cut-audio") + 1])
+        out.write_bytes(b"a")
+        out.with_suffix(".index.json").write_text("{}")
+        return RunResult(True)
+
+
+def make_gated(tmp_path):
+    store = Store(tmp_path / "state.json")
+    store.settings["save_dir"] = str(tmp_path / "saved")
+    q, push, run = FakeQueue(), Pushes(), GatedRun()
+    a = Api(store, q, push, FakeDialogs(), manifest=MANIFEST, data_root=tmp_path / "data",
+            preview_base="http://127.0.0.1:9999/jobs", cut_audio_run=run)
+    return a, store, push, run
+
+
+def preview_dir(job, video=True):
+    d = paths.job_dir(Path(job.src)) / "preview"
+    d.mkdir(parents=True, exist_ok=True)
+    names = ["audio_full.m4a", "audio_full.index.json"] + (["video.mp4", "video.index.json"] if video else [])
+    for n in names:
+        (d / n).write_bytes(b"x")
+    return d
+
+
+def _url(job, d, name):
+    return f"http://127.0.0.1:9999/jobs/{job.id}/preview/{name}?v={(d / name).stat().st_mtime_ns}"
+
+
+def test_get_result_preview_fields_and_pending(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_mod.runner, "pipeline_cmd", lambda: ["PY", "pipeline.py"])
+    a, store, push, run = make_gated(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    write_out(job, "a.cuts.json", {"cuts": [{"start": 1, "end": 1.5}, {"start": 3, "end": 4}]})
+    job.range_ops.append({"op": "restore", "start": 3.0, "end": 4.0})
+    d = preview_dir(job)
+    r = a.get_result(job.id)
+    p = r["preview"]
+    assert p == {"video": _url(job, d, "video.mp4"), "video_index": _url(job, d, "video.index.json"),
+                 "audio_full": _url(job, d, "audio_full.m4a"),
+                 "audio_full_index": _url(job, d, "audio_full.index.json"),
+                 "cut_audio": None, "cut_index": None, "pending": True}
+    assert r["preview_url"] is None
+    # 두 번째 조회는 같은 key 가 도는 중이라 다시 요청하지 않는다
+    assert a.get_result(job.id)["preview"]["pending"] is True
+    run.gate.set()
+    for _ in range(250):
+        if push.of("preview"):
+            break
+        time.sleep(0.02)
+    assert push.of("preview") == [{"id": job.id}]
+    assert len(run.calls) == 1
+    cmd = run.calls[0]
+    cuts_file = paths.job_dir(Path(job.src)) / "out" / "a.preview.cuts.json"
+    assert cmd[cmd.index("--apply-cuts") + 1] == str(cuts_file)
+    # 되살린 곳을 뺀 컷 목록
+    assert [c["start"] for c in json.loads(cuts_file.read_text(encoding="utf-8"))["cuts"]] == [1]
+    r = a.get_result(job.id)["preview"]
+    key = Path(cmd[cmd.index("--preview-cut-audio") + 1]).name.split(".")[1]
+    assert r["pending"] is False
+    assert r["cut_audio"] == _url(job, d, f"audio_cut.{key}.m4a")
+    assert r["cut_index"] == _url(job, d, f"audio_cut.{key}.index.json")
+    assert len(run.calls) == 1
+    a.shutdown()
+
+
+def test_get_result_skips_cut_audio_while_processing(tmp_path):
+    a, store, push, run = make_gated(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.PROCESSING)
+    write_out(job, "a.cuts.json", {"cuts": [{"start": 1, "end": 1.5}]})
+    preview_dir(job)
+    p = a.get_result(job.id)["preview"]
+    assert p["pending"] is False and p["cut_audio"] is None and p["cut_index"] is None
+    time.sleep(0.05)
+    assert run.calls == []
+    assert not (paths.job_dir(Path(job.src)) / "out" / "a.preview.cuts.json").exists()
+    a.shutdown()
+
+
+def test_get_result_audio_only(tmp_path):
+    a, store, push, run = make_gated(tmp_path)
+    job = add_job(tmp_path, a, store, name="a.m4a", status=Status.PROCESSING)
+    write_out(job, "a.cuts.json", {"cuts": []})
+    d = preview_dir(job, video=False)
+    p = a.get_result(job.id)["preview"]
+    assert p["video"] is None and p["video_index"] is None
+    assert p["audio_full"] == _url(job, d, "audio_full.m4a")
+    a.shutdown()
+
+
+def test_get_result_old_preview_only(tmp_path):
+    a, store, push, run = make_gated(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    write_out(job, "a.cuts.json", {"cuts": []})
+    old = paths.job_dir(Path(job.src)) / "preview.mp4"
+    old.write_bytes(b"v")
+    r = a.get_result(job.id)
+    assert r["preview"] is None
+    assert r["preview_url"] == f"http://127.0.0.1:9999/jobs/{job.id}/preview.mp4?v={old.stat().st_mtime_ns}"
+    assert run.calls == []
+    a.shutdown()
+
+
+def test_get_result_removes_old_preview_mp4(tmp_path):
+    a, store, push, run = make_gated(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.PROCESSING)
+    write_out(job, "a.cuts.json", {"cuts": []})
+    old = paths.job_dir(Path(job.src)) / "preview.mp4"
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(b"v")
+    preview_dir(job)
+    r = a.get_result(job.id)
+    assert r["preview"] is not None and r["preview_url"] is None
+    assert not old.exists()
+    a.shutdown()
+
+
 # ---- 설정 --------------------------------------------------------------------
 
 def test_settings_and_save_dir(tmp_path):

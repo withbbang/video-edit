@@ -30,9 +30,12 @@ FILE_TYPES = ("영상과 오디오 (" + ";".join(f"*{e}" for e in sorted(api_mod
               "모든 파일 (*.*)")
 
 # ---------------------------------------------------------------------------
-# 미리보기 사본 서버: <data_root>/jobs/<id>/preview.mp4 만 내보낸다
+# 미리보기 사본 서버: <data_root>/jobs/<id>/ 의 preview.mp4(예전 방식)와 preview/ 폴더의 정해진 파일만 내보낸다
 # ---------------------------------------------------------------------------
-_PREVIEW_PATH = re.compile(r"/([0-9a-f]{12})/preview\.mp4")
+_PREVIEW_PATH = re.compile(
+    r"/([0-9a-f]{12})/(preview\.mp4|preview/(?:video\.mp4|video\.index\.json|audio_full\.m4a|audio_full\.index\.json"
+    r"|audio_cut\.[0-9a-f]{16}\.m4a|audio_cut\.[0-9a-f]{16}\.index\.json))")
+_CONTENT_TYPES = {".mp4": "video/mp4", ".m4a": "audio/mp4", ".json": "application/json"}
 _CHUNK = 1 << 16
 _BAD_RANGE = "bad"
 
@@ -83,7 +86,7 @@ def _handler(root: Path):
             m = _PREVIEW_PATH.fullmatch(path)
             if not m:
                 return None
-            f = jobs / m.group(1) / "preview.mp4"
+            f = jobs / m.group(1) / m.group(2)
             return f if f.is_file() else None
 
         def _host_ok(self) -> bool:
@@ -122,7 +125,7 @@ def _handler(root: Path):
                     self.send_response(206)
                     self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
                 length = max(end - start + 1, 0)
-                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Type", _CONTENT_TYPES[f.suffix])
                 self.send_header("Accept-Ranges", "bytes")
                 self.send_header("Content-Length", str(length))
                 self.send_header("Cache-Control", "no-store")
@@ -146,7 +149,7 @@ def _handler(root: Path):
 
 def serve_previews(data_root: Path) -> str:
     """127.0.0.1 임의 포트에 미리보기 서버를 띄우고 기본 URL 을 돌려준다 (데몬 스레드).
-    미리보기 주소는 f"{base}/{job_id}/preview.mp4"."""
+    미리보기 주소는 f"{base}/{job_id}/preview/<이름>" (예전 방식은 f"{base}/{job_id}/preview.mp4")."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(Path(data_root)))
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True, name="preview-server").start()
@@ -284,6 +287,7 @@ def run(debug: bool = False) -> None:
     def stop() -> None:
         # 창을 닫으면 돌던 파이프라인(과 ffmpeg)을 멈추고 그 영상은 대기로 저장한다. 여러 번 불려도 된다.
         bridge.close()
+        api.shutdown()
         if not queue.shutdown(SHUTDOWN_WAIT):
             log.warning("처리를 %s초 안에 멈추지 못했습니다", SHUTDOWN_WAIT)
 

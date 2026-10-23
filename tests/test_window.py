@@ -92,6 +92,41 @@ def test_preview_rejects_other_hosts(served, host):
     assert r.status == 403
 
 
+@pytest.fixture
+def preview_folder(served, tmp_path):
+    d = tmp_path / "jobs" / "0123456789ab" / "preview"
+    d.mkdir()
+    for n in ("video.mp4", "video.index.json", "audio_full.m4a", "audio_full.index.json",
+              "audio_cut.0123456789abcdef.m4a", "audio_cut.0123456789abcdef.index.json",
+              "audio_cut.zz.m4a", "x.mp4"):
+        (d / n).write_bytes(n.encode())
+    return served[0]
+
+
+@pytest.mark.parametrize("name,ctype", [("video.mp4", "video/mp4"), ("audio_full.m4a", "audio/mp4"),
+                                        ("audio_full.index.json", "application/json"),
+                                        ("audio_cut.0123456789abcdef.m4a", "audio/mp4"),
+                                        ("audio_cut.0123456789abcdef.index.json", "application/json")])
+def test_preview_dir_files(preview_folder, name, ctype):
+    r, body = _req(preview_folder, f"/0123456789ab/preview/{name}")
+    assert r.status == 200 and body == name.encode()
+    assert r.getheader("Content-Type") == ctype
+    r, body = _req(preview_folder, f"/0123456789ab/preview/{name}", headers={"Range": "bytes=1-2"})
+    assert r.status == 206 and body == name.encode()[1:3]
+
+
+@pytest.mark.parametrize("name", ["../state.json", "audio_cut.zz.m4a", "x.mp4", "audio_cut.0123456789ABCDEF.m4a",
+                                  "video.meta.json", "", "missing.mp4"])
+def test_preview_dir_rejects_other_names(preview_folder, name):
+    r, _ = _req(preview_folder, f"/0123456789ab/preview/{name}")
+    assert r.status == 404
+
+
+def test_preview_dir_missing_file_404(served):
+    r, _ = _req(served[0], "/0123456789ab/preview/video.mp4")
+    assert r.status == 404
+
+
 def test_preview_accepts_localhost_name(served):
     base, data = served
     port = urlsplit(base).port

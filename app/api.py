@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Callable, Protocol
 
-from . import __version__, diff, models, paths, runner, subtitles, updates
+from . import __version__, diff, models, paths, preview, runner, subtitles, updates
 from .jobqueue import ANALYZE, RENDER
 from .options import FAST_KEYS, LEVEL_KEYS, JobOptions, parse_level
 from .progress import ANALYZE_WEIGHTS, RENDER_WEIGHTS
@@ -222,7 +222,8 @@ def make_execute(store: Store, manifest: dict, data_root: Path, queue_getter: Ca
 # ---------------------------------------------------------------------------
 class Api:
     def __init__(self, store: Store, queue, push: Push, dialogs: Dialogs, *,
-                 manifest: dict, data_root: Path, preview_base: str):
+                 manifest: dict, data_root: Path, preview_base: str,
+                 cut_audio_run: Callable[[list[str]], RunResult] | None = None):
         self._store = store
         self._queue = queue
         self._push = push
@@ -236,8 +237,21 @@ class Api:
         self._update: dict | None = None            # 마지막으로 찾은 새 버전
         # 편집 되돌리기: 영상 id → (undo, redo) 편집 전 상태 묶음 목록 (메모리에만, 앱을 끄면 사라짐)
         self._history: dict[str, tuple[list, list]] = {}
+        # 컷을 적용한 미리보기 소리 (cut_audio_run 은 테스트가 가짜를 넣는다)
+        self._cut_audio = preview.CutAudio(cut_audio_run or self._run_cut_audio,
+                                           lambda job_id: self._push("preview", {"id": job_id}))
 
     # ---- 내부 ----------------------------------------------------------------
+
+    def _run_cut_audio(self, cmd: list[str]) -> RunResult:
+        with self._queue.lock:
+            settings = copy.deepcopy(self._store.settings)
+        env = models.pipeline_env(self._manifest, self._data_root, settings)
+        return runner.run(cmd, {"preview": 1.0}, lambda p: None, env=env, on_start=self._cut_audio.started)
+
+    def shutdown(self) -> None:
+        """창을 닫을 때: 미리보기 소리를 만들던 프로세스를 멈춘다."""
+        self._cut_audio.shutdown()
 
     def _job(self, job_id: str) -> Job | None:
         return self._store.get(job_id)
@@ -631,8 +645,11 @@ class Api:
             restored = [list(r) for r in job.restored]
             ops = [dict(o) for o in job.range_ops]
             save_dir = Path(self._store.settings["save_dir"])
+            snap = copy.deepcopy(job)
+            settings = copy.deepcopy(self._store.settings)
         out = paths.job_dir(src) / "out"
         cur = _read_json(out / f"{src.stem}.cuts.json")
+        effective = cur
         transcript = _read_json(out / f"{src.stem}.transcript.json")
         dropped = False
         if transcript is not None:
@@ -644,12 +661,11 @@ class Api:
             duration = float((transcript or {}).get("duration") or (summary or {}).get("orig_sec") or 0)
         except (TypeError, ValueError):
             pass
-        # 미리보기를 못 만들었으면(분석은 성공) None — 화면은 재생기 대신 안내를 보여 준다
-        preview = paths.job_dir(src) / "preview.mp4"
         items = diff.cut_items(cur, restored, ops, transcript) if cur else []
         if (restored or ops) and cur is not None:
             # 되살린 곳은 미리보기에서 건너뛰지 않고 요약에서도 뺀다 (저장도 같은 목록으로 한다)
-            kept = diff.effective_cuts(cur, restored, ops, transcript)["cuts"]
+            effective = diff.effective_cuts(cur, restored, ops, transcript)
+            kept = effective["cuts"]
             merged = _union(kept)
             removed = sum(b - a for a, b in merged)
             orig = float((summary or {}).get("orig_sec") or duration)
@@ -665,14 +681,51 @@ class Api:
             summary = {**summary, "silence_min_sec": _silence_min_sec()}
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "cut_items": items,
                   "range_ops": ops, "history": self._hist(job_id),
-                  "preview_url": _preview_url(f"{self._preview_base}/{job_id}/preview.mp4", preview),
                   "duration": duration}
+        result.update(self._preview(snap, status, effective, settings))
         if dropped:
             result["edits_dropped"] = True
         if status == Status.SAVED:
             names = [f"{src.stem}_clean.mp4", f"{src.stem}_clean.m4a", f"{src.stem}_clean.srt"]
             result["saved_paths"] = [str(save_dir / n) for n in names if (save_dir / n).is_file()]
         return result
+
+    def _preview(self, job: Job, status: str, cuts: dict | None, settings: dict) -> dict:
+        """get_result 의 "preview"(새 미리보기 폴더) 와 "preview_url"(옛 preview.mp4 만 있는 작업).
+        미리보기를 못 만들었으면(분석은 성공) 둘 다 None — 화면은 재생기 대신 안내를 보여 준다.
+        job 은 락 밖에서 쓰는 사본, cuts 는 되살림·구간 작업을 반영한 컷 목록."""
+        jd = paths.job_dir(Path(job.src))
+        pdir, old = jd / "preview", jd / "preview.mp4"
+        base = f"{self._preview_base}/{job.id}"
+        if not (pdir / "audio_full.index.json").is_file():
+            return {"preview": None, "preview_url": _preview_url(f"{base}/preview.mp4", old)}
+        old.unlink(missing_ok=True)   # 예전 방식 미리보기는 이제 안 쓴다
+
+        def url(name: str) -> str | None:
+            return _preview_url(f"{base}/preview/{name}", pdir / name)
+
+        cut_audio = cut_index = None
+        pending = False
+        if cuts is not None:
+            key = preview.cut_key(cuts.get("cuts", []), job.options)
+            target = pdir / f"audio_cut.{key}.m4a"
+            if status in (Status.REVIEW, Status.SAVED):
+                stem = Path(job.src).stem
+                cuts_path = jd / "out" / f"{stem}.preview.cuts.json"
+                cmd = runner.preview_audio_command(job, models.paths(self._manifest, self._data_root),
+                                                   models.device(settings, self._manifest), cuts_path, target)
+
+                def prepare() -> None:   # 만들 때만 쓴다 (작업 스레드에서 실행 바로 전에)
+                    cuts_path.parent.mkdir(parents=True, exist_ok=True)
+                    cuts_path.write_text(json.dumps(cuts, ensure_ascii=False, indent=1), encoding="utf-8")
+
+                pending = self._cut_audio.request(job.id, key, cmd, target, prepare=prepare) == "pending"
+            if preview.is_ready(target):
+                cut_audio, cut_index = url(target.name), url(preview.index_of(target).name)
+        return {"preview_url": None,
+                "preview": {"video": url("video.mp4"), "video_index": url("video.index.json"),
+                            "audio_full": url("audio_full.m4a"), "audio_full_index": url("audio_full.index.json"),
+                            "cut_audio": cut_audio, "cut_index": cut_index, "pending": pending}}
 
     # ---- 설정 ----------------------------------------------------------------
 

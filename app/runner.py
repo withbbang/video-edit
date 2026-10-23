@@ -60,6 +60,16 @@ def render_command(job: Job, model: ModelPaths, device: str, media_dir: Path,
             + extra + _tail(model, device) + render_args(job.options))
 
 
+def preview_audio_command(job: Job, model: ModelPaths, device: str, cuts_path: Path, out: Path) -> list[str]:
+    """컷을 적용한 미리보기 소리(out + index.json)만 만드는 명령. 잡음·음량은 저장과 같게."""
+    jd = paths.job_dir(Path(job.src))
+    o = job.options
+    return (pipeline_cmd() + [job.src, "--apply-cuts", str(cuts_path), "--preview-cut-audio", str(out),
+                              "--progress-json", "--out", str(jd / "out"), "--work-root", str(jd / "work")]
+            + _tail(model, device)
+            + ["--denoise-level", str(o.denoise), "--render-loudnorm", "on" if o.loudnorm == "match" else "off"])
+
+
 def build_env(extra: dict | None = None) -> dict:
     env = dict(os.environ)
     bin_dir = paths.ffmpeg_bin_dir()
