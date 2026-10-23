@@ -1585,6 +1585,9 @@ def make_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out_di
     clean_wav 는 미리보기에 넣을 소리 (기본 clean.wav, --denoise-level 이면 그 세기의 렌더 오디오).
     영상과 소리는 따로 캐시한다 → 배경 잡음 세기만 바꾸면 영상을 다시 인코딩하지 않는다.
     쓰는 순서: *.part.* → 완성본 → index → meta (meta 가 있으면 한 벌이 다 만들어진 것)."""
+    # 예전 버전이 작업 폴더에 캐시하던 미리보기 (이제 안 쓰는 큰 파일)
+    for n in ("preview_video.mp4", "preview_video.part.mp4", "preview_video.meta.json", "preview.meta.json"):
+        (work / n).unlink(missing_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     if info["has_video"]:
         make_preview_video(src, info, out_dir, force)
@@ -1661,6 +1664,7 @@ def make_cut_preview_audio(p_wav: Path, keeps: list[tuple[int, int]], fps: Fract
     out.parent.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
     cut_wav = work / "preview_cut.wav"
+    cut_wav.unlink(missing_ok=True)   # 지난번에 끊긴 실행의 찌꺼기
     n_samples, sr = cut_audio(p_wav, cut_wav, keeps, fps)
     tmp = out.with_name(out.stem + ".part.m4a")
     out.with_suffix(".index.json").unlink(missing_ok=True)

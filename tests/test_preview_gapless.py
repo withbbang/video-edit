@@ -257,3 +257,31 @@ def test_preview_cut_audio_uses_caches(tmp_path, monkeypatch):
     pipeline.main()
     assert m4a.is_file() and m4a.with_suffix(".index.json").is_file()
     assert tr_path.read_bytes() == before
+
+
+@needs_ffmpeg
+def test_make_preview_removes_old_work_preview_files(tmp_path):
+    src, wav = synth(tmp_path, video=False)
+    work = tmp_path / "work"
+    work.mkdir()
+    old = ["preview_video.mp4", "preview_video.part.mp4", "preview_video.meta.json", "preview.meta.json"]
+    for n in old + ["clean.wav"]:
+        (work / n).write_bytes(b"x")
+    make(tmp_path, src, wav)
+    assert [n for n in old if (work / n).exists()] == []
+    assert (work / "clean.wav").exists()
+
+
+def test_make_cut_preview_audio_removes_leftover_wav_first(tmp_path, monkeypatch):
+    from fractions import Fraction
+    left = tmp_path / "preview_cut.wav"
+    left.write_bytes(b"old")
+    seen = []
+
+    def fake_cut_audio(src, dst, keeps, fps):
+        seen.append(Path(dst).exists())
+        raise RuntimeError("stop")
+    monkeypatch.setattr(pipeline, "cut_audio", fake_cut_audio)
+    with pytest.raises(RuntimeError):
+        pipeline.make_cut_preview_audio(tmp_path / "a.wav", [(0, 30)], Fraction(30), tmp_path / "o.m4a", tmp_path)
+    assert seen == [False] and not left.exists()
