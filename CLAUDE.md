@@ -126,7 +126,7 @@ tests/                pytest (requirements-dev.txt)
   테스트: `.venv/bin/python -m pytest` (`pip install -r requirements-dev.txt`). 파이프라인이나 앱을 고친 뒤엔 전체를 돌린다.
 - `pipeline.py` 의 CLI 기본 동작은 그대로다. 앱은 이를 서브프로세스로 부르며 앱 전용 숨은 옵션만 추가돼 있다
   (기본값은 기존 동작): `--progress-json`(@progress 줄 출력), `--render-denoise`/`--render-loudnorm`(렌더 때만 배경 잡음·음량; 앱은 지금 `--denoise-level` 을 쓴다),
-  `--preview`(미리보기 파일), `--vbitrate-scale`(화질 배율 0.6/1/1.5), `--work-root`(작업 캐시 폴더),
+  `--preview`(미리보기 폴더: video.mp4/video.index.json/audio_full.m4a/audio_full.index.json), `--preview-cut-audio <m4a>`(`--apply-cuts` 와만: 컷 적용한 미리보기 소리 + index 만 만들고 끝), `--vbitrate-scale`(화질 배율 0.6/1/1.5), `--work-root`(작업 캐시 폴더),
   `--media-out`(결과 mp4/m4a·srt 저장 폴더), `--ctc-model`(정렬 모델 ID 또는 로컬 폴더),
   `--silence-level 0~100`(말 없는 구간 세기, 주면 `--silence` 대신: 0 끔 · 1~50 최소 길이 1.0초→fillers.json 값 · 50 = `--silence on` ·
   51~100 자동 무음 기준을 말소리 쪽으로 올림(여유 +10dB·상한 +24dB·말소리 여유 −4dB, fillers.json 값에 더함) ·

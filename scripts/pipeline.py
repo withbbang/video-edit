@@ -1645,6 +1645,32 @@ def preview_audio_source(args: argparse.Namespace, src: Path, work: Path, info: 
                             analysis=(clean_wav, audio_key))
 
 
+def make_cut_preview_audio(p_wav: Path, keeps: list[tuple[int, int]], fps: Fraction, out: Path, work: Path) -> dict:
+    """--preview-cut-audio 용. 렌더와 같은 keep_segments + cut_audio(3ms 페이드)로 자른 소리를 AAC fMP4 로 쓴다.
+    쓰는 순서: *.part.m4a → out → index (index 가 있으면 다 만들어진 것). index 에는 남긴 구간(초)과 길이를 담는다."""
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    work.mkdir(parents=True, exist_ok=True)
+    cut_wav = work / "preview_cut.wav"
+    n_samples, sr = cut_audio(p_wav, cut_wav, keeps, fps)
+    tmp = out.with_name(out.stem + ".part.m4a")
+    out.with_suffix(".index.json").unlink(missing_ok=True)
+    try:
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", cut_wav, "-map", "0:a",
+             *PREVIEW_AUDIO_ARGS, tmp], quiet=True)
+    except subprocess.CalledProcessError:
+        tmp.unlink(missing_ok=True)
+        raise
+    finally:
+        cut_wav.unlink(missing_ok=True)
+    os.replace(tmp, out)
+    extra = {"keeps": [[round(float(Fraction(sf) / fps), 6), round(float(Fraction(ef) / fps), 6)]
+                       for sf, ef in keeps],
+             "duration": n_samples / sr}
+    path = write_index(out, extra)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def try_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out_dir: Path, work: Path,
                 hw: bool, force: bool) -> bool:
     """--preview 용. 미리보기는 앱 재생기용 덤이라, 못 만들어도 컷 리스트·전사는 쓸 수 있으니 분석을 실패로
@@ -1811,6 +1837,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "0 끔, 50 = rnnoise. 분석 오디오는 --denoise 그대로")
     ap.add_argument("--preview", type=Path, default=None,
                     help="판정 뒤 컷 적용 전 원본 타임라인의 미리보기(기준 프레임 조각 영상 video.mp4, 긴 변 960 + 전체 소리 audio_full.m4a)를 이 폴더에 만듦")
+    ap.add_argument("--preview-cut-audio", type=Path, default=None, metavar="OUT",
+                    help="--apply-cuts 와 함께: 컷을 적용한 미리보기 소리(m4a + index.json)만 만들고 끝냄 (데스크톱 앱용)")
     ap.add_argument("--vbitrate-scale", type=float, default=1.0,
                     help="--vbitrate auto 일 때 자동 비트레이트에 곱할 배율 (기본 1.0)")
     ap.add_argument("--subs-edits", type=Path, default=None,
@@ -1824,6 +1852,9 @@ def main() -> None:
     PROGRESS = args.progress_json
     if args.review and args.apply_cuts:
         sys.exit("오류: --review 와 --apply-cuts 는 함께 쓸 수 없습니다 (--apply-cuts 는 바로 렌더합니다)")
+
+    if args.preview_cut_audio and not args.apply_cuts:
+        sys.exit("오류: --preview-cut-audio 는 --apply-cuts 와 함께 씁니다")
 
     need("ffmpeg"); need("ffprobe")
     src = args.input.resolve()
@@ -1934,6 +1965,15 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         log(f"필러 {n_fillers}개 + 무음 {len(raw_cuts) - n_fillers}곳 → 병합 후 {len(cuts)}곳, "
             f"총 {removed:.1f}s 제거 예정 (건너뜀 {len(skipped)}건)")
     progress("judge", 1.0)
+    if args.preview_cut_audio:
+        keeps = keep_segments(cuts, total_frames)
+        if not keeps:
+            sys.exit("오류: 남길 구간이 없습니다 (전부 컷 대상).")
+        p_wav, _ = preview_audio_source(args, src, work, info, clean_wav, audio_key)
+        idx = make_cut_preview_audio(p_wav, keeps, fps, args.preview_cut_audio.resolve(), work)
+        log(f"미리보기 소리: {args.preview_cut_audio.name} ({len(keeps)}구간, {idx['duration']:.1f}초)")
+        progress("preview", 1.0)
+        return
     if args.preview:
         p_wav, p_key = preview_audio_source(args, src, work, info, clean_wav, audio_key)
         try_preview(src, p_wav, p_key, info, args.preview.resolve(), work, args.hw == "on", args.force)

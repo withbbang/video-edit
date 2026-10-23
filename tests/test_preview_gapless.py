@@ -149,3 +149,30 @@ def test_try_preview_cleans_up_on_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "make_preview", boom)
     assert pipeline.try_preview(tmp_path / "s.mp4", tmp_path / "c.wav", {}, {}, d, tmp_path, False, False) is False
     assert not list(d.glob("*.mp4")) and not list(d.glob("*.m4a"))
+
+
+def sine_wav(path, sec, sr):
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    f"sine=frequency=440:sample_rate={sr}:duration={sec}", "-c:a", "pcm_s16le", path], check=True)
+    return path
+
+
+def probe_duration(path):
+    return float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                 path], capture_output=True, text=True, check=True).stdout.strip())
+
+
+@needs_ffmpeg
+def test_make_cut_preview_audio_matches_keeps(tmp_path):
+    from fractions import Fraction
+    wav = sine_wav(tmp_path / "a.wav", sec=4.0, sr=48000)
+    fps = Fraction(30)
+    keeps = [(0, 30), (45, 48), (90, 120)]                 # 1초, 3프레임, 1초
+    out = tmp_path / "sub" / "audio_cut.x.m4a"
+    idx = pipeline.make_cut_preview_audio(wav, keeps, fps, out, tmp_path)
+    assert idx["keeps"] == [[0.0, 1.0], [1.5, 1.6], [3.0, 4.0]]
+    assert abs(idx["duration"] - 2.1) < 1e-3                # cut_audio 샘플 수 기준
+    assert probe_duration(out) == pytest.approx(2.1, abs=0.05)
+    assert idx["frags"] and idx["codec"] == "mp4a.40.2"
+    assert json.loads(out.with_suffix(".index.json").read_text(encoding="utf-8")) == idx
+    assert not list(out.parent.glob("*.part.*"))
