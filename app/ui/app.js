@@ -341,7 +341,7 @@ function renderResult(force) {
     try { typing[0].setSelectionRange(typing[1], typing[2]); } catch (e) { /* 무시 */ }
   }
   player.subKey = null;
-  if (r && r.preview_url) player.attach(r);
+  if (r && (r.preview || r.preview_url)) player.attach(r);
   else if (r) player.detach();
   drawRange();
   drawHist();
@@ -358,7 +358,7 @@ function resultParts(j, r) {
   // 왼쪽: 재생기·타임라인, 오른쪽: 잘린 곳·자막 목록 (탭과 함께)
   const main = [];
   // 미리보기를 못 만들어도 컷·요약은 그대로 쓸 수 있다
-  main.push(...(r.preview_url ? [player.slot(), player.sub] : [h('div', { class: 'err' }, '미리보기를 만들지 못했습니다')]));
+  main.push(...(r.preview || r.preview_url ? [player.slot(), player.sub] : [h('div', { class: 'err' }, '미리보기를 만들지 못했습니다')]));
   main.push(timeline(r), rangeBar.el);
   const back = s.restored || restoreOps(r).length;
   main.push(h('div', { class: 'legend' },
@@ -738,7 +738,7 @@ function wordEl(w, where) {
     'data-k': w.key, title: gone ? '자막에서 뺀 어절' : w.edited ? `원래: ${w.orig}` : null }, gone ? w.orig : w.text);
   el.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (where === 'over' && player.video && !player.video.paused) return;   // 재생 중엔 보기만
+    if (where === 'over' && player.playing()) return;   // 재생 중엔 보기만
     editWord(el, w, where);
   });
   return el;
@@ -818,13 +818,13 @@ function editWord(el, w, where) {
 function lineEditor(j, c) {
   const can = HAS_RESULT.has(j.status);
   const set = (s, e) => setLineTime(j.id, c.key, s, e);
-  const now = () => (player.video ? player.video.currentTime : null);
+  const now = () => (player.ready() ? player.time() : null);
   const part = (label, t, which) => {
     const go = (v) => (v === null ? null : which === 'start' ? set(v, null) : set(null, v));
     return h('span', { class: 'lt' }, `${label} `, h('b', {}, clock1(t)),
       h('button', { type: 'button', class: 'btn', disabled: !can, onclick: () => go(t - 0.1) }, '◀0.1'),
       h('button', { type: 'button', class: 'btn', disabled: !can, onclick: () => go(t + 0.1) }, '0.1▶'),
-      h('button', { type: 'button', class: 'btn', disabled: !can || !player.video, onclick: () => go(now()) }, '지금 위치로'));
+      h('button', { type: 'button', class: 'btn', disabled: !can || !player.ready(), onclick: () => go(now()) }, '지금 위치로'));
   };
   return h('div', { class: 'line-time' }, part('시작', c.start, 'start'), part('끝', c.end, 'end'),
     h('button', { type: 'button', class: 'btn', disabled: !can || !c.timed, onclick: () => set(null, null) }, '원래대로'));
@@ -902,70 +902,219 @@ async function setRestored(id, c, on) {
   if (r) loadResult(id);
 }
 
-// ---- 미리보기 재생기: 잘린 구간을 건너뛰며 재생 ---------------------------
+// ---- 미리보기 재생기 -------------------------------------------------------
+// mse: 남길 구간을 이어 붙인 MediaSource 재생기 (시간·기본 컨트롤은 결과 기준). 멈춘 채 잘린 구간 안으로 옮기면
+//      원본 보기(조각 영상 파일을 원본 시간 그대로, 소리 없음)를 대신 보이고, 재생하면 그 구간 끝부터 이어 붙인 쪽으로 돌아간다.
+// fallback: MediaSource 를 못 쓰거나 잘린 소리가 아직 없을 때 — 원본 보기 영상 + 전체 소리를 같이 틀고 잘린 구간을 건너뛴다.
+// legacy: 옛 preview.mp4 만 있는 작업 — 그 파일 하나로 건너뛰기 재생.
+// 화면이 쓰는 시간(time·seek·clip·자막·타임라인)은 모두 원본 기준이다.
 const player = {
-  video: null, url: null, ranges: [], win: null, raf: 0, ownSeek: false,
+  mode: null, key: null, p: null, gap: null, map: null, peek: false, withAud: false,
+  ranges: [], win: null, raf: 0, ownSeek: false, seq: 0, wait: null,
+  broken: new Set(),   // 이어 붙이기에 실패한 잘린 소리 — 다시 시도하지 않고 예전 방식으로 튼다
+  box: null, mse: null, orig: null, aud: null,
+  note: h('div', { class: 'pv-note', hidden: true }, '미리보기 소리를 맞추는 중…'),
   head: h('i', { class: 'head', style: 'left:0' }),
   sub: h('div', { class: 'subline empty' }), subKey: null,
 
   slot() {
-    if (!this.video) {
-      const v = h('video', { controls: true, preload: 'metadata', playsinline: true });
-      v.addEventListener('timeupdate', () => this.tick());
-      v.addEventListener('play', () => this.loop());
-      v.addEventListener('seeked', () => this.drawHead());
-      v.addEventListener('seeking', () => {
-        if (!this.ownSeek) this.win = null;   // 사용자가 직접 옮기면 들어보기 구간을 끝낸다
-        this.ownSeek = false;
-      });
-      v.addEventListener('loadedmetadata', () => { if (!(S.result && S.result.duration)) renderResult(true); });
-      this.video = v;
+    if (!this.box) {
+      const mse = h('video', { controls: true, preload: 'auto', playsinline: true });
+      const orig = h('video', { controls: true, preload: 'auto', playsinline: true, hidden: true });
+      for (const v of [mse, orig]) {
+        v.addEventListener('timeupdate', () => this.tick());
+        v.addEventListener('play', () => this.onPlay(v));
+        v.addEventListener('pause', () => { if (v === this.el() && this.withAud) this.aud.pause(); });
+        v.addEventListener('seeked', () => this.drawHead());
+        v.addEventListener('seeking', () => {
+          if (v !== this.el()) return;
+          if (!this.ownSeek) this.win = null;   // 사용자가 직접 옮기면 들어보기 구간을 끝낸다
+          this.ownSeek = false;
+          if (this.withAud) this.aud.currentTime = v.currentTime;
+        });
+        v.addEventListener('loadedmetadata', () => { if (!(S.result && S.result.duration)) renderResult(true); });
+      }
+      this.mse = mse; this.orig = orig; this.aud = h('audio', { preload: 'auto' });
+      this.box = h('div', { class: 'pv' }, mse, orig, this.note);
     }
-    return this.video;
+    return this.box;
+  },
+  // 지금 보이는(조작하는) 요소
+  el() {
+    if (!this.mode) return null;
+    return this.mode === 'mse' && !this.peek ? this.mse : this.orig;
+  },
+  show() {
+    this.mse.hidden = this.el() !== this.mse;
+    this.orig.hidden = this.el() !== this.orig;
   },
   attach(r) {
-    const v = this.slot();
-    if (this.url !== r.preview_url) {
-      // 다시 만든 미리보기(잡음 세기 등)는 듣던 자리에서 이어서 재생한다
-      const keep = this.url ? { t: v.currentTime, play: !v.paused } : null;
-      this.url = r.preview_url; v.src = r.preview_url;
-      if (keep) {
-        v.addEventListener('loadedmetadata', () => {
-          if (this.video !== v || this.url !== r.preview_url) return;
-          if (keep.t > 0) this.move(Math.min(keep.t, this.duration() || keep.t));
-          if (keep.play) v.play().catch(() => {});
-        }, { once: true });
-      }
-    }
+    this.slot();
+    const p = r.preview;
     this.ranges = merge(r.cuts || []);
+    this.note.hidden = !(p && p.pending);
+    let want;
+    if (!p) want = { mode: 'legacy', key: `legacy|${r.preview_url}`, url: r.preview_url };
+    else if (p.cut_audio && p.cut_index && !this.broken.has(p.cut_audio)) want = { mode: 'mse', key: `mse|${p.video}|${p.cut_audio}` };
+    else if (p.pending && this.mode === 'mse') want = null;   // 새 소리가 준비될 때까지 지금 미리보기를 그대로 튼다
+    else want = { mode: 'fallback', key: `fallback|${p.video}|${p.audio_full}` };
+    if (want && want.key !== this.key) this.open(want, p);
     this.drawHead();
   },
-  detach() {
-    if (this.video) { this.video.pause(); this.video.removeAttribute('src'); this.video.load(); }
-    this.video = null; this.url = null; this.ranges = []; this.win = null;
+  open(want, p) {
+    // 다시 만든 미리보기는 듣던 원본 위치에서 이어서 재생한다 (불러오는 중에 또 바뀌면 처음 기억한 위치)
+    const keep = this.mode && !this.wait ? { t: this.time(), play: this.playing() } : this.wait;
+    this.close();
+    const seq = ++this.seq;
+    this.mode = want.mode; this.key = want.key; this.p = p;
+    this.show();
+    if (want.mode === 'mse') { this.startMse(p, keep, seq); return; }
+    const o = this.orig;
+    this.withAud = want.mode === 'fallback' && !!p.video;
+    o.muted = this.withAud;
+    o.src = want.mode === 'legacy' ? want.url : (p.video || p.audio_full);
+    if (this.withAud) this.aud.src = p.audio_full;
+    if (keep) {
+      this.wait = keep;
+      o.addEventListener('loadedmetadata', () => {
+        if (seq !== this.seq) return;
+        this.wait = null;
+        if (keep.t > 0) this.move(Math.min(keep.t, this.duration() || keep.t));
+        if (keep.play) o.play().catch(() => {});
+      }, { once: true });
+    }
   },
-  duration() { return this.video && isFinite(this.video.duration) ? this.video.duration : 0; },
-  move(t) { this.ownSeek = true; this.video.currentTime = t; },
-  seek(t) { if (!this.video) return; this.win = null; this.move(Math.max(0, t)); },
+  async startMse(p, keep, seq) {
+    this.wait = keep || { t: 0, play: false, fresh: true };
+    try {
+      const json = async (u) => {
+        const res = await fetch(u);
+        if (!res.ok) throw new Error(`색인을 받지 못했습니다 (${res.status})`);
+        return res.json();
+      };
+      const [vi, ci] = await Promise.all([p.video ? json(p.video_index) : null, json(p.cut_index)]);
+      if (seq !== this.seq) return;
+      const gap = this.gap = new Gapless(this.mse);
+      gap.onerror = (e) => this.failMse(p.cut_audio, seq, e);
+      await gap.load({ videoUrl: p.video, videoIndex: vi, audioUrl: p.cut_audio, audioIndex: ci });
+      if (seq !== this.seq) return;
+      this.map = timeMap(ci.keeps || []);
+      const w = this.wait;
+      this.wait = null;
+      // 처음 열 땐 결과 처음에서 (원본 0초가 잘린 구간이어도 원본 보기로 시작하지 않는다)
+      if (w.play) { this.move(this.map.toOut(w.t)); this.mse.play().catch(() => {}); } else if (!w.fresh) this.seek(w.t);
+      this.drawHead();
+    } catch (e) {
+      this.failMse(p.cut_audio, seq, e);
+    }
+  },
+  // 이어 붙이기 실패: 그 소리는 다시 시도하지 않고 같은 원본 위치에서 예전 방식(건너뛰기)으로 튼다
+  failMse(url, seq, e) {
+    if (seq !== this.seq) return;
+    console.warn('미리보기: 예전 방식으로 재생', e);
+    this.broken.add(url);
+    const keep = this.wait || { t: this.time(), play: this.playing() };
+    this.close();
+    this.mode = null; this.key = null; this.wait = keep;
+    if (S.result && S.resultFor === S.sel) this.attach(S.result);
+  },
+  close() {
+    cancelAnimationFrame(this.raf);
+    this.seq++;
+    if (this.gap) { this.gap.destroy(); this.gap = null; }
+    for (const v of [this.mse, this.orig, this.aud]) {
+      if (v && v.hasAttribute('src')) { v.pause(); v.removeAttribute('src'); v.load(); }
+    }
+    this.map = null; this.peek = false; this.withAud = false; this.win = null; this.wait = null;
+  },
+  detach() {
+    if (this.box) this.close();
+    this.mode = null; this.key = null; this.p = null; this.ranges = [];
+    this.note.hidden = true;
+  },
+  ready() { return !!this.mode; },
+  // 원본 기준 지금 시간
+  time() {
+    if (!this.mode) return 0;
+    if (this.wait) return this.wait.t;
+    if (this.mode !== 'mse' || this.peek) return this.orig.currentTime;
+    return this.map ? this.map.toOrig(this.mse.currentTime) : 0;
+  },
+  playing() {
+    const v = this.el();
+    return !!v && !v.paused && !v.ended;
+  },
+  duration() {
+    if (this.mode === 'mse') return this.map ? this.map.toOrig(this.map.total) : 0;
+    return this.orig && isFinite(this.orig.duration) ? this.orig.duration : 0;
+  },
+  // 보이는 요소의 시간으로 옮긴다 (mse 면 결과 시간)
+  move(t) {
+    const v = this.el();
+    this.ownSeek = true;
+    v.currentTime = t;
+    if (this.withAud) this.aud.currentTime = t;
+  },
+  setPeek(on) {
+    on = on && !!(this.p && this.p.video);   // 영상 없는 입력은 원본 보기가 없다
+    if (on && !this.orig.hasAttribute('src')) { this.orig.muted = true; this.orig.src = this.p.video; }
+    this.peek = on;
+    this.show();
+  },
+  seek(t) {
+    if (!this.mode) return;
+    this.win = null;
+    t = Math.max(0, t);
+    if (this.wait) { this.wait.t = t; this.wait.fresh = false; return; }   // 다 열면 그 자리로
+    if (this.mode !== 'mse') { this.move(t); return; }
+    if (!this.map) return;
+    if (!this.playing() && this.map.inCut(t) && this.p.video) {
+      this.setPeek(true);
+      this.move(t);
+      this.mse.currentTime = this.map.toOut(t);   // 재생을 누르면 바로 나오게 미리 채워 둔다
+    } else {
+      this.setPeek(false);
+      this.move(this.map.toOut(t));
+    }
+  },
   clip(start, end, skip) {
-    const v = this.video;
-    if (!v) return;
+    if (!this.mode || this.wait) return;
     const from = Math.max(0, start - 2);
-    const to = Math.min(this.duration() || end + 2, end + 2);
-    this.win = { to, skip };
-    this.move(from);
-    v.play().catch(() => {});
+    if (this.mode === 'mse') {
+      if (!this.map) return;
+      this.setPeek(false);
+      this.move(this.map.toOut(from));
+      this.win = { to: this.map.toOut(end + 2), skip: true };
+    } else {
+      this.win = { to: Math.min(this.duration() || end + 2, end + 2), skip };
+      this.move(from);
+    }
+    this.el().play().catch(() => {});
+  },
+  onPlay(v) {
+    if (v !== this.el()) { v.pause(); return; }
+    if (this.peek) {
+      // 원본 보기에서 재생: 이어 붙인 재생기로 돌아가 그 잘린 구간 끝부터
+      const t = v.currentTime;
+      v.pause();
+      this.setPeek(false);
+      if (this.map) this.move(this.map.toOut(t));
+      this.mse.play().catch(() => {});
+      return;
+    }
+    if (this.withAud) { this.aud.currentTime = v.currentTime; this.aud.play().catch(() => {}); }
+    this.loop();
   },
   loop() {
     cancelAnimationFrame(this.raf);
     const step = () => {
       this.tick();
-      if (this.video && !this.video.paused && !this.video.ended) this.raf = requestAnimationFrame(step);
+      if (this.playing()) this.raf = requestAnimationFrame(step);
     };
     this.raf = requestAnimationFrame(step);
   },
   tick() {
-    const v = this.video;
+    const v = this.el();
     if (!v) return;
     this.drawHead();
     if (v.paused) return;
@@ -974,6 +1123,8 @@ const player = {
       if (t >= this.win.to) { v.pause(); this.win = null; return; }
       if (!this.win.skip) return;
     }
+    if (this.mode === 'mse') return;   // 이미 잘린 결과를 튼다
+    if (this.withAud && Math.abs(this.aud.currentTime - t) > 0.3) this.aud.currentTime = t;
     for (const [a, b] of this.ranges) {
       if (a > t) break;
       if (t >= a && t < b - 0.01) { this.move(Math.min(b, this.duration() || b)); break; }
@@ -981,7 +1132,7 @@ const player = {
   },
   drawHead() {
     const d = (S.result && S.result.duration) || this.duration();
-    const t = this.video ? this.video.currentTime : 0;
+    const t = this.time();
     this.head.style.left = d ? `${Math.min(100, (t / d) * 100)}%` : '0';
     this.drawSub(t);
   },
@@ -989,12 +1140,19 @@ const player = {
   drawSub(t) {
     if (S.editing) return;
     const caps = (S.capsFor === S.sel && S.caps) || [];
-    const line = this.video ? caps.find((c) => !c.empty && c.start <= t && t < c.end) : null;
+    const line = this.mode ? caps.find((c) => !c.empty && c.start <= t && t < c.end) : null;
     const key = line ? `${line.key}|${S.capsVersion}` : '';
     if (key === this.subKey) return;
     this.subKey = key;
     this.sub.classList.toggle('empty', !line);
     this.sub.replaceChildren(...(line ? line.words.map((w) => wordEl(w, 'over')) : []));
+  },
+  // 개발자 도구에서 재는 용도: player.debug()
+  debug() {
+    const b = this.mse ? this.mse.buffered : null;
+    return { mode: this.mode, peek: this.peek, pending: !this.note.hidden, time: this.time(),
+      out: this.mode === 'mse' && this.mse ? this.mse.currentTime : null,
+      buffered: b ? Array.from({ length: b.length }, (_, i) => [b.start(i), b.end(i)]) : [] };
   },
 };
 
@@ -1095,6 +1253,7 @@ async function checkUpdate() {
 window.onAppEvent = (event, data) => {
   data = data || {};
   if (event === 'job' || event === 'jobs') refresh();
+  else if (event === 'preview') { if (data.id && data.id === S.sel) loadResult(data.id); }   // 잘린 소리를 다 만들었다
   else if (event === 'models') {
     if (data.error) coverError();
     else if (data.ready) { $('cover').hidden = true; refresh(); }
