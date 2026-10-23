@@ -34,6 +34,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import mmap
 import os
 import re
 import shutil
@@ -1505,7 +1506,15 @@ def fmp4_boxes(data: bytes, pos: int, end: int):
 def fmp4_index(path: Path) -> dict:
     """조각난 mp4 의 초기화 구간·조각별 바이트 범위·시작 시각. 브라우저가 구간만 받아 쓰게 한다.
     {"timescale", "codec", "init": [0, moov 끝], "frags": [[시작초, moof 시작, mdat 끝], ...]}"""
-    data = Path(path).read_bytes()
+    with open(path, "rb") as fh:
+        if os.fstat(fh.fileno()).st_size == 0:     # mmap 은 빈 파일을 거부한다
+            return {"timescale": 0, "codec": "", "init": [0, 0], "frags": []}
+        # 미리보기 영상은 수백 MB~수 GB 일 수 있어 통째로 읽지 않고 필요한 머리만 메모리 맵으로 훑는다
+        with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            return _fmp4_index(data)
+
+
+def _fmp4_index(data) -> dict:
     out = {"timescale": 0, "codec": "", "init": [0, 0], "frags": []}
 
     def walk(pos: int, end: int, frag_t: list):

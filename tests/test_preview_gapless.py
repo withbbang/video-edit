@@ -54,3 +54,9 @@ def test_write_index_merges_extra(tmp_path):
     assert out == tmp_path / "v.index.json"
     d = json.loads(out.read_text())
     assert d["keeps"] == [[0, 1]] and d["timescale"] == 1000 and len(d["frags"]) == 2
+
+
+def test_fmp4_index_empty_file(tmp_path):
+    p = tmp_path / "e.mp4"
+    p.write_bytes(b"")
+    assert pipeline.fmp4_index(p)["frags"] == []
