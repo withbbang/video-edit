@@ -38,9 +38,10 @@ def test_scale_applies_to_software_crf():
 def test_preview_failure_does_not_fail_analysis(tmp_path, monkeypatch, capsys):
     """--preview 실패는 분석을 멈추지 않고 미리보기 파일만 지운다 (final-review M8)."""
     import subprocess
-    out = tmp_path / "preview.mp4"
-    out.write_bytes(b"old")                               # 옛 미리보기가 섞이지 않게 지운다
-    out.with_name("preview.part.mp4").write_bytes(b"half")
+    out = tmp_path / "preview"
+    out.mkdir()
+    (out / "video.mp4").write_bytes(b"old")               # 옛 미리보기가 섞이지 않게 지운다
+    (out / "audio_full.part.m4a").write_bytes(b"half")
 
     def boom(*a, **k):
         raise subprocess.CalledProcessError(1, ["ffmpeg"])
@@ -48,7 +49,7 @@ def test_preview_failure_does_not_fail_analysis(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(pipeline, "PROGRESS", True)
     args = (tmp_path / "s.mp4", tmp_path / "c.wav", {}, {}, out, tmp_path, False, False)
     assert pipeline.try_preview(*args) is False
-    assert not out.exists() and not out.with_name("preview.part.mp4").exists()
+    assert not list(out.iterdir())
     text = capsys.readouterr().out
     assert "미리보기를 만들지 못했습니다" in text and '"stage": "preview"' in text.replace("'", '"')
     monkeypatch.setattr(pipeline, "make_preview", lambda *a, **k: None)
