@@ -19,11 +19,12 @@ from .runner import RunResult
 log = logging.getLogger(__name__)
 
 BUSY_ERROR = "오류: 같은 영상을 이미 처리 중"   # 다른 실행이 잠금을 쥐고 있었다 → 실패로 기억하지 않는다
+CUT_AUDIO_VERSION = 1   # 잘린 소리 파일 형식이 바뀌면 올린다 → 예전 audio_cut.* 는 key 가 달라져 다시 만든다
 
 
 def cut_key(cuts: list[dict], options: JobOptions) -> str:
-    """컷 시간·잡음·음량이 같으면 같은 소리 → 같은 key (sha1 앞 16자리)."""
-    data = {"cuts": [[round(float(c["start"]), 6), round(float(c["end"]), 6)] for c in cuts],
+    """컷 시간·잡음·음량·형식 버전이 같으면 같은 소리 → 같은 key (sha1 앞 16자리)."""
+    data = {"v": CUT_AUDIO_VERSION, "cuts": [[round(float(c["start"]), 6), round(float(c["end"]), 6)] for c in cuts],
             "denoise": options.denoise, "loudnorm": options.loudnorm}
     return hashlib.sha1(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 

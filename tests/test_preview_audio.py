@@ -346,3 +346,11 @@ def test_drop_stops_running_build_without_waiting(tmp_path):
     assert run.stopped_at == ["j1"] and ready == [] and not preview.is_ready(o1)
     assert "j1" not in ca._held and not ca._failed
     ca.shutdown()
+
+
+def test_cut_key_changes_with_format_version(monkeypatch):
+    cuts, o = [{"start": 1.0, "end": 1.5}], JobOptions()
+    k = preview.cut_key(cuts, o)
+    assert len(k) == 16
+    monkeypatch.setattr(preview, "CUT_AUDIO_VERSION", preview.CUT_AUDIO_VERSION + 1)
+    assert preview.cut_key(cuts, o) != k
