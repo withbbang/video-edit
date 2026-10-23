@@ -37,6 +37,7 @@ import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1479,6 +1480,78 @@ def render_video(src: Path, cut_wav: Path, srt: Path | None, out_mp4: Path,
     cmd += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_mp4]
     log("렌더링 시작 (영상 길이에 따라 몇 분 걸립니다)")
     ffmpeg_with_progress(cmd, sum(ef - sf for sf, ef in keeps) / f, "render")
+
+
+FMP4_CONTAINERS = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"moof", b"traf"}
+FMP4_SKIP = {b"stsd": 8, b"avc1": 78, b"mp4a": 28}   # 머리 뒤 자식 앞에 건너뛸 바이트
+
+
+def fmp4_boxes(data: bytes, pos: int, end: int):
+    """상자 (종류, 시작, 본문 시작, 끝) 를 차례로 낸다. 크기 1 은 64비트, 0 은 끝까지."""
+    while pos + 8 <= end:
+        size, typ = struct.unpack(">I4s", data[pos:pos + 8])
+        head = 8
+        if size == 1:
+            size, = struct.unpack(">Q", data[pos + 8:pos + 16])
+            head = 16
+        elif size == 0:
+            size = end - pos
+        if size < head:
+            break
+        yield typ, pos, pos + head, min(pos + size, end)
+        pos += size
+
+
+def fmp4_index(path: Path) -> dict:
+    """조각난 mp4 의 초기화 구간·조각별 바이트 범위·시작 시각. 브라우저가 구간만 받아 쓰게 한다.
+    {"timescale", "codec", "init": [0, moov 끝], "frags": [[시작초, moof 시작, mdat 끝], ...]}"""
+    data = Path(path).read_bytes()
+    out = {"timescale": 0, "codec": "", "init": [0, 0], "frags": []}
+
+    def walk(pos: int, end: int, frag_t: list):
+        for typ, start, body, stop in fmp4_boxes(data, pos, end):
+            if typ in FMP4_CONTAINERS:
+                if typ == b"moof":
+                    frag_t.clear()
+                walk(body, stop, frag_t)
+                if typ == b"moov":
+                    out["init"] = [0, stop]
+                elif typ == b"moof":
+                    out["frags"].append([frag_t[0] if frag_t else 0.0, start, stop])
+            elif typ in FMP4_SKIP:
+                if typ == b"avc1" and not out["codec"]:
+                    for t2, _, b2, e2 in fmp4_boxes(data, body + 78, stop):
+                        if t2 == b"avcC":
+                            out["codec"] = "avc1." + data[b2 + 1:b2 + 4].hex()
+                elif typ == b"mp4a":
+                    out["codec"] = "mp4a.40.2"
+                elif typ == b"stsd":
+                    walk(body + 8, stop, frag_t)
+            elif typ == b"mdhd":
+                off = 20 if data[body] == 1 else 12
+                out["timescale"], = struct.unpack(">I", data[body + off:body + off + 4])
+            elif typ == b"tfdt":
+                if data[body] == 1:
+                    t, = struct.unpack(">Q", data[body + 4:body + 12])
+                else:
+                    t, = struct.unpack(">I", data[body + 4:body + 8])
+                frag_t.append(t / (out["timescale"] or 1))
+
+    walk(0, len(data), [])
+    # 조각 = moof 시작 ~ 뒤따르는 mdat 끝
+    frags = []
+    for f in out["frags"]:
+        mdat_end = next((e for t, s, _, e in fmp4_boxes(data, f[2], len(data)) if t == b"mdat"), f[2])
+        frags.append([f[0], f[1], mdat_end])
+    out["frags"] = frags
+    return out
+
+
+def write_index(media: Path, extra: dict | None = None) -> Path:
+    """fmp4_index 결과에 extra 를 합쳐 <이름>.index.json 으로 쓴다."""
+    path = Path(media).with_suffix(".index.json")
+    path.write_text(json.dumps({**fmp4_index(media), **(extra or {})}, ensure_ascii=False), encoding="utf-8")
+    return path
 
 
 def make_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out: Path, work: Path,
