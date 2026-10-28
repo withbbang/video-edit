@@ -143,3 +143,11 @@ def test_range_op_rejects_non_finite(tmp_path):
     for s, e in [(float("nan"), 2), (1, float("inf")), (float("-inf"), 2), (1, float("nan"))]:
         assert a.add_range_op(job.id, "cut", s, e) is None
     assert job.range_ops == []
+
+
+def test_result_has_fps_for_frame_steps(tmp_path):
+    # 화면이 구간 끝을 원본 프레임 격자에 맞추도록 cuts.json 의 fps 를 넘긴다 (없으면 30)
+    a, store, job, _ = setup(tmp_path)
+    assert a.get_result(job.id)["fps"] == 30.0
+    write_out(job, "a.cuts.json", {**cuts(), "fps": "30000/1001"})
+    assert abs(a.get_result(job.id)["fps"] - 29.97003) < 1e-4

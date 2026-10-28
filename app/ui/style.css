@@ -203,13 +203,16 @@ input[type=text] { -webkit-user-select: text; user-select: text; }
 .find input:disabled { opacity: .5; }
 .find .n { color: var(--muted); white-space: nowrap; }
 
-/* 타임라인 구간 선택 (끌어서 잡고 0.01초·직접 입력으로 다듬기) */
+/* 타임라인 구간 선택 (끌기·Shift+클릭·여기서 시작/끝으로 잡고 프레임 단위·직접 입력으로 다듬기) */
 .tl .rsel { position: absolute; top: -3px; bottom: -3px; min-width: 2px; border: 2px solid var(--accent);
   background: #4a7dff33; border-radius: 3px; pointer-events: none; }
 .tl .rsel .hd { position: absolute; top: 2px; bottom: 2px; width: 7px; background: var(--accent); border-radius: 2px;
   cursor: ew-resize; pointer-events: auto; }
 .tl .rsel .hd[data-end=start] { left: -5px; }
 .tl .rsel .hd[data-end=end] { right: -5px; }
+.tl .rsel .hd.on { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent); }   /* ←/→ 로 옮길 끝 */
+.tl .rmark { position: absolute; top: -4px; bottom: -4px; width: 0; margin-left: -1px; border-left: 2px dashed var(--accent);
+  pointer-events: none; }
 .range-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 4px 0 6px; font-size: 12px; }
 .range-bar .lt { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .range-bar .rt { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }

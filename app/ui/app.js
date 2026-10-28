@@ -45,7 +45,8 @@ const S = {
   tab: 'cuts', cutKind: 'all', renderPending: false, caps: null, capsFor: null, capsVersion: 0, dropped: false, lineSel: null, editing: null,
   findKeys: new Set(), findCount: 0, scroll: {},
   // 타임라인 구간: range 는 {start, end} (원본 초), rangeBusy 는 요청 중
-  range: null, rangeBusy: false, rangeErr: false,
+  // mark 는 Shift+클릭·`여기서 시작` 으로 찍어 둔 시작점(끝을 기다림), rangeEnd 는 ←/→ 로 옮길 끝 'start' | 'end'
+  range: null, rangeBusy: false, rangeErr: false, mark: null, rangeEnd: 'end',
   // 편집 되돌리기: hist 는 서버가 알려 준 {undo, redo} 가능 여부, histBusy 는 요청 중
   hist: { undo: false, redo: false }, histBusy: false,
 };
@@ -117,8 +118,8 @@ function select(id) {
   S.sel = id; S.options = null; S.result = null; S.resultFor = null; S.resultKey = null;
   S.caps = null; S.capsFor = null; S.dropped = false; S.lineSel = null; S.editing = null; S.scroll = {};
   S.findKeys = new Set(); S.findCount = 0; findBar.find.value = ''; findBar.repl.value = '';
-  S.range = null; S.rangeErr = false; tlDrag = null;
-  S.hist = { undo: false, redo: false };
+  S.range = null; S.rangeErr = false; S.mark = null; S.rangeEnd = 'end'; tlDrag = null;
+  S.hist ={ undo: false, redo: false };
   player.detach();
   if (id) {
     call('get_options', id).then((o) => { if (S.sel === id && o) { S.options = o; render(); } });
@@ -373,7 +374,8 @@ function resultParts(j, r) {
   return out;
 }
 
-// 타임라인: 그냥 누르면 그 위치로 이동, 4px 이상 끌면 구간 고르기, 구간 양 끝 손잡이로 넓히고 좁히기
+// 타임라인: 그냥 누르면 그 위치로 이동, 4px 이상 끌면 구간 고르기, 구간 양 끝 손잡이로 넓히고 좁히기,
+// Shift+클릭은 홀수 번째가 시작·짝수 번째가 끝
 function timeline(r) {
   const dur = r.duration || player.duration() || 0;
   const bar = h('div', { class: 'tl' });
@@ -383,7 +385,7 @@ function timeline(r) {
     for (const c of r.cut_items || []) if (c.restored) bar.append(h('u', { style: pos(c.start, c.end) }));
     for (const o of restoreOps(r)) bar.append(h('u', { style: pos(o.start, o.end) }));
   }
-  bar.append(rangeSel, player.head);
+  bar.append(rangeSel, rangeMark, player.head);
   const at = (x, g) => Math.min(g.d, Math.max(0, ((x - g.rect.left) / g.rect.width) * g.d));
   bar.addEventListener('pointerdown', (e) => {
     const d = rangeDur();
@@ -394,8 +396,9 @@ function timeline(r) {
       // 짧은 구간은 손잡이가 겹친다 → 누른 곳이 두 손잡이 가운데보다 왼쪽이면 시작, 아니면 끝
       const mid = rect.left + (((S.range.start + S.range.end) / 2) / d) * rect.width;
       mode = e.clientX < mid ? 'start' : 'end';
+      S.rangeEnd = mode;
     }
-    tlDrag = { rect, x0: e.clientX, d, mode, anchor: 0 };
+    tlDrag = { rect, x0: e.clientX, d, mode, anchor: 0, shift: e.shiftKey };
     S.rangeErr = false;
     try { bar.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ }
     e.preventDefault();
@@ -407,6 +410,7 @@ function timeline(r) {
       if (Math.abs(e.clientX - tlDrag.x0) < 4) return;
       tlDrag.mode = 'new';
       tlDrag.anchor = at(tlDrag.x0, tlDrag);
+      S.mark = null;
     }
     const t = at(e.clientX, tlDrag);
     if (tlDrag.mode === 'new') S.range = { start: Math.min(tlDrag.anchor, t), end: Math.max(tlDrag.anchor, t) };
@@ -418,12 +422,12 @@ function timeline(r) {
     const g = tlDrag;
     tlDrag = null;
     if (g.mode === 'new' && S.range) {
-      // 0.01초 격자, 영상 안, 최소 MIN_LEN (손을 놓친 경우에도 맞춰 둔다)
-      let a = snapT(S.range.start, g.d), b = snapT(S.range.end, g.d);
-      if (b - a < MIN_LEN - EPS) { b = snapT(ceil100(a + MIN_LEN), g.d); a = Math.max(0, floor100(b - MIN_LEN)); }
-      S.range = { start: a, end: b };
+      // 프레임 격자, 영상 안, 최소 MIN_LEN (손을 놓친 경우에도 맞춰 둔다). ←/→ 는 끌던 쪽 끝을 옮긴다
+      S.rangeEnd = S.range.start < g.anchor - EPS ? 'start' : 'end';
+      S.range = makeRange(S.range.start, S.range.end, g.d);
     }
-    if (cancel) { /* 이동하지 않는다 */ } else if (g.mode === 'press') player.seek(at(e.clientX, g));
+    if (cancel) { /* 이동하지 않는다 */ } else if (g.mode === 'press' && g.shift) shiftClick(at(e.clientX, g));
+    else if (g.mode === 'press') player.seek(at(e.clientX, g));
     else if (g.mode === 'new') { if (S.range) player.seek(S.range.start); }
     else if (S.range) player.seek(S.range[g.mode]);
     drawRange();
@@ -486,17 +490,31 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---- 구간 직접 자르기·되살리기 -------------------------------------------------
-let tlDrag = null;   // 타임라인을 누르고 있는 동안 {rect, x0, d, mode: 'press'|'new'|'start'|'end', anchor}
+let tlDrag = null;   // 타임라인을 누르고 있는 동안 {rect, x0, d, mode: 'press'|'new'|'start'|'end', anchor, shift}
 const EPS = 1e-6;
 const MIN_LEN = 0.05;   // 서버가 받는 가장 짧은 구간
-const q100 = (t) => Math.round(t * 100) / 100;
-const floor100 = (t) => Math.floor(t * 100 + EPS) / 100;
-const ceil100 = (t) => Math.ceil(t * 100 - EPS) / 100;
-// 0.01초 격자에 맞추되 영상 끝을 넘지 않게: 끝 근처(0.005초 안)는 영상 끝 그대로 (API 가 길이를 넘으면 거절한다)
+// 구간 끝은 원본 프레임 격자에 맞춘다 (렌더도 프레임 단위로 자른다). fps 를 모르면 30
+function fps() {
+  const r = S.resultFor === S.sel ? S.result : null;
+  const f = Number(r && r.fps);
+  return f > 0 && isFinite(f) ? f : 30;
+}
+const fFloor = (t) => Math.floor(t * fps() + EPS) / fps();
+const fCeil = (t) => Math.ceil(t * fps() - EPS) / fps();
+const minGap = () => (Math.floor(MIN_LEN * fps()) + 1) / fps();   // MIN_LEN 을 넘는 가장 적은 프레임 수
+// 프레임 격자에 맞추되 영상 끝을 넘지 않게: 끝 근처(반 프레임 안)는 영상 끝 그대로 (API 가 길이를 넘으면 거절한다)
 function snapT(t, d) {
-  t = q100(Math.min(d, Math.max(0, t)));
-  if (t > d || d - t < 0.005) t = d;
+  const f = fps();
+  t = Math.round(Math.min(d, Math.max(0, t)) * f) / f;
+  if (t > d || d - t < 0.5 / f) t = d;
   return t < 0 ? 0 : t;
+}
+// 두 시간(순서 무관)을 프레임 격자의 구간으로. 짧으면 minGap 까지 넓힌다
+function makeRange(x, y, d) {
+  let a = snapT(Math.min(x, y), d), b = snapT(Math.max(x, y), d);
+  const g = minGap();
+  if (b - a < g - EPS) { b = snapT(fCeil(a + g), d); a = Math.max(0, fFloor(b - g)); }
+  return { start: a, end: b };
 }
 const restoreOps = (r) => ((r && r.range_ops) || []).map((o, i) => ({ ...o, i })).filter((o) => o.op === 'restore');
 function rangeDur() {
@@ -504,16 +522,62 @@ function rangeDur() {
   return (r && r.duration) || player.duration() || 0;
 }
 
-// 한쪽 끝을 옮긴다 (0.01초 단위, 영상 안). 반대쪽과 MIN_LEN 이상 떨어진 곳에서 멈춘다
+// 한쪽 끝을 옮긴다 (프레임 단위, 영상 안). 반대쪽과 MIN_LEN 이상 떨어진 곳에서 멈춘다
 function setRangeEnd(which, t) {
   const d = rangeDur();
   if (!d || !S.range || t === null || !isFinite(t)) return;
   t = snapT(t, d);
-  if (which === 'start') t = Math.min(t, Math.max(0, floor100(S.range.end - MIN_LEN)));
-  else t = Math.max(t, snapT(ceil100(S.range.start + MIN_LEN), d));
+  if (which === 'start') t = Math.min(t, Math.max(0, fFloor(S.range.end - minGap())));
+  else t = Math.max(t, snapT(fCeil(S.range.start + minGap()), d));
   S.range = { ...S.range, [which]: t };
+  S.rangeEnd = which;
   S.rangeErr = false;
 }
+
+// 한쪽 끝을 n 프레임 옮기고 그 프레임을 보여 준다 (◀▶ 버튼·←/→)
+function stepEnd(which, n) {
+  if (!S.range) return;
+  setRangeEnd(which, S.range[which] + n / fps());
+  player.seek(S.range[which]);
+  drawRange();
+}
+
+// 시간 t 를 구간 시작·끝으로 (`여기서 시작`·`여기서 끝`, Shift+클릭 두 번째).
+// 시작: 지금 구간의 끝보다 앞이면 시작만 옮기고, 아니면 구간을 버리고 시작점만 찍어 둔다.
+// 끝: 찍어 둔 시작점이 있으면 그 둘로, 지금 구간의 시작보다 뒤면 끝만 옮기고, 아니면 영상 처음부터.
+function pickEnd(which, t) {
+  const d = rangeDur();
+  if (!d || t === null || !isFinite(t)) return;
+  t = snapT(t, d);
+  const R = S.range;
+  S.rangeErr = false;
+  if (which === 'start') {
+    if (R && t <= R.end - minGap() + EPS) setRangeEnd('start', t);
+    else { S.range = null; S.mark = t; }
+  } else if (S.mark !== null) {
+    S.range = makeRange(S.mark, t, d);
+    S.rangeEnd = t < S.mark ? 'start' : 'end';
+    S.mark = null;
+  } else if (R && t >= R.start + minGap() - EPS) setRangeEnd('end', t);
+  else { S.range = makeRange(0, t, d); S.rangeEnd = 'end'; }
+  player.seek(t);
+  drawRange();
+}
+
+// Shift+클릭: 찍어 둔 시작점이 없으면 새 시작점(지금 구간은 버림), 있으면 끝
+function shiftClick(t) {
+  const d = rangeDur();
+  if (!d) return;
+  if (S.mark === null) {
+    S.range = null;
+    S.mark = snapT(t, d);
+    S.rangeErr = false;
+    player.seek(S.mark);
+    drawRange();
+  } else pickEnd('end', t);
+}
+
+const typingIn = (t) => !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
 
 // m:ss.ss (구간 시작·끝)
 function clock2(sec) {
@@ -538,16 +602,14 @@ function cutOverlap(a, b) {
 // 타임라인 위 구간 표시 (한 번 만들어 두고 다시 그릴 때 새 막대에 옮겨 붙인다)
 const rangeSel = h('div', { class: 'rsel', hidden: true },
   h('i', { class: 'hd', 'data-end': 'start', title: '시작 옮기기' }), h('i', { class: 'hd', 'data-end': 'end', title: '끝 옮기기' }));
+// 찍어 둔 시작점 (끝을 기다리는 동안 점선)
+const rangeMark = h('i', { class: 'rmark', hidden: true });
 
 // 타임라인 아래 막대: 버튼은 한 번 만들고 글자·켜짐만 그 자리에서 고친다 (누르는 도중 바뀌어 클릭이 사라지지 않게)
 const rangeBar = (() => {
   const btn = (text, cls, fn) => h('button', { type: 'button', class: 'btn' + (cls ? ` ${cls}` : ''), onclick: fn }, text);
-  const step = (which, dt) => () => {
-    if (!S.range) return;
-    setRangeEnd(which, S.range[which] + dt);
-    player.seek(S.range[which]);
-    drawRange();
-  };
+  const step = (which, n) => () => stepEnd(which, n);
+  const here = (which) => () => { if (player.ready()) pickEnd(which, player.time()); };
   // 시간 칸: 눌러서 직접 입력. Enter·칸 밖을 누르면 반영, Esc 는 취소
   const timeIn = (which, label) => {
     const el = h('input', { type: 'text', class: 'tin', spellcheck: 'false', 'aria-label': label, title: '눌러서 직접 입력 (분:초.00)' });
@@ -560,25 +622,37 @@ const rangeBar = (() => {
     el.addEventListener('blur', () => {
       const t = cancel ? null : parseClock(el.value);
       cancel = false;
-      if (t !== null && S.range) { setRangeEnd(which, t); player.seek(S.range[which]); }
+      if (t !== null && S.range) { setRangeEnd(which, t); player.seek(S.range[which]); }   // ←/→ 도 이 끝을 옮긴다
       drawRange();
     });
     return el;
   };
+  const frameBtn = (which, n) => {
+    const el = btn(n < 0 ? '◀' : '▶', null, step(which, n));
+    el.title = n < 0 ? '1프레임 앞으로 (←)' : '1프레임 뒤로 (→)';
+    return el;
+  };
+  const hereBtn = (which, text, title) => {
+    const el = btn(text, null, here(which));
+    el.title = title;
+    return el;
+  };
   const b = {
-    a: timeIn('start', '구간 시작'), aDown: btn('◀0.01', null, step('start', -0.01)), aUp: btn('0.01▶', null, step('start', 0.01)),
-    z: timeIn('end', '구간 끝'), zDown: btn('◀0.01', null, step('end', -0.01)), zUp: btn('0.01▶', null, step('end', 0.01)),
+    setA: hereBtn('start', '여기서 시작', '지금 위치를 구간 시작으로 (I)'),
+    setZ: hereBtn('end', '여기서 끝', '지금 위치를 구간 끝으로 (O)'),
+    a: timeIn('start', '구간 시작'), aDown: frameBtn('start', -1), aUp: frameBtn('start', 1),
+    z: timeIn('end', '구간 끝'), zDown: frameBtn('end', -1), zUp: frameBtn('end', 1),
     len: h('span', { class: 'muted' }),
     cut: btn('자르기', 'cut', () => rangeOp('cut')),
     back: btn('되살리기', 'on', () => rangeOp('restore')),
-    cancel: btn('취소', null, () => { S.range = null; S.rangeErr = false; drawRange(); }),
-    hint: h('span', { class: 'muted hint' }, '타임라인을 끌어 구간을 선택하세요'),
+    cancel: btn('취소', null, () => { S.range = null; S.mark = null; S.rangeErr = false; drawRange(); }),
+    hint: h('span', { class: 'muted hint' }),
     err: h('span', { class: 'err' }, '구간을 바꾸지 못했습니다'),
   };
   b.times = h('span', { class: 'rt' }, h('span', { class: 'lt' }, b.a, b.aDown, b.aUp), h('span', { class: 'muted' }, '~'),
     h('span', { class: 'lt' }, b.z, b.zDown, b.zUp), b.len);
   b.acts = h('span', { class: 'lt' }, b.cut, b.back, b.cancel);
-  b.el = h('div', { class: 'range-bar' }, b.hint, b.times, b.acts, b.err);
+  b.el = h('div', { class: 'range-bar' }, h('span', { class: 'lt' }, b.setA, b.setZ), b.hint, b.times, b.acts, b.err);
   return b;
 })();
 
@@ -592,7 +666,10 @@ function drawRange() {
   if (R && d) {
     rangeSel.style.left = `${(R.start / d) * 100}%`;
     rangeSel.style.width = `${((R.end - R.start) / d) * 100}%`;
+    for (const hd of rangeSel.children) hd.classList.toggle('on', hd.dataset.end === S.rangeEnd);
   }
+  rangeMark.hidden = S.mark === null || !d;
+  if (!rangeMark.hidden) rangeMark.style.left = `${(S.mark / d) * 100}%`;
   // 막대 아래
   const b = rangeBar;
   b.el.hidden = !r || !d;
@@ -600,12 +677,15 @@ function drawRange() {
   const can = HAS_RESULT.has(j.status) && !BUSY.has(j.status) && !S.rangeBusy;
   b.err.hidden = !S.rangeErr;
   b.hint.hidden = !!R || S.rangeErr;
+  b.hint.textContent = S.mark !== null ? '끝 위치를 Shift+클릭하거나 ‘여기서 끝’을 누르세요 (Esc 취소)'
+    : '타임라인을 끌거나 Shift+클릭 두 번으로 구간을 선택하세요';
+  b.setA.disabled = b.setZ.disabled = S.rangeBusy;
   b.times.hidden = b.acts.hidden = !R;
   if (!R) return;
   for (const [el, t] of [[b.a, R.start], [b.z, R.end]]) {
     if (document.activeElement !== el) el.value = clock2(t);   // 입력 중인 글자는 그대로
   }
-  b.len.textContent = `(${(R.end - R.start).toFixed(2)}초)`;
+  b.len.textContent = `(${(R.end - R.start).toFixed(2)}초 · ${Math.round((R.end - R.start) * fps())}프레임)`;
   const inCut = cutOverlap(R.start, R.end);
   b.cut.disabled = !can || R.end - R.start - inCut < 0.05;   // 남아 있는 곳이 있어야 자를 수 있다
   b.back.disabled = !can || inCut < 0.01;                     // 잘린 곳과 겹쳐야 되살릴 수 있다
@@ -648,11 +728,27 @@ async function removeOp(id, index) {
   }
 }
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape' || !S.range || S.editing || tlDrag) return;
+  if (e.key !== 'Escape' || (!S.range && S.mark === null) || S.editing || tlDrag) return;
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
-  S.range = null; S.rangeErr = false;
+  S.range = null; S.mark = null; S.rangeErr = false;
   drawRange();
+});
+// ←/→: 구간이 있으면 마지막으로 만진 끝을, 없으면 재생 위치를 1프레임 (Shift 와 함께 10프레임).
+// I/O: 지금 위치를 구간 시작·끝으로 (`여기서 시작`·`여기서 끝`)
+document.addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing || S.editing || tlDrag || typingIn(e.target)) return;
+  if (rangeBar.el.hidden || !rangeDur() || !player.ready()) return;   // 결과 화면에서만
+  const k = e.key;
+  if (k === 'ArrowLeft' || k === 'ArrowRight') {
+    e.preventDefault();
+    const n = (k === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 10 : 1);
+    if (S.range) stepEnd(S.rangeEnd, n);
+    else player.seek(snapT(player.time() + n / fps(), rangeDur()));
+  } else if ((k === 'i' || k === 'I' || k === 'o' || k === 'O') && !e.shiftKey && !S.rangeBusy) {
+    e.preventDefault();
+    pickEnd(k.toLowerCase() === 'i' ? 'start' : 'end', player.time());
+  }
 });
 
 const KIND = { silence: '말 없는 구간', filler: '망설임', habit: '말버릇', manual: '직접 자름', restore_op: '직접 되살림' };

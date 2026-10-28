@@ -697,7 +697,7 @@ class Api:
             summary = {**summary, "silence_min_sec": _silence_min_sec()}
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "cut_items": items,
                   "range_ops": ops, "history": self._hist(job_id),
-                  "duration": duration}
+                  "duration": duration, "fps": float(subtitles._fps(cur or {}))}   # 화면의 프레임 단위 구간 다듬기
         result.update(self._preview(snap, status, effective, settings))
         if dropped:
             result["edits_dropped"] = True
