@@ -41,6 +41,7 @@ ALLOWED = {
     "denoise": range(101),
     "loudnorm": ("keep", "match"),
     "subs": ("omit", "embed"),
+    "burn": ("off", "on"),
     "quality": ("low", "auto", "high"),
 }
 PROGRESS_INTERVAL = 0.2  # 작업·모델 진행 이벤트는 초당 5번까지
@@ -175,23 +176,27 @@ def save_cuts(job: Job, lock=None) -> Path | None:
 
 
 def save_subs_edits(job: Job, lock=None) -> Path | None:
-    """저장용 자막 수정 파일 <이름>.subs_edits.json. 어절·줄 시간 수정이 없으면 낡은 파일을 지우고 None.
+    """저장용 자막 수정 파일 <이름>.subs_edits.json. 어절·줄 시간 수정·글자 꾸밈이 없으면 낡은 파일을 지우고 None.
     job 필드는 lock(queue.lock) 을 쥐고 복사한 뒤 락 밖에서 쓴다."""
     with lock or contextlib.nullcontext():
         src, sha = Path(job.src), job.edits_sha1
         words, lines = dict(job.word_edits), {k: list(v) for k, v in job.line_times.items()}
+        styles = copy.deepcopy(job.word_styles)
     path = paths.job_dir(src) / "out" / f"{src.stem}.subs_edits.json"
-    if not (words or lines) or not sha:
+    if not (words or lines or styles) or not sha:
         path.unlink(missing_ok=True)
         return None
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"transcript_sha1": sha, "words": words, "lines": lines}, ensure_ascii=False, indent=1), encoding="utf-8")
+    data = {"transcript_sha1": sha, "words": words, "lines": lines}
+    if styles:
+        data["styles"] = styles
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
 
 
 WAVE_HOP = 0.01      # 파형 한 값의 길이 (초)
 WAVE_FLOOR = -60.0   # 이보다 작은 소리는 0
-CUT_AUDIO_WAIT = 10.0   # 분석·저장 전에 그 영상의 미리보기 소리 만들기가 멈추길 기다리는 최대 초
+CUT_AUDIO_WAIT = 10.0   # 분석·저장 전에 그 영상의 미리보기 소리·썸네일 만들기가 멈추길 기다리는 최대 초
 THUMBS_STOP_WAIT = 3.0   # 영상을 뺄 때 썸네일 만들기가 멈추길 기다리는 최대 초
 
 
@@ -304,11 +309,11 @@ class Api:
 
     @staticmethod
     def _snap(job: Job) -> tuple:
-        return copy.deepcopy((job.restored, job.range_ops, job.word_edits, job.line_times, job.edits_sha1))
+        return copy.deepcopy((job.restored, job.range_ops, job.word_edits, job.line_times, job.word_styles, job.edits_sha1))
 
     @staticmethod
     def _put(job: Job, snap: tuple) -> None:
-        job.restored, job.range_ops, job.word_edits, job.line_times, job.edits_sha1 = copy.deepcopy(snap)
+        job.restored, job.range_ops, job.word_edits, job.line_times, job.word_styles, job.edits_sha1 = copy.deepcopy(snap)
 
     def _record(self, job: Job, before: tuple) -> None:
         """편집 뒤에 부른다 (queue.lock 안). 실제로 바뀌었으면 편집 전 상태를 쌓고 다시 실행 목록을 비운다."""
@@ -513,11 +518,11 @@ class Api:
     # ---- 자막 고치기 ----------------------------------------------------------
 
     def _drop_stale_edits(self, job: Job, tr: dict) -> bool:
-        """고친 자막을 만들 때의 받아쓰기 지문이 지금과 다르면 어절·줄 시간 수정을 버린다 (구간 작업은 시간 기준이라 남김).
+        """고친 자막을 만들 때의 받아쓰기 지문이 지금과 다르면 어절·줄 시간 수정·글자 꾸밈을 버린다 (구간 작업은 시간 기준이라 남김).
         버렸으면 True. queue.lock 을 쥔 채 부른다."""
         if job.edits_sha1 is None or job.edits_sha1 == subtitles.transcript_sha1(tr):
             return False
-        job.word_edits, job.line_times, job.edits_sha1 = {}, {}, None
+        job.word_edits, job.line_times, job.word_styles, job.edits_sha1 = {}, {}, {}, None
         self._history.pop(job.id, None)   # 옛 받아쓰기 기준 수정은 되돌려도 맞지 않는다
         self._store.save()
         return True
@@ -541,9 +546,10 @@ class Api:
                 return None
             dropped = self._drop_stale_edits(job, tr)
             edits, times = dict(job.word_edits), {k: list(v) for k, v in job.line_times.items()}
+            styles = copy.deepcopy(job.word_styles)
         cuts = diff.effective_cuts(cuts, restored, ops, tr)
         try:
-            caps = subtitles.captions(cuts, tr, subtitles.load_cfg(), edits, times)
+            caps = subtitles.captions(cuts, tr, subtitles.load_cfg(), edits, times, styles)
         except Exception:
             log.exception("자막 계산 실패")
             return None
@@ -562,9 +568,10 @@ class Api:
             before = self._snap(job)
             if not change(job, tr):
                 return None
-            if job.edits_sha1 is None and (job.word_edits or job.line_times):
+            has = job.word_edits or job.line_times or job.word_styles
+            if job.edits_sha1 is None and has:
                 job.edits_sha1 = subtitles.transcript_sha1(tr)
-            elif not (job.word_edits or job.line_times):
+            elif not has:
                 job.edits_sha1 = None
             self._record(job, before)
             if job.status == Status.SAVED:
@@ -597,6 +604,87 @@ class Api:
                 job.word_edits.pop(key, None)
             else:
                 job.word_edits[key] = text.strip()
+            return True
+        return self._edit_subs(job_id, change)
+
+    def set_line(self, job_id: str, key: str, text: str | None) -> dict | None:
+        """자막 한 줄 글자를 통째로 고친다 (subtitles.plan_line 으로 바뀐 어절만). 글자 꾸밈은 고친 글자에 옮긴다.
+        text 가 None 이면 그 줄 어절을 모두 원래 글자로."""
+        if not isinstance(key, str) or not (text is None or (isinstance(text, str) and len(text) <= 2000)):
+            return None
+        st = self._caption_state_ex(job_id)
+        if st is None:
+            return None
+        line = next((c for c in st[3] if c["key"] == key), None)
+        if line is None:
+            return None
+        words = [{"key": w["key"], "text": w["text"]} for w in line["words"]]
+
+        def change(job: Job, tr: dict) -> bool:
+            origs = subtitles.transcript_words(tr)
+            if text is None:
+                for w in words:
+                    job.word_edits.pop(w["key"], None)
+                return True
+            changes, restyled = subtitles.plan_line(words, text, job.word_styles)
+            for k, v in changes.items():
+                if v == origs.get(k):
+                    job.word_edits.pop(k, None)
+                else:
+                    job.word_edits[k] = v
+                if k in restyled:
+                    if restyled[k]:
+                        job.word_styles[k] = restyled[k]
+                    else:
+                        job.word_styles.pop(k, None)
+            return True
+        return self._edit_subs(job_id, change)
+
+    def set_style(self, job_id: str, ranges: list, style: dict | None) -> dict | None:
+        """고른 글자를 꾸민다. ranges = [[어절 키, 시작 글자, 끝 글자(빼고)], ...] (글자 = 유니코드 코드 포인트),
+        style = {font?, size?, color?, bold?}: 준 항목만 바꾸고 값이 None 이면 그 항목을 지운다. style 이 None 이면 꾸밈을 모두 지운다."""
+        pl = subtitles.pipeline_module()
+        if not isinstance(ranges, list) or not ranges or len(ranges) > 2000:
+            return None
+        if style is not None:
+            if not isinstance(style, dict) or not style or set(style) - set(subtitles.STYLE_KEYS):
+                return None
+            sets = pl.clean_style({k: v for k, v in style.items() if v is not None}) or {}
+            # 기본값으로 되돌리는 값(size 1.0, bold False)은 지우기로 본다
+            drops = {k for k in style if k not in sets}
+        cleaned = []
+        for r in ranges:
+            if (not isinstance(r, (list, tuple)) or len(r) != 3 or not isinstance(r[0], str)
+                    or not all(isinstance(x, int) and not isinstance(x, bool) for x in r[1:]) or not 0 <= r[1] < r[2] <= 1000):
+                return None
+            cleaned.append((r[0], r[1], r[2]))
+        st = self._caption_state_ex(job_id)
+        if st is None:
+            return None
+        texts = {w["key"]: w["text"] for c in st[3] for w in c["words"]}
+
+        def change(job: Job, _tr: dict) -> bool:
+            for key, a, b in cleaned:
+                if key not in texts:
+                    return False
+                b = min(b, len(texts[key]))
+                chars = list(job.word_styles.get(key) or [])
+                chars += [None] * (b - len(chars))
+                for i in range(a, b):
+                    cur = dict(chars[i] or {})
+                    if style is None:
+                        cur = {}
+                    else:
+                        for k in drops:
+                            cur.pop(k, None)
+                        cur.update(sets)
+                    chars[i] = cur or None
+                while chars and chars[-1] is None:
+                    chars.pop()
+                if chars:
+                    job.word_styles[key] = chars
+                else:
+                    job.word_styles.pop(key, None)
             return True
         return self._edit_subs(job_id, change)
 

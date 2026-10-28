@@ -60,7 +60,7 @@ button { font: inherit; color: inherit; }
 /* 가운데(재생기)는 스크롤하지 않는다: 타임라인 패널은 제 높이, 재생기가 남는 높이를 채우며 줄어든다 */
 .res-main { flex: 1 1 0; min-width: 300px; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
 .res-main > * { flex-shrink: 0; }
-.res-main > .pv { flex: 1 1 0; min-height: 120px; display: flex; flex-direction: column; }
+.res-main > .pv { flex: 1 1 0; min-height: 120px; display: flex; flex-direction: column; position: relative; }
 .res-main > .pv > video { flex: 1 1 0; min-height: 0; height: auto; max-height: none; object-fit: contain; }
 .res-main > .pv > .pv-note { flex-shrink: 0; }
 .res-side { flex: 0 0 30%; min-width: 250px; max-width: 340px; min-height: 0; display: flex; flex-direction: column; }
@@ -181,20 +181,13 @@ input[type=text] { -webkit-user-select: text; user-select: text; }
 .notice { display: flex; align-items: center; gap: 8px; padding: 6px 10px; margin-bottom: 8px; border-radius: 6px;
   border: 1px solid var(--changed); background: #e07b0018; }
 .notice .x { margin-left: auto; }
-.subline { min-height: 30px; margin-top: 4px; padding: 3px 8px; border-radius: 6px; background: #000; color: #fff;
-  font-size: 15px; line-height: 24px; text-align: center; word-break: keep-all; }
-.subline.empty { visibility: hidden; }
 .w { display: inline-block; padding: 0 3px; margin: 0 1px; border-radius: 4px; }
 .w.can { cursor: pointer; }
 .w.can:hover { background: #4a7dff33; }
 .w.edited { color: var(--restored); background: #2a9d5c22; font-weight: 600; }
-.subline .w.edited { background: #2a9d5c33; }
-.w.gone, .subline .w.gone { color: var(--muted); background: none; font-weight: normal; text-decoration: line-through; }
+.w.gone { color: var(--muted); background: none; font-weight: normal; text-decoration: line-through; }
 .cap.empty .t { text-decoration: line-through; }
 .w.hit { background: #f5a62355; box-shadow: inset 0 -2px var(--changed); }
-.w-edit { display: inline-flex; align-items: center; gap: 4px; margin: 0 1px; }
-.w-in { font: inherit; padding: 0 3px; border: 0; border-radius: 4px; outline: 2px solid var(--accent);
-  background: #fff; color: #1d1d1f; min-width: 3em; }
 .cut-list.subs { font-size: 14px; }
 .cap { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 5px 0; border-bottom: 1px dashed var(--soft); }
 .cap .t { width: 44px; flex-shrink: 0; border: 0; background: none; padding: 0; text-align: left; cursor: pointer;
@@ -278,3 +271,100 @@ video.grab { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity:
 .range-bar .hint { font-size: 11px; }
 .btn.cut { border-color: var(--cut); color: var(--cut); }
 .opt.op-back .w { color: var(--restored); }
+
+/* ---- 영상 위 자막 · 글자 꾸미기 ----------------------------------------------
+   자리·크기는 player.layoutSub 가 영상 화면에 맞춰 --fs(기본 글자 크기)·--ol(외곽선) 과 left/width/bottom 으로 준다.
+   유튜브용 자막 새기기(pipeline.build_ass)와 같은 글꼴·흰 글자·검은 외곽선 */
+@font-face { font-family: "NanumGothic"; src: url("fonts/NanumGothic-Regular.ttf") format("truetype"); font-weight: 400; }
+@font-face { font-family: "NanumGothic"; src: url("fonts/NanumGothic-Bold.ttf") format("truetype"); font-weight: 700; }
+@font-face { font-family: "NanumMyeongjo"; src: url("fonts/NanumMyeongjo-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Black Han Sans"; src: url("fonts/BlackHanSans-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Jua"; src: url("fonts/Jua-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Do Hyeon"; src: url("fonts/DoHyeon-Regular.ttf") format("truetype"); }
+
+.capover { position: absolute; z-index: 2; left: 0; width: 100%; bottom: 40px; pointer-events: none;
+  --fs: 16px; --ol: 1px; }
+.capline { font-family: "NanumGothic", sans-serif; font-size: var(--fs); line-height: 1.25; color: #fff;
+  text-align: center; word-break: keep-all; overflow-wrap: anywhere;
+  -webkit-text-stroke: calc(var(--ol) * 2) #000; paint-order: stroke fill;
+  -webkit-user-select: none; user-select: none; }
+.capline.empty { visibility: hidden; }
+.capline .w { display: inline; padding: 0; margin: 0; border-radius: .12em; pointer-events: auto; }
+.capline .w.can:hover { background: #4a7dff40; }
+.capline .w.edited { color: inherit; background: none; font-weight: inherit; }
+.capline .w.gone { color: #ffffff80; -webkit-text-stroke: 0; }
+/* 영상 위에서 줄 고치기: 새기는 모습 그대로 두고 칸 테두리만 */
+.capline .le { pointer-events: auto; -webkit-user-select: text; user-select: text; cursor: text; outline: none;
+  border-radius: .15em; box-shadow: 0 0 0 2px var(--accent); background: #0000004d; padding: 0 .15em; }
+.capline .le .w { display: inline; pointer-events: auto; background: none; }
+.capline .le ::selection { background: #4a7dffb3; }
+
+/* 꾸밈 막대 (자막 탭 목록 위, 영상 위에서 고칠 땐 자막 위에도 뜸) */
+.ct { flex: none; margin: 2px 0 6px; padding: 6px 8px; border-radius: 8px;
+  font-size: 12px; line-height: 1.3; color: var(--fg); background: var(--tl-panel); border: 1px solid transparent;
+  -webkit-user-select: none; user-select: none; }
+.ct.on { border-color: var(--line); box-shadow: 0 4px 12px #4a7dff14; }
+/* 꺼진 막대: 같은 도구를 흐리게 (누를 수 없음은 inert). 켜고 꺼도 막대 높이가 같아 목록이 움직이지 않는다 */
+.ct:not(.on) { background: var(--soft); cursor: not-allowed; }
+.ct:not(.on) > .ct-row { opacity: .4; filter: grayscale(1); }
+.ct-clear.off { visibility: hidden; }
+/* 세 줄 고정 배치. 막대 폭에 맞춰 늘고 줄며, 아주 좁으면 글꼴만 한 줄을 따로 쓴다 */
+.ct { container-type: inline-size; }
+.ct-row { display: flex; flex-direction: column; gap: 8px; }
+.ct-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ct-type .ct-font { flex: 1 1 auto; min-width: 0; max-width: none; height: 26px; }
+.ct-type .ct-bold { margin-left: auto; }
+/* 색 견본은 막대 폭에 고르게 펼친다 (줄 양끝이 위아래 줄과 맞음) */
+.ct-colors { display: grid; grid-template-columns: repeat(8, 22px); justify-content: space-between; justify-items: center; gap: 4px; }
+.ct-acts { justify-content: space-between; padding-top: 6px; border-top: 1px solid var(--soft); }
+@container (max-width: 240px) {
+  .ct-type { flex-wrap: wrap; }
+  .ct-type .ct-font { flex-basis: 100%; }
+}
+@container (max-width: 206px) {
+  .ct-colors { grid-template-columns: repeat(4, 22px); row-gap: 6px; }   /* 색 견본 4개씩 두 줄 */
+}
+.ct-font { font: inherit; font-size: 13px; color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 2px 4px; max-width: 110px; }
+.ct-grp { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+.ct-btn { min-width: 26px; height: 26px; padding: 0 6px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--fg); cursor: pointer; font: inherit; font-size: 14px; }
+.ct-btn:hover:not(:disabled) { border-color: var(--accent); }
+.ct-btn:disabled { opacity: .35; cursor: default; }
+.ct-size { min-width: 46px; text-align: center; font-variant-numeric: tabular-nums; }
+.ct-bold { font-weight: 800; font-family: Georgia, serif; }
+.ct-bold[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* 흰색 견본이 밝은 바탕에서도 보이게 어두운 테두리 */
+.ct-sw { width: 18px; height: 18px; padding: 0; border-radius: 50%; border: 1px solid #0006; background: var(--sw);
+  cursor: pointer; }
+.ct-sw[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--tl-panel), 0 0 0 4px var(--accent); }
+.ct-pick { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer; }
+.ct-pick::-webkit-color-swatch-wrapper { padding: 0; }
+.ct-pick::-webkit-color-swatch { border: 1px dashed var(--muted); border-radius: 50%; }
+.ct-pick:not(.on)::-webkit-color-swatch { background: conic-gradient(#ff453a, #ffd60a, #30d158, #64d2ff, #5e5ce6, #ff6fb5, #ff453a) !important; }
+.ct-pick.on::-webkit-color-swatch { border: 2px solid var(--accent); }
+.ct-clear { border: 0; background: none; color: var(--muted); padding: 2px 0; cursor: pointer; font-size: 12px; }
+.ct-clear:hover { color: var(--fg); text-decoration: underline; }
+.ct :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* 자막 탭에서 줄 고치기: 줄 글자 전체가 한 칸 */
+.cut-list.subs .ws.editing { cursor: text; }
+.cut-list.subs .le { display: block; padding: 1px 4px; margin: -1px -4px; border-radius: 4px; outline: none;
+  background: var(--bg); box-shadow: 0 0 0 2px var(--accent); -webkit-user-select: text; user-select: text; }
+/* 어절을 inline 으로 — inline-block 이면 커서가 어절 안에 갇혀 줄 처음·끝(⌘←/→)으로 못 간다 */
+.cut-list.subs .le .w { display: inline; padding: 0; margin: 0; background: none; color: inherit; font-weight: inherit; }
+.cut-list.subs .ws:not(.editing):hover { background: #4a7dff14; border-radius: 4px; cursor: text; }
+
+/* 영상 위 자막 위에 뜨는 꾸밈 막대 (영상 위에서 고칠 때만) */
+.ct[hidden] { display: none; }
+.ct.float { position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%); width: 280px;
+  max-width: 96%; margin: 0; pointer-events: auto; text-align: left; -webkit-text-stroke: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
+  box-shadow: 0 8px 24px #0006; }
+
+/* 자막 탭 목록: 음절(글자) 단위로 끌어 고른다. 꾸민 색은 밝은 바탕에서 읽히게 글자 아래 띠로 보인다 */
+.cut-list.subs .ws { -webkit-user-select: text; user-select: text; }
+.cut-list.subs .w { cursor: text; }
+.cut-list.subs .c { border-radius: 2px; }
+.cut-list.subs .c.tint { box-shadow: inset 0 -3px var(--tint); }
+.cut-list.subs ::selection { background: #4a7dff59; }

@@ -158,6 +158,20 @@ def _frac(x) -> Fraction | None:
     return f if f > 0 else None
 
 
+def video_rotation(v: dict) -> int:
+    """휴대폰 영상의 회전 정보(도). ffmpeg 는 이대로 돌려서 필터에 넘긴다."""
+    for sd in v.get("side_data_list") or []:
+        if "rotation" in sd:
+            try:
+                return int(float(sd["rotation"])) % 360
+            except (TypeError, ValueError):
+                pass
+    try:
+        return int(float((v.get("tags") or {}).get("rotate") or 0)) % 360
+    except (TypeError, ValueError):
+        return 0
+
+
 def ffprobe(path: Path) -> dict:
     out = run(["ffprobe", "-v", "error", "-print_format", "json",
                "-show_streams", "-show_format", path], quiet=True).stdout
@@ -189,6 +203,7 @@ def ffprobe(path: Path) -> dict:
         "vfr": vfr,
         "width": int(v["width"]) if v else 0,
         "height": int(v["height"]) if v else 0,
+        "rotation": video_rotation(v) if v else 0,
         "duration": duration,
         "sample_rate": int(a.get("sample_rate", 48000)),
         "channels": int(a.get("channels", 2)),
@@ -1313,14 +1328,14 @@ def resolve_line_times(caps: list[dict], line_times: dict | None) -> dict[str, t
     return {caps[li]["key"]: (k, line_times[k]) for li, (_, k) in best.items()}
 
 
-def captions_to_srt(caps: list[dict], remap: TimeRemap, final_dur: float,
-                    line_times: dict[str, list[float]] | None = None) -> str:
-    """줄 → SRT. line_times[key] = [시작, 끝](원본초)인 줄은 그 시간을 쓰고 뒷처리에서 움직이지 않는다."""
+def caption_cues(caps: list[dict], remap: TimeRemap, final_dur: float,
+                 line_times: dict[str, list[float]] | None = None) -> list[tuple[float, float, dict]]:
+    """줄 → [(결과 영상 시작초, 끝초, 줄)]. SRT 와 새기는 자막(ASS)이 같은 시간을 쓴다.
+    line_times[key] = [시작, 끝](원본초)인 줄은 그 시간을 쓰고 뒷처리에서 움직이지 않는다."""
     timed = resolve_line_times(caps, line_times)
     # 자막끼리 겹치지 않게, 영상 길이를 넘지 않게
-    out: list[list] = []   # [시작, 끝, 글자, 고정 여부]
+    out: list[list] = []   # [시작, 끝, 줄, 고정 여부]
     for c in caps:
-        text = " ".join(w["text"] for w in c["words"]).strip()
         fixed = c["key"] in timed
         if fixed:
             t = timed[c["key"]][1]
@@ -1336,29 +1351,184 @@ def captions_to_srt(caps: list[dict], remap: TimeRemap, final_dur: float,
                 s = max(s, prev[1] + 0.05)
         if not fixed:
             e = max(e, s + 0.3)
-        out.append([s, e, text, fixed])
-    lines = []
-    for i, (s, e, text, fixed) in enumerate(out):
+        out.append([s, e, c, fixed])
+    cues = []
+    for s, e, c, fixed in out:
         if not fixed:
             e = min(e, final_dur)
             s = min(s, max(0.0, e - 0.3))
-        lines.append(f"{i+1}\n{fmt_srt_time(s)} --> {fmt_srt_time(e)}\n{text}\n")
+        cues.append((s, e, c))
+    return cues
+
+
+def caption_text(c: dict) -> str:
+    return " ".join(w["text"] for w in c["words"]).strip()
+
+
+def captions_to_srt(caps: list[dict], remap: TimeRemap, final_dur: float,
+                    line_times: dict[str, list[float]] | None = None) -> str:
+    """줄 → SRT (시간 규칙은 caption_cues)."""
+    lines = [f"{i+1}\n{fmt_srt_time(s)} --> {fmt_srt_time(e)}\n{caption_text(c)}\n"
+             for i, (s, e, c) in enumerate(caption_cues(caps, remap, final_dur, line_times))]
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def load_subs_edits(path: Path | None, tr: dict) -> tuple[dict, dict]:
-    """앱이 넘긴 자막 수정 파일 → (어절 글자, 줄 시간). 받아쓰기가 달라졌으면 버린다."""
+# ---- 자막 새기기 (유튜브용 번인) -----------------------------------------------
+# 글자 꾸밈 {font: 글꼴 family 이름, size: 기본 크기 배율, color: "#RRGGBB", bold: bool}. 앱 화면(app/ui)과 같은 값.
+BURN_FONT = "NanumGothic"        # 기본 글꼴 (app/ui/fonts)
+BURN_SIZE = 0.05                 # 기본 글자 높이: 짧은 변의 5% (1080p → 54px)
+BURN_OUTLINE = 3 / 1080          # 검은 외곽선 두께: 짧은 변 기준
+BURN_MARGIN_V = 0.06             # 아래 여백: 영상 높이의 6%
+BURN_MARGIN_H = 0.05             # 양옆 여백: 영상 폭의 5%
+STYLE_SIZE_RANGE = (0.5, 3.0)
+_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def clean_style(d) -> dict | None:
+    """글자 하나의 꾸밈을 검사해 알려진 값만 남긴다. 남는 게 없으면 None."""
+    if not isinstance(d, dict):
+        return None
+    out = {}
+    font = d.get("font")
+    if isinstance(font, str) and 0 < len(font) <= 64 and not set(font) & set("{}\\,\n\r"):
+        out["font"] = font
+    size = d.get("size")
+    if isinstance(size, (int, float)) and not isinstance(size, bool) and math.isfinite(size):
+        size = min(max(float(size), STYLE_SIZE_RANGE[0]), STYLE_SIZE_RANGE[1])
+        if abs(size - 1.0) > 1e-6:
+            out["size"] = round(size, 3)
+    color = d.get("color")
+    if isinstance(color, str) and _COLOR_RE.match(color):
+        out["color"] = color.lower()
+    if d.get("bold") is True:
+        out["bold"] = True
+    return out or None
+
+
+def clean_styles(raw) -> dict[str, list]:
+    """{"seg:i": [글자마다 꾸밈 또는 None]} 을 검사한다. 꾸밈이 하나도 없는 어절은 뺀다."""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, list):
+            chars = [clean_style(x) for x in v[:1000]]
+            while chars and chars[-1] is None:
+                chars.pop()
+            if chars:
+                out[k] = chars
+    return out
+
+
+def _ass_time(t: float) -> str:
+    cs = int(round(max(0.0, t) * 100))
+    h, cs = divmod(cs, 360_000)
+    m, cs = divmod(cs, 6000)
+    s, cs = divmod(cs, 100)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def _ass_text(s: str) -> str:
+    # ASS 는 { } 를 꾸밈 묶음, \ 를 명령으로 읽는다 → 비슷한 전각 글자로
+    return s.replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\n", " ")
+
+
+def _ass_color(hex_rgb: str) -> str:
+    r, g, b = hex_rgb[1:3], hex_rgb[3:5], hex_rgb[5:7]
+    return f"&H{b}{g}{r}&".upper()
+
+
+def ass_line(c: dict, styles: dict[str, list], base_fs: int) -> str:
+    """줄 하나 → ASS 대사 글자. 같은 꾸밈이 이어지는 글자를 한 묶음으로, 묶음 뒤엔 {\\r} 로 기본 꾸밈에 돌아간다."""
+    parts = []
+    for w in c["words"]:
+        text = w["text"]
+        if not text:
+            continue
+        per = styles.get(w["key"]) or []
+        chars = list(text)
+        runs: list[tuple[dict | None, str]] = []
+        for i, ch in enumerate(chars):
+            st = per[i] if i < len(per) else None
+            if runs and runs[-1][0] == st:
+                runs[-1] = (st, runs[-1][1] + ch)
+            else:
+                runs.append((st, ch))
+        word = ""
+        for st, txt in runs:
+            if not st:
+                word += _ass_text(txt)
+                continue
+            tags = ""
+            if "font" in st:
+                tags += f"\\fn{st['font']}"
+            if "size" in st:
+                tags += f"\\fs{max(1, round(base_fs * st['size']))}"
+            if "color" in st:
+                tags += f"\\c{_ass_color(st['color'])}"
+            if st.get("bold"):
+                tags += "\\b1"
+            word += f"{{{tags}}}{_ass_text(txt)}{{\\r}}"
+        parts.append(word)
+    return " ".join(parts)
+
+
+def build_ass(cues: list[tuple[float, float, dict]], styles: dict[str, list], width: int, height: int) -> str:
+    """새기는 자막. 크기·여백은 영상 크기에 비례 (세로 영상은 짧은 변 기준)."""
+    short = min(width, height)
+    fs = max(8, round(short * BURN_SIZE))
+    outline = max(1.0, round(short * BURN_OUTLINE, 1))
+    mv, mh = round(height * BURN_MARGIN_V), round(width * BURN_MARGIN_H)
+    head = ("[Script Info]\nScriptType: v4.00+\n"
+            f"PlayResX: {width}\nPlayResY: {height}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n"
+            "YCbCr Matrix: None\n\n"
+            "[V4+ Styles]\n"
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, "
+            "Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
+            "MarginL, MarginR, MarginV, Encoding\n"
+            f"Style: Default,{BURN_FONT},{fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,"
+            f"{outline},0,2,{mh},{mh},{mv},1\n\n"
+            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+    rows = [f"Dialogue: 0,{_ass_time(s)},{_ass_time(e)},Default,,0,0,0,,{ass_line(c, styles, fs)}"
+            for s, e, c in cues if caption_text(c)]
+    return head + "\n".join(rows) + ("\n" if rows else "")
+
+
+def ffmpeg_filter_path(p: Path) -> str:
+    """필터 옵션 값으로 쓸 파일 경로. 옵션 값(\\ ' :)과 필터 그래프([ ] , ; \\ ')를 두 번 이스케이프 (윈도우 C:\\… 포함)."""
+    def esc(s: str, chars: str) -> str:
+        return "".join("\\" + ch if ch in chars else ch for ch in s)
+    return esc(esc(str(p).replace("\\", "/"), "\\':"), "\\'[],;")
+
+
+def _read_subs_edits(path: Path | None, tr: dict, quiet: bool = False) -> dict | None:
     if not path:
-        return {}, {}
+        return None
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         data = None
     if not isinstance(data, dict):
-        log("자막 수정 파일을 읽지 못해 무시합니다")
-        return {}, {}
+        if not quiet:
+            log("자막 수정 파일을 읽지 못해 무시합니다")
+        return None
     if data.get("transcript_sha1") != transcript_sha1(tr):
-        log("자막 수정이 지금 받아쓰기와 맞지 않아 무시합니다")
+        if not quiet:
+            log("자막 수정이 지금 받아쓰기와 맞지 않아 무시합니다")
+        return None
+    return data
+
+
+def load_subs_styles(path: Path | None, tr: dict) -> dict[str, list]:
+    """자막 수정 파일의 글자 꾸밈 {"seg:i": [글자마다 꾸밈 또는 None]} (새기기에만 씀)."""
+    data = _read_subs_edits(path, tr, quiet=True)
+    return clean_styles(data.get("styles")) if data else {}
+
+
+def load_subs_edits(path: Path | None, tr: dict) -> tuple[dict, dict]:
+    """앱이 넘긴 자막 수정 파일 → (어절 글자, 줄 시간). 받아쓰기가 달라졌으면 버린다."""
+    data = _read_subs_edits(path, tr)
+    if data is None:
         return {}, {}
     raw_w, raw_l = data.get("words"), data.get("lines")
     words = {k: v for k, v in raw_w.items() if isinstance(v, str)} if isinstance(raw_w, dict) else {}
@@ -1463,16 +1633,23 @@ def video_encoder_args(info: dict, hw: bool, encoders: str, crf: int, vbitrate: 
 
 
 def render_video(src: Path, cut_wav: Path, srt: Path | None, out_mp4: Path,
-                 keeps: list[tuple[int, int]], info: dict, work: Path, enc_args: list) -> None:
+                 keeps: list[tuple[int, int]], info: dict, work: Path, enc_args: list,
+                 burn: tuple[Path, Path | None] | None = None) -> None:
+    """burn = (ASS 파일, 글꼴 폴더): 컷을 적용한 뒤(결과 시간) 자막을 화면에 새긴다."""
     fps = info["fps"]
     f = float(fps)
     terms = [f"between(t,{(sf-0.5)/f:.6f},{(ef-0.5)/f:.6f})" for sf, ef in keeps]
     # 홀수 해상도는 4:2:0 인코더가 거부(libx264)하거나 조용히 잘라낸다(VideoToolbox) → 짝수로 1px 크롭
     crop = ",crop=trunc(iw/2)*2:trunc(ih/2)*2" if info["width"] % 2 or info["height"] % 2 else ""
+    sub = ""
+    if burn:
+        sub = f",ass=filename={ffmpeg_filter_path(burn[0])}"
+        if burn[1]:
+            sub += f":fontsdir={ffmpeg_filter_path(burn[1])}"
     script = work / "video_filter.txt"
     script.write_text(
         f"[0:v]setpts=PTS-STARTPTS,fps={fps.numerator}/{fps.denominator},"
-        f"select='{sum_tree(terms)}',setpts=N/FRAME_RATE/TB{crop}[v]",
+        f"select='{sum_tree(terms)}',setpts=N/FRAME_RATE/TB{crop}{sub}[v]",
         encoding="utf-8")
     # ffmpeg 7 부터 파일에서 옵션 값을 읽는 문법이 -/옵션 이고, 9.0 에서 -filter_complex_script 가 제거됐다
     fc = ["-/filter_complex", script] if ffmpeg_major() >= 7 else ["-filter_complex_script", script]
@@ -1830,6 +2007,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--apply-cuts", type=Path, help="기존 .cuts.json 으로 렌더 (전사·판정 생략)")
     ap.add_argument("--embed-subs", choices=["on", "off"], default="on",
                     help="mp4 에 끄고 켤 수 있는 자막 트랙 넣기 (기본 on, 번인 아님)")
+    ap.add_argument("--burn-subs", choices=["on", "off"], default="off",
+                    help="자막을 영상 화면에 새김 (유튜브용, 끌 수 없음). --subs-edits 의 글자 꾸밈을 반영. ffmpeg 에 libass 필요")
+    ap.add_argument("--burn-fonts", type=Path, default=None,
+                    help="--burn-subs 가 쓸 글꼴 폴더 (기본: 시스템 글꼴)")
     ap.add_argument("--crf", type=int, default=18, help="--hw off 일 때 화질")
     ap.add_argument("--vbitrate", default="auto",
                     help="--hw on 일 때 비트레이트 (기본 auto: 해상도·프레임 수에 맞춤, 예: 20M)")
@@ -2013,6 +2194,18 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     srt_path.write_text(srt_text, encoding="utf-8")
     if not srt_text:
         log("인식된 말소리가 없어 자막이 비어 있습니다 (자막 트랙은 넣지 않음)")
+    burn = None
+    if args.burn_subs == "on" and info["has_video"] and srt_text:
+        if not ffmpeg_has("filters", "ass"):
+            sys.exit("오류: 이 ffmpeg 는 자막 새기기(libass)를 지원하지 않습니다. libass 가 들어간 ffmpeg 로 다시 실행하세요")
+        ass_path = work / "burn.ass"
+        w, h = info["width"] // 2 * 2, info["height"] // 2 * 2
+        if info.get("rotation") in (90, 270):   # 세로로 찍은 휴대폰 영상: 필터에는 돌린 화면이 온다
+            w, h = h, w
+        ass_path.write_text(build_ass(caption_cues(caps, remap_, final_dur, sub_lines),
+                                      load_subs_styles(args.subs_edits, tr), w, h), encoding="utf-8")
+        fonts = args.burn_fonts.resolve() if args.burn_fonts and args.burn_fonts.is_dir() else None
+        burn = (ass_path, fonts)
 
     # 5) 렌더
     render_wav = clean_wav
@@ -2028,21 +2221,23 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     final_dur = n_samples / sr
     encoder = "aac"
     if info["has_video"]:
-        embed = srt_path if (args.embed_subs == "on" and srt_text) else None
+        embed = srt_path if (args.embed_subs == "on" and srt_text and not burn) else None
         encoders = run(["ffmpeg", "-hide_banner", "-encoders"], quiet=True).stdout
         encoder, enc_args = video_encoder_args(info, args.hw == "on", encoders, args.crf,
                                                args.vbitrate, args.preset, args.vbitrate_scale)
         try:
-            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args)
+            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args, burn)
         except subprocess.CalledProcessError:
             if "videotoolbox" not in encoder:
                 raise
             log(f"{encoder} 인코딩 실패 → 소프트웨어 인코더로 다시 렌더합니다")
             encoder, enc_args = video_encoder_args(info, False, encoders, args.crf,
                                                    args.vbitrate, args.preset, args.vbitrate_scale)
-            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args)
+            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args, burn)
         if embed:
             log("자막 트랙을 영상에 넣음 (번인 아님, 플레이어에서 켜고 끄기)")
+        if burn:
+            log("자막을 영상 화면에 새김 (유튜브용, 끌 수 없음)")
     else:
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", cut_wav,
                "-c:a", "aac", "-b:a", "192k", out_media]

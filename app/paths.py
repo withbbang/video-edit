@@ -40,6 +40,11 @@ def bundle_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def fonts_dir() -> Path:
+    """자막 꾸미기·새기기 글꼴 (화면의 @font-face 와 파이프라인의 libass 가 같은 파일을 쓴다)."""
+    return bundle_dir() / "app" / "ui" / "fonts"
+
+
 def job_dir(src: Path) -> Path:
     key = os.path.normcase(os.path.abspath(src))
     return data_dir() / "jobs" / hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]

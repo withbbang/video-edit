@@ -34,6 +34,7 @@ class JobOptions:
     denoise: int = LEVEL_DEFAULT   # 0~100 (0 = 끔)
     loudnorm: str = "match"  # keep|match
     subs: str = "embed"      # omit|embed
+    burn: str = "off"        # off|on — 유튜브용: 꾸민 자막을 영상 화면에 새김 (켜면 자막 트랙은 넣지 않음)
     quality: str = "auto"    # low|auto|high
 
     def to_dict(self) -> dict:
@@ -60,8 +61,14 @@ def analysis_args(o: JobOptions) -> list[str]:
     return args + ["--denoise-level", str(o.denoise)]
 
 
-def render_args(o: JobOptions) -> list[str]:
-    return ["--denoise-level", str(o.denoise),
+def render_args(o: JobOptions, fonts_dir=None) -> list[str]:
+    """fonts_dir: 자막 새기기에 쓸 글꼴 폴더 (app/ui/fonts)."""
+    burn = o.burn == "on"
+    args = ["--denoise-level", str(o.denoise),
             "--render-loudnorm", "on" if o.loudnorm == "match" else "off",
-            "--embed-subs", "on" if o.subs == "embed" else "off",
+            # 새긴 자막 위에 켜고 끄는 트랙까지 넣으면 두 번 보인다
+            "--embed-subs", "on" if o.subs == "embed" and not burn else "off",
             "--vbitrate-scale", _QUALITY[o.quality]]
+    if burn:
+        args += ["--burn-subs", "on"] + (["--burn-fonts", str(fonts_dir)] if fonts_dir else [])
+    return args

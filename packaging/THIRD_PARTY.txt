@@ -62,6 +62,11 @@ RNNoise 노이즈 모델 (models/sh.rnnn, "somnolent-hogwash")
   출처: https://github.com/GregorR/rnnoise-models
   RNNoise: https://github.com/xiph/rnnoise (BSD-3-Clause)
 
+자막 글꼴 (app/ui/fonts, 자막 꾸미기·유튜브용 자막 새기기에 씀)
+  나눔고딕·나눔명조 (NHN), 검은고딕 (Black Han Sans), 주아·도현 (우아한형제들)
+  모두 SIL Open Font License 1.1. 전문은 app/ui/fonts/OFL-*.txt 에 함께 들어 있습니다.
+  받은 곳: https://github.com/google/fonts (ofl/nanumgothic, nanummyeongjo, blackhansans, jua, dohyeon)
+
 파이썬과 파이썬 패키지 (PyInstaller 로 묶음)
   묶인 각 패키지의 라이선스 전문은 앱 안의 <패키지>-<버전>.dist-info 폴더에 함께 들어 있습니다
   (맥: youtube-edit.app/Contents/Resources/, 윈도우: 설치 폴더\_internal\). dist-info 에 라이선스 파일이 없는

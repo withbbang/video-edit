@@ -9,13 +9,15 @@ const OPTS = [
   { key: 'habit', label: '말버릇', sub: '그니까·약간·이제…', choices: [['keep', '유지'], ['some', '일부'], ['all', '모두']] },
   { key: 'silence', label: '말 없는 구간', slider: true, ends: ['안 자름', '최대한 자름'], say: silenceSay },
   { key: 'denoise', label: '배경 잡음 제거', slider: true, ends: ['끔', '최대 (목소리 먹먹해질 수 있음)'], say: denoiseSay },
+  { key: 'burn', label: '유튜브용 자막 새기기', sub: '수정한 자막을 화면에 그대로 새김. 유튜브에서 강제 노출됨',
+    choices: [['off', '안 함'], ['on', '새기기']] },
 ];
 const ADV = [
   { key: 'loudnorm', label: '음량 맞추기', sub: '유튜브 기준 크기(-14 LUFS)로 맞춤', choices: [['keep', '유지'], ['match', '맞춤']] },
-  { key: 'subs', label: '영상 안 자막', sub: 'mp4 안에 켜고 끄는 자막 트랙. SRT 파일은 항상 만듦', choices: [['omit', '빼기'], ['embed', '넣기']] },
+  { key: 'subs', label: '영상 안 자막', sub: 'mp4 안에 켜고 끄는 자막 트랙. SRT 파일은 항상 만듦 (자막을 새기면 넣지 않음)', choices: [['omit', '빼기'], ['embed', '넣기']] },
   { key: 'quality', label: '화질', sub: '자동: 1080p30 8Mbps · 4K30 약 32Mbps', choices: [['low', '작게'], ['auto', '자동'], ['high', '높게']] },
 ];
-const DEFAULTS = { filler: 'remove', habit: 'some', silence: 50, denoise: 50, loudnorm: 'match', subs: 'embed', quality: 'auto' };
+const DEFAULTS = { filler: 'remove', habit: 'some', silence: 50, denoise: 50, loudnorm: 'match', subs: 'embed', burn: 'off', quality: 'auto' };
 
 // 슬라이더 설명 한 줄. st: 지금 결과의 말 없는 구간 {n: 곳, sec: 초, min: fillers.json 최소 길이} (결과가 없으면 null)
 function silenceSay(v, st) {
@@ -44,6 +46,8 @@ const S = {
   // cutKind 는 잘린 곳 목록의 종류 탭 'all' | 'silence' | 'filler' | 'habit'
   tab: 'cuts', cutKind: 'all', renderPending: false, caps: null, capsFor: null, capsVersion: 0, dropped: false, lineSel: null, editing: null,
   findKeys: new Set(), findCount: 0, scroll: {},
+  // 영상 위 자막에서 고른 글자 {line: 줄 key, picks: [[어절 키, 글자 번호], ...]} (글자 꾸미기)
+  pick: null,
   // 타임라인 구간: range 는 {start, end} (원본 초), rangeBusy 는 요청 중
   // mark 는 Shift+클릭으로 찍어 둔 시작점(끝을 기다림), rangeEnd 는 ←/→ 로 옮길 끝 'start' | 'end'
   range: null, rangeBusy: false, rangeErr: false, mark: null, rangeEnd: 'end',
@@ -117,7 +121,7 @@ function applyJobs(jobs) {
 
 function select(id) {
   if (S.sel === id) return;
-  S.sel = id; S.options = null; S.result = null; S.resultFor = null; S.resultKey = null;
+  S.sel = id; S.options = null; S.result = null; S.resultFor = null; S.resultKey = null; S.pick = null;
   S.caps = null; S.capsFor = null; S.dropped = false; S.lineSel = null; S.editing = null; S.scroll = {};
   S.findKeys = new Set(); S.findCount = 0; findBar.find.value = ''; findBar.repl.value = '';
   S.range = null; S.rangeErr = false; S.mark = null; S.rangeEnd = 'end'; tlDrag = null;
@@ -192,6 +196,7 @@ function render() {
   renderOptions();
   renderPrimary();
   renderResult();
+  capTools.sync();   // 새기기 옵션 안내
 }
 
 // 목록 줄은 영상 id 마다 한 번 만들고 진행 알림 때는 글자·막대만 고친다 (누르는 도중 다시 만들면 클릭이 사라진다)
@@ -314,7 +319,7 @@ function renderResult(force) {
   const key = j ? [j.id, j.status, j.error, S.resultVersion,
     S.capsVersion, S.tab, S.cutKind, S.lineSel, S.dropped].join('|') : '';
   // 열린 어절 입력칸·끌고 있는 타임라인을 지우지 않는다 (닫거나 손을 뗄 때 다시 그림)
-  if (S.editing || tlDrag) { S.renderPending = true; return; }
+  if ((S.editing && S.editing.where === 'list') || tlDrag) { S.renderPending = true; return; }
   S.renderPending = false;
   if (!force && key === S.drawn) return;
   S.drawn = key;
@@ -367,7 +372,7 @@ function resultParts(j, r) {
   // 왼쪽: 재생기, 오른쪽: 잘린 곳·자막 목록 (탭과 함께). 타임라인은 tlPanel (#dock)
   const main = [];
   // 미리보기를 못 만들어도 컷·요약은 그대로 쓸 수 있다
-  main.push(...(r.preview || r.preview_url ? [player.slot(), player.sub] : [h('div', { class: 'err' }, '미리보기를 만들지 못했습니다')]));
+  main.push(r.preview || r.preview_url ? player.slot() : h('div', { class: 'err' }, '미리보기를 만들지 못했습니다'));
   if (j.status === 'saved' && r.saved_paths && r.saved_paths.length) {
     main.push(h('div', { class: 'saved-files' }, r.saved_paths.map((p) => h('div', {}, p))));
   }
@@ -1177,7 +1182,9 @@ function listParts(j, r) {
     tab('subs', caps ? `자막 ${caps.filter((c) => !c.empty).length}` : '자막'))];
   if (S.tab === 'subs') {
     syncFindBar(HAS_RESULT.has(j.status));
-    out.push(findBar.el, h('div', { class: 'cut-list subs', 'data-tab': 'subs' }, (caps || []).map((c) => capRow(j, c))));
+    out.push(findBar.el, capTools.list.el,
+      h('div', { class: 'cut-list subs', 'data-tab': 'subs' }, (caps || []).map((c) => capRow(j, c))));
+    capTools.sync();
     return out;
   }
   const every = [...items, ...restoreOps(r).map((o) => ({ start: o.start, end: o.end, kind: 'restore_op', op: o.i }))]
@@ -1205,26 +1212,376 @@ function capRow(j, c) {
       player.clip(c.start, c.end, true);
       if (S.lineSel !== c.key) { S.lineSel = c.key; renderResult(); }
     } }, clock(c.start)),
-    h('span', { class: 'ws' }, c.words.map((w) => wordEl(w, 'list'))),
+    lineHost(c, 'list'),
     sel && !c.empty ? lineEditor(j, c) : null);
 }
 
-// 어절 하나. 자막 탭과 영상 위 자막이 같이 쓴다 (영상 위는 멈췄을 때만 고침).
-// 빈칸으로 뺀 어절(text "")은 원래 글자에 줄을 그어 남긴다 (눌러서 원래대로 되돌릴 수 있게)
+// 줄 글자 자리: 누르면 그 줄을 통째로 고치는 칸이 열린다 (끌어서 글자를 고른 손짓이면 열지 않음)
+function lineHost(c, where) {
+  const ws = h('span', { class: 'ws' }, lineWords(c, where));
+  ws.addEventListener('click', (e) => {
+    if (!window.getSelection().isCollapsed) return;
+    openLine(c, ws, where, e);
+  });
+  return ws;
+}
+function lineWords(c, where) {
+  const kids = [];
+  c.words.forEach((w, i) => { if (i && where === 'over') kids.push(' '); kids.push(wordEl(w, where)); });
+  return kids;
+}
+
+// 어절 하나 (보기용). 자막 탭과 영상 위 자막이 같이 쓴다. 글자(음절)마다 span.c 로 그려 글자 꾸밈을 보이고,
+// 자막 탭에서는 끌어서 음절 단위로 고른다. 빈칸으로 뺀 어절(text "")은 원래 글자에 줄을 그어 남긴다
 function wordEl(w, where) {
   const j = selected();
   const can = !!j && HAS_RESULT.has(j.status);
   const gone = !w.text;
   const el = h('span', { class: 'w' + (can ? ' can' : '') + (w.edited ? ' edited' : '') + (gone ? ' gone' : '') +
     (S.findKeys.has(w.key) ? ' hit' : ''),
-    'data-k': w.key, title: gone ? '자막에서 뺀 어절' : w.edited ? `원래: ${w.orig}` : null }, gone ? w.orig : w.text);
-  el.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (where === 'over' && player.playing()) return;   // 재생 중엔 보기만
-    editWord(el, w, where);
-  });
+    'data-k': w.key, title: gone ? '자막에서 뺀 어절' : w.edited ? `원래: ${w.orig}` : null },
+  gone ? w.orig : styledChars(w, where));
   return el;
 }
+
+// ---- 글자 꾸미기 (자막 탭) ------------------------------------------------------
+// 글자(음절) 하나마다 span.c(data-i = 어절 안 글자 번호, 코드 포인트 기준 — 서버의 글자 번호와 같다).
+// 영상 위는 새기는 모습 그대로, 자막 탭은 밝은 바탕에서도 읽히게 색은 밑줄로 보인다 (크기는 0.8~1.6배로 줄여 보임)
+function styledChars(w, where) {
+  const list = where === 'list';
+  return Array.from(w.text).map((ch, i) => {
+    const el = h('span', { class: 'c', 'data-i': i }, ch);
+    const st = w.style && w.style[i];
+    if (st) {
+      if (st.font) el.style.fontFamily = `"${st.font}"`;
+      if (st.size) el.style.fontSize = `${list ? Math.min(1.6, Math.max(0.8, st.size)) : st.size}em`;
+      if (st.bold) el.style.fontWeight = '700';
+      if (st.color && !list) el.style.color = st.color;
+      if (st.color && list) { el.classList.add('tint'); el.style.setProperty('--tint', st.color); }
+    }
+    return el;
+  });
+}
+function subsList() {
+  return $('result').querySelector('.cut-list.subs');
+}
+
+// 고른 글자 = 자막 탭 목록의 브라우저 선택 그대로. S.pick = {picks: [[어절 키, 글자 번호], ...]} (여러 줄에 걸쳐도 됨).
+// 선택이 있으면 꾸밈 막대가 켜지고, 풀리면 꺼진다. 꾸밈을 바꾸면 목록을 다시 그리므로 같은 글자를 다시 선택해 둔다
+function pickFromSelection() {
+  const sel = window.getSelection();
+  const list = subsList();
+  if (!list || !sel || sel.isCollapsed || !sel.rangeCount || S.editing) return null;
+  const range = sel.getRangeAt(0);
+  if (!list.contains(range.commonAncestorContainer)) return null;
+  const picks = picksIn(list, range);
+  return picks.length ? { picks } : null;
+}
+// range 에 든 글자들 [[어절 키, 글자 번호], ...]
+function picksIn(root, range) {
+  const picks = [];
+  for (const c of root.querySelectorAll('.w[data-k] .c')) {
+    if (!range.intersectsNode(c)) continue;
+    // 경계에 닿기만 한 글자는 빼기 (끝이 다음 글자 맨 앞, 시작이 앞 글자 맨 뒤)
+    if (c.contains(range.endContainer) && range.endOffset === 0) continue;
+    if (c.contains(range.startContainer) && range.startOffset >= (range.startContainer.textContent || '').length) continue;
+    picks.push([c.closest('.w').dataset.k, Number(c.dataset.i)]);
+  }
+  return picks;
+}
+function charEl(list, key, i) {
+  return list.querySelector(`.w[data-k="${CSS.escape(key)}"] .c[data-i="${i}"]`);
+}
+// 다시 그린 목록에서 S.pick 글자들을 다시 선택한다 (첫 글자 앞 ~ 끝 글자 뒤)
+function reselectPick() {
+  const list = subsList();
+  if (!S.pick || !list) return;
+  const first = S.pick.picks[0], last = S.pick.picks[S.pick.picks.length - 1];
+  const a = charEl(list, ...first), b = charEl(list, ...last);
+  if (!a || !b) { S.pick = null; capTools.sync(); return; }
+  const range = document.createRange();
+  range.setStartBefore(a);
+  range.setEndAfter(b);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+document.addEventListener('selectionchange', () => {
+  const ed = S.editing;
+  if (ed && ed.box) {
+    // 고치는 칸 안의 선택(글자 번호)을 기억해 둔다 — 꾸밈 막대를 눌러 초점이 빠져도 그 글자를 꾸민다
+    const sel = window.getSelection();
+    if (ed.busy || !sel.rangeCount || !ed.box.contains(sel.anchorNode) || !ed.box.contains(sel.focusNode)) return;
+    const r = sel.getRangeAt(0);
+    ed.sel = [offsetIn(ed.box, r.startContainer, r.startOffset), offsetIn(ed.box, r.endContainer, r.endOffset)];
+    capTools.sync();
+    return;
+  }
+  const pick = pickFromSelection();
+  // 글꼴 목록·색 고르기처럼 막대 안 칸에 초점이 있는 동안은 선택이 잠깐 풀려도 켜 둔다
+  if (!pick && S.pick && capTools.has(document.activeElement)) return;
+  const same = !!pick && !!S.pick && JSON.stringify(pick.picks) === JSON.stringify(S.pick.picks);
+  if (same || (!pick && !S.pick)) return;
+  S.pick = pick;
+  capTools.sync();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && S.pick && !S.editing) { e.preventDefault(); window.getSelection().removeAllRanges(); }
+});
+
+async function applyStyle(style) {
+  const j = selected();
+  if (!j || !HAS_RESULT.has(j.status)) return;
+  if (S.editing) { await styleLine(S.editing, style); return; }
+  if (!S.pick) return;
+  const r = await call('set_style', j.id, CS.toRanges(S.pick.picks), style);
+  if (r) { applyCaps(j.id, r); reselectPick(); }
+}
+
+// ---- 자막 한 줄 고치기 ---------------------------------------------------------
+// 자막 탭 줄이나 (멈췄을 때) 영상 위 자막을 누르면 그 줄 글자 전체를 고치는 칸이 열리고 꾸밈 막대도 같이 켜진다.
+// 칸 안에서 글자를 끌어 고르면 그 글자를, 고르지 않았으면 줄 전체를 꾸민다. Enter·바깥 클릭 = 확정, Esc = 글자 고친 것 취소.
+// S.editing = {id, line: 줄 key, where: 'list'|'over', box: 고치는 칸, host, orig: 칸을 열(다시 채운) 때 글자,
+//              sel: 칸 안 마지막 선택 [시작, 끝] (코드 포인트), busy: 서버 다녀오는 중}
+function lineText(c) {
+  return c.words.filter((w) => w.text).map((w) => w.text).join(' ');
+}
+function capByKey(key) {
+  return (S.caps || []).find((c) => c.key === key) || null;
+}
+function boxText(box) {
+  return box.textContent.replace(/\s+/g, ' ').trim();
+}
+function fillLine(box, c, where) {
+  const kids = [];
+  c.words.filter((w) => w.text).forEach((w, i) => {
+    if (i) kids.push(' ');
+    kids.push(h('span', { class: 'w', 'data-k': w.key }, styledChars(w, where)));
+  });
+  box.replaceChildren(...kids);
+}
+// 칸 안 (node, off) 앞까지 글자 수 ↔ 그 자리
+function offsetIn(box, node, off) {
+  const r = document.createRange();
+  r.setStart(box, 0);
+  r.setEnd(node, off);
+  return Array.from(r.toString()).length;
+}
+function pointAt(box, n) {
+  const tw = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+  let node, last = null;
+  while ((node = tw.nextNode())) {
+    const cps = Array.from(node.data);
+    if (n <= cps.length) return [node, cps.slice(0, n).join('').length];
+    n -= cps.length;
+    last = node;
+  }
+  return last ? [last, last.data.length] : [box, box.childNodes.length];
+}
+function rangeIn(box, a, b) {
+  const r = document.createRange();
+  r.setStart(...pointAt(box, a));
+  r.setEnd(...pointAt(box, b));
+  return r;
+}
+function selectIn(box, a, b) {
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(rangeIn(box, a, b));
+}
+function hasSel(ed) {
+  return !!ed.sel && ed.sel[1] > ed.sel[0];
+}
+// 꾸밀 글자: 칸 안에서 고른 글자, 없으면 줄 전체
+function editPicks(ed) {
+  const r = document.createRange();
+  if (hasSel(ed)) return picksIn(ed.box, rangeIn(ed.box, ed.sel[0], ed.sel[1]));
+  r.selectNodeContents(ed.box);
+  return picksIn(ed.box, r);
+}
+
+function openLine(c, host, where, ev) {
+  const j = selected();
+  if (!j || !HAS_RESULT.has(j.status) || S.editing || !c) return;
+  if (where === 'over' && player.playing()) return;    // 재생 중엔 보기만
+  window.getSelection().removeAllRanges();
+  S.pick = null;
+  const at = ev && document.caretRangeFromPoint ? document.caretRangeFromPoint(ev.clientX, ev.clientY) : null;
+  const atOff = at && host.contains(at.startContainer) ? offsetIn(host, at.startContainer, at.startOffset) : null;
+  const box = h('span', { class: 'le', contenteditable: 'plaintext-only', spellcheck: 'false', role: 'textbox',
+    'aria-label': '자막 줄 고치기' });
+  fillLine(box, c, where);
+  const ed = { id: j.id, line: c.key, where, box, host, orig: lineText(c), sel: null, busy: false };
+  S.editing = ed;
+  host.classList.add('editing');
+  host.replaceChildren(box);
+  box.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); closeLine(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeLine(false); }
+  });
+  box.addEventListener('focusout', (e) => {
+    if (ed.busy || (e.relatedTarget && capTools.has(e.relatedTarget))) return;   // 꾸밈 막대(글꼴·색 칸)로 간 초점
+    closeLine(true);
+  });
+  box.addEventListener('click', (e) => e.stopPropagation());
+  box.focus();
+  const n = Array.from(box.textContent).length;
+  const p = atOff === null ? n : Math.min(n, atOff);
+  selectIn(box, p, p);                                   // 누른 자리에 커서
+  capTools.sync();
+}
+
+function closeLine(commit) {
+  const ed = S.editing;
+  if (!ed) return;
+  S.editing = null;
+  const text = boxText(ed.box);
+  ed.box.contentEditable = 'false';
+  capTools.sync();
+  const change = commit && text !== ed.orig;
+  const redraw = () => {
+    ed.host.classList.remove('editing');
+    if (ed.where === 'over') { player.subKey = null; player.drawSub(player.time()); }
+    else { const c = capByKey(ed.line); if (c && ed.host.isConnected) ed.host.replaceChildren(...lineWords(c, 'list')); }
+    flushRender();
+  };
+  if (!change) { afterPointer(redraw); return; }
+  // 고친 글자는 서버 응답(전체 다시 그리기)까지 칸에 그대로 둔다
+  call('set_line', ed.id, ed.line, text).then((r) => afterPointer(() => {
+    if (r) applyCaps(ed.id, r);
+    else if (S.sel === ed.id) renderResult(true);
+    redraw();
+  }));
+}
+
+// 고치는 중 꾸미기: 글자를 바꿨으면 먼저 줄 글자를 확정하고(어절 키·글자 번호가 맞게) 꾸민 뒤, 칸을 다시 채우고 선택을 되살린다
+async function styleLine(ed, style) {
+  if (ed.busy) return;
+  ed.busy = true;
+  const refill = (r) => {
+    applyCaps(ed.id, r);
+    const c = capByKey(ed.line);
+    if (c) { fillLine(ed.box, c, ed.where); ed.orig = lineText(c); }
+  };
+  try {
+    const text = boxText(ed.box);
+    if (text !== ed.orig) {
+      const r = await call('set_line', ed.id, ed.line, text);
+      if (!r || S.editing !== ed) return;
+      refill(r);
+      if (ed.sel) { const n = Array.from(ed.box.textContent).length; ed.sel = ed.sel.map((v) => Math.min(v, n)); }
+    }
+    const picks = editPicks(ed);
+    if (!picks.length) return;
+    const r = style === 'orig' ? null : await call('set_style', ed.id, CS.toRanges(picks), style);
+    if (r && S.editing === ed) refill(r);
+  } finally {
+    ed.busy = false;
+    if (S.editing === ed) {
+      ed.box.focus();
+      if (ed.sel) selectIn(ed.box, ed.sel[0], ed.sel[1]);
+      capTools.sync();
+    }
+  }
+}
+// 고치는 줄 글자를 모두 원래대로 (꾸밈은 둔다)
+async function restoreLine(ed) {
+  if (ed.busy) return;
+  ed.busy = true;
+  try {
+    const r = await call('set_line', ed.id, ed.line, null);
+    if (r && S.editing === ed) {
+      applyCaps(ed.id, r);
+      const c = capByKey(ed.line);
+      if (c) { fillLine(ed.box, c, ed.where); ed.orig = lineText(c); ed.sel = null; }
+    }
+  } finally {
+    ed.busy = false;
+    if (S.editing === ed) {
+      ed.box.focus();
+      const n = Array.from(ed.box.textContent).length;
+      selectIn(ed.box, n, n);
+      capTools.sync();
+    }
+  }
+}
+
+// 꾸밈 막대: 글꼴 · 크기 · 색 · 굵게 · 스타일 복원 (+ 줄을 고칠 때 원문 복원).
+// 자막 탭 목록 위(list: 늘 자리를 차지하고, 꺼지면 같은 도구를 흐리게 보이며 누를 수 없음)와
+// 영상 위 자막 위(over: 영상 위에서 고칠 때만 뜸) 두 벌
+function makeTools(place) {
+  const font = h('select', { class: 'ct-font', 'aria-label': '글꼴' },
+    CS.FONTS.map((f) => h('option', { value: f.family, style: `font-family:"${f.family}"` }, f.label)));
+  font.addEventListener('change', () => applyStyle({ font: font.value }));
+  const size = h('span', { class: 'ct-size', 'aria-live': 'polite' });
+  let cur = {};
+  const step = (dir) => applyStyle({ size: CS.stepSize(cur.size || 1, dir) });
+  const minus = h('button', { type: 'button', class: 'ct-btn', title: '작게', 'aria-label': '글자 작게', onclick: () => step(-1) }, '−');
+  const plus = h('button', { type: 'button', class: 'ct-btn', title: '크게', 'aria-label': '글자 크게', onclick: () => step(1) }, '+');
+  const swatches = CS.COLORS.map(([c, name]) => h('button', { type: 'button', class: 'ct-sw', style: `--sw:${c}`,
+    title: name, 'aria-label': `${name}으로`, 'data-c': c, onclick: () => applyStyle({ color: c }) }));
+  const custom = h('input', { type: 'color', class: 'ct-pick', title: '다른 색', 'aria-label': '다른 색 고르기', value: '#ffffff' });
+  custom.addEventListener('change', () => applyStyle({ color: custom.value }));
+  const bold = h('button', { type: 'button', class: 'ct-btn ct-bold', title: '굵게', 'aria-label': '굵게', 'aria-pressed': 'false',
+    onclick: () => applyStyle({ bold: !cur.bold }) }, 'B');
+  const clear = h('button', { type: 'button', class: 'ct-clear', onclick: () => applyStyle(null) }, '스타일 복원');
+  const orig = h('button', { type: 'button', class: 'ct-clear ct-orig', title: '이 줄의 고친 글자를 받아쓴 그대로',
+    onclick: () => S.editing && restoreLine(S.editing) }, '원문 복원');
+  // 세 줄로 고정: 글꼴 · 크기 · 굵게 / 색 / 스타일 복원 … 원문 복원 — 폭이 바뀌어도 줄이 뒤섞이지 않는다
+  const tools = h('div', { class: 'ct-row' },
+    h('div', { class: 'ct-line ct-type' }, font,
+      h('span', { class: 'ct-grp ct-sizes', role: 'group', 'aria-label': '크기' }, minus, size, plus), bold),
+    h('div', { class: 'ct-line ct-colors', role: 'group', 'aria-label': '색' }, swatches, custom),
+    h('div', { class: 'ct-line ct-acts' }, clear, orig));
+  const el = h('div', { class: 'ct' + (place === 'over' ? ' float' : ''), role: 'toolbar', 'aria-label': '글자 꾸미기',
+    hidden: place === 'over' }, tools);
+  // 툴바를 누르는 동안 고르거나 고치던 글자에서 초점·선택이 빠지지 않게 (select·색 고르기는 그대로 둔다)
+  el.addEventListener('pointerdown', (e) => { e.stopPropagation(); if (e.target.tagName === 'BUTTON') e.preventDefault(); });
+  // 글꼴·색 칸에서 막대 밖으로 초점이 나가면 고치기를 끝낸다
+  el.addEventListener('focusout', (e) => {
+    const ed = S.editing;
+    if (!ed || ed.busy || !e.relatedTarget && document.activeElement === ed.box) return;
+    if (e.relatedTarget && (e.relatedTarget === ed.box || capTools.has(e.relatedTarget))) return;
+    closeLine(true);
+  });
+
+  function sync() {
+    const j = selected();
+    const ed = S.editing;
+    const can = !!j && HAS_RESULT.has(j.status);
+    const on = can && (ed ? ed.where === place : place === 'list' && !!S.pick);
+    el.classList.toggle('on', on);
+    el.setAttribute('aria-disabled', String(!on));
+    tools.inert = !on;   // 꺼지면 도구는 그대로 보이되 흐리게, 누르거나 초점을 줄 수 없다 (막대 높이가 같아 목록이 움직이지 않음)
+    if (place === 'over') el.hidden = !on;
+    const words = new Map();
+    for (const c of S.caps || []) for (const w of c.words) words.set(w.key, w);
+    const picks = !on ? [] : ed ? editPicks(ed) : S.pick.picks;
+    const styles = picks.map(([k, i]) => { const w = words.get(k); return (w && w.style && w.style[i]) || null; });
+    cur = CS.common(on ? styles : [null]);           // 꺼져 있으면 기본 꾸밈을 보인다
+    const line = on && ed && capByKey(ed.line);
+    orig.classList.toggle('off', !line || !line.words.some((w) => w.edited));
+    font.value = cur.font || '';
+    if (!cur.font) font.selectedIndex = -1;           // 여러 글꼴
+    font.style.fontFamily = cur.font ? `"${cur.font}"` : '';
+    size.textContent = cur.size ? `${Math.round(cur.size * 100)}%` : '여러 크기';
+    minus.disabled = !!cur.size && cur.size <= CS.SIZES[0];
+    plus.disabled = !!cur.size && cur.size >= CS.SIZES[CS.SIZES.length - 1];
+    for (const b of swatches) b.setAttribute('aria-pressed', String(b.dataset.c === cur.color));
+    const known = CS.COLORS.some(([c]) => c === cur.color);
+    custom.classList.toggle('on', !!cur.color && !known);
+    if (cur.color) custom.value = cur.color;
+    bold.setAttribute('aria-pressed', String(!!cur.bold));
+  }
+  return { el, sync };
+}
+const capTools = {
+  list: makeTools('list'),
+  over: makeTools('over'),
+  sync() { this.list.sync(); this.over.sync(); },
+  has(node) { return !!node && (this.list.el.contains(node) || this.over.el.contains(node)); },
+};
 
 // 누르고 있는 동안 그 아래 버튼을 바꾸면 클릭이 사라진다 → 손을 뗀 뒤(클릭까지 끝난 뒤)에 고친다
 let pointerDown = false;
@@ -1247,53 +1604,6 @@ function afterPointer(fn) {
 // 입력칸이 열려 있어 미뤄 둔 다시 그리기
 function flushRender() {
   if (S.renderPending && !S.editing) renderResult(true);
-}
-
-// 그 자리를 입력칸으로: Enter·바깥 클릭 확정, Esc 취소, 빈칸 확정 = 그 어절 빼기
-function editWord(el, w, where) {
-  const j = selected();
-  if (!j || !HAS_RESULT.has(j.status) || S.editing) return;
-  const id = j.id;
-  S.editing = { key: w.key };
-  const input = h('input', { type: 'text', class: 'w-in', value: w.text, spellcheck: 'false', 'aria-label': '어절 고치기' });
-  const fit = () => { input.style.width = `${Math.max(2, input.value.length) + 1.5}em`; };
-  fit();
-  let done = false;
-  let wrap = null;
-  // 닫으면 바로 다른 어절을 열 수 있다 (S.editing 을 먼저 비움). 그 자리는 고친 글자로 바로 바꿔 두고,
-  // 서버 응답(전체 다시 그리기)은 손을 뗀 뒤에 반영한다
-  const finish = (mode) => {
-    if (done) return;
-    done = true;
-    S.editing = null;
-    const text = mode === 'orig' ? null : input.value;
-    const change = mode !== 'cancel' && (text === null || text.trim() !== w.text);
-    const shown = !change ? w : text === null ? { ...w, text: w.orig, edited: false } : { ...w, text: text.trim(), edited: true };
-    input.readOnly = true;
-    afterPointer(() => {
-      if (wrap.isConnected) wrap.replaceWith(wordEl(shown, where));
-      flushRender();
-    });
-    if (!change) return;
-    call('set_word', id, w.key, text).then((r) => afterPointer(() => {
-      if (r) applyCaps(id, r);
-      else if (S.sel === id) renderResult(true);   // 거절됨 → 서버 상태대로 다시 그림
-    }));
-  };
-  input.addEventListener('input', fit);
-  input.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); finish('ok'); }
-    else if (e.key === 'Escape') { e.preventDefault(); finish('cancel'); }
-  });
-  input.addEventListener('blur', () => finish('ok'));
-  input.addEventListener('click', (e) => e.stopPropagation());
-  const back = w.edited ? h('button', { type: 'button', class: 'btn', onmousedown: (e) => e.preventDefault(),
-    onclick: (e) => { e.stopPropagation(); finish('orig'); } }, '원래대로') : null;
-  wrap = h('span', { class: 'w-edit' }, input, back);
-  el.replaceWith(wrap);
-  input.focus();
-  input.select();
 }
 
 // 줄 시간 편집기: 시작·끝을 0.1초씩 또는 재생기 지금 위치로 (서버가 이웃 줄·영상 길이·최소 0.3초로 맞춘다)
@@ -1390,6 +1700,7 @@ async function setRestored(id, c, on) {
 // fallback: MediaSource 를 못 쓰거나 잘린 소리가 아직 없을 때 — 원본 보기 영상 + 전체 소리를 같이 틀고 잘린 구간을 건너뛴다.
 // legacy: 옛 preview.mp4 만 있는 작업 — 그 파일 하나로 건너뛰기 재생.
 // 화면이 쓰는 시간(time·seek·clip·자막·타임라인)은 모두 원본 기준이다.
+const CONTROLS_H = 56;   // 재생기 기본 컨트롤(재생 막대) 높이 — 멈췄을 때 자막을 이 위로
 const player = {
   mode: null, key: null, p: null, gap: null, map: null, peek: false, withAud: false,
   ranges: [], win: null, raf: 0, ownSeek: false, seq: 0, wait: null,
@@ -1397,7 +1708,7 @@ const player = {
   box: null, mse: null, orig: null, aud: null,
   note: h('div', { class: 'pv-note', hidden: true }, '미리보기 소리를 맞추는 중…'),
   head: h('i', { class: 'head', style: 'left:0' }),
-  sub: h('div', { class: 'subline empty' }), subKey: null,
+  sub: h('div', { class: 'capline empty' }), subKey: null, cap: null,
 
   slot() {
     if (!this.box) {
@@ -1414,10 +1725,20 @@ const player = {
           this.ownSeek = false;
           if (this.withAud) this.aud.currentTime = v.currentTime;
         });
-        v.addEventListener('loadedmetadata', () => { if (!(S.result && S.result.duration)) renderResult(true); });
+        v.addEventListener('loadedmetadata', () => { if (!(S.result && S.result.duration)) renderResult(true); this.layoutSub(); });
+        v.addEventListener('resize', () => this.layoutSub());   // 영상 크기를 알게 됐을 때
+        for (const ev of ['play', 'pause']) v.addEventListener(ev, () => this.layoutSub());
       }
       this.mse = mse; this.orig = orig; this.aud = h('audio', { preload: 'auto' });
-      this.box = h('div', { class: 'pv' }, mse, orig, this.note);
+      // 자막은 영상 화면 위 아래쪽에 겹쳐 그린다 (유튜브용 자막 새기기와 같은 자리·크기)
+      this.cap = h('div', { class: 'capover' }, capTools.over.el, this.sub);
+      // 멈췄을 때 영상 위 자막을 누르면 그 줄을 고친다 (꾸밈 막대도 자막 위에 뜬다)
+      this.sub.addEventListener('click', (e) => {
+        if (this.playing() || !window.getSelection().isCollapsed) return;
+        openLine(this.lineAt(this.time()), this.sub, 'over', e);
+      });
+      this.box = h('div', { class: 'pv' }, mse, orig, this.cap, this.note);
+      new ResizeObserver(() => this.layoutSub()).observe(this.box);
     }
     return this.box;
   },
@@ -1429,6 +1750,29 @@ const player = {
   show() {
     this.mse.hidden = this.el() !== this.mse;
     this.orig.hidden = this.el() !== this.orig;
+    this.layoutSub();
+  },
+  // 자막 자리를 지금 보이는 영상 화면(object-fit: contain 으로 그린 부분)에 맞춘다. 화면이 없으면(소리만) 아래쪽 기본 크기
+  layoutSub() {
+    const v = this.el();
+    if (!this.box || !v || !this.box.isConnected) return;
+    const br = this.box.getBoundingClientRect(), vr = v.getBoundingClientRect();
+    const c = CS.contentBox(vr.width, vr.height, v.videoWidth, v.videoHeight);
+    const st = this.cap.style;
+    if (!c) {
+      st.left = '0'; st.width = '100%';
+      st.bottom = `${Math.max(0, br.bottom - vr.top) + 6}px`;   // 소리만: 재생 막대 위
+      st.setProperty('--fs', '16px'); st.setProperty('--ol', '1px');
+      return;
+    }
+    const L = CS.overlayLayout(c);
+    // 멈춰 있으면 재생 막대가 늘 보인다 → 그 위로 올린다 (재생 중엔 새기는 자리 그대로)
+    const lift = this.playing() ? 0 : Math.max(0, vr.top + L.bottom - (vr.bottom - CONTROLS_H));
+    st.left = `${vr.left - br.left + L.left}px`;
+    st.width = `${L.width}px`;
+    st.bottom = `${br.bottom - (vr.top + L.bottom) + lift}px`;
+    st.setProperty('--fs', `${L.fs}px`);
+    st.setProperty('--ol', `${L.outline}px`);
   },
   attach(r) {
     this.slot();
@@ -1574,6 +1918,7 @@ const player = {
     this.el().play().catch(() => {});
   },
   onPlay(v) {
+    if (S.editing && S.editing.where === 'over') closeLine(true);
     if (v !== this.el()) { v.pause(); return; }
     if (this.peek) {
       // 원본 보기에서 재생: 이어 붙인 재생기로 돌아가 그 잘린 구간 끝부터
@@ -1619,16 +1964,20 @@ const player = {
     zoomTl.head(t, this.playing());
     this.drawSub(t);
   },
-  // 영상 아래 자막: 지금 시간의 줄 (고친 줄 시간 반영). 줄이 바뀔 때만 다시 만든다
-  drawSub(t) {
-    if (S.editing) return;
+  lineAt(t) {
     const caps = (S.capsFor === S.sel && S.caps) || [];
-    const line = this.mode ? caps.find((c) => !c.empty && c.start <= t && t < c.end) : null;
+    return this.mode ? caps.find((c) => !c.empty && c.start <= t && t < c.end) || null : null;
+  },
+  // 영상 위 자막: 지금 시간의 줄 (고친 줄 시간·글자 꾸밈 반영). 줄이 바뀔 때만 다시 만든다.
+  // 어절 사이는 새기는 자막처럼 빈칸 하나
+  drawSub(t) {
+    if (S.editing && S.editing.where === 'over') return;   // 고치는 칸을 지우지 않는다
+    const line = this.lineAt(t);
     const key = line ? `${line.key}|${S.capsVersion}` : '';
     if (key === this.subKey) return;
     this.subKey = key;
     this.sub.classList.toggle('empty', !line);
-    this.sub.replaceChildren(...(line ? line.words.map((w) => wordEl(w, 'over')) : []));
+    this.sub.replaceChildren(...(line ? lineWords(line, 'over') : []));
   },
   // 개발자 도구에서 재는 용도: player.debug()
   debug() {

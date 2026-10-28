@@ -134,14 +134,20 @@ tests/                pytest (requirements-dev.txt)
   100 은 단어 없는 틈도 `gap` 으로 컷(단어가 하나도 없으면 안 자름). 무음 판정에만 쓰고 정렬 키·필러 판정은 그대로),
   `--denoise-level 0~100`(결과·미리보기 오디오만, 주면 `--render-denoise` 대신: 0 끔 · 1~50 RNNoise 섞는 비율 0→0.85 (50 = `--denoise rnnoise`) ·
   51~100 비율 1.0 까지 + afftdn 추가. 분석 오디오·전사는 그대로. `--preview` 와 쓰면 미리보기 소리만 다시 만들고 preview_video.mp4 는 캐시 재사용),
-  `--subs-edits <json>`(앱의 자막 수정 `{transcript_sha1, words, lines}` 을 SRT 에 적용. `transcript_sha1` 이 지금 전사와 다르면 로그만 남기고 무시).
-- 앱 화면: 자막 탭·영상 위 자막에서 어절을 눌러 고침(빈칸 = 뺌, `원래대로`), 찾아 바꾸기, 줄 시간 ±0.1초·`지금 위치로`.
+  `--subs-edits <json>`(앱의 자막 수정 `{transcript_sha1, words, lines, styles}` 을 SRT 에 적용. `transcript_sha1` 이 지금 전사와 다르면 로그만 남기고 무시),
+  `--burn-subs on`·`--burn-fonts <폴더>`(유튜브용 자막 새기기: `styles`(어절마다 글자별 `{font,size,color,bold}`)를 반영한 ASS 를
+  `work/<이름>/burn.ass` 로 만들어 컷 뒤 영상에 `ass` 필터로 새김. 켜면 자막 트랙은 넣지 않음. ffmpeg 에 libass 필요 —
+  홈브루 ffmpeg 9 엔 없고 `packaging/bin/ffmpeg`(배포용)엔 있다. 크기·여백 비율은 `BURN_*` 와 `app/ui/capstyle.js` 의 `BASE` 가 같아야 함).
+- 앱 화면: 자막 탭 줄·(멈췄을 때) 영상 위 자막을 누르면 그 줄 전체를 고치는 칸(contenteditable)이 열리고 꾸밈 막대도 켜짐
+  (Api.set_line → `subtitles.plan_line` 이 띄어쓰기 낱말을 어절에 다시 나눠 담고 꾸밈을 글자 따라 옮김, `원문 복원`), 찾아 바꾸기, 줄 시간 ±0.1초·`지금 위치로`.
   타임라인을 끌거나 Shift+클릭 두 번으로 구간을 골라 직접 자르거나 되살림
   (잘린 곳 목록에 `직접 자름`/`직접 되살림`). 구간 끝은 원본 프레임 격자(결과의 `fps`), ←/→ 로 1프레임(Shift 10프레임).
   막대 아래 확대 타임라인: 썸네일 줄(`app/thumbs.py` 가 미리보기 영상에서 1초 간격 시트를 열어 본 영상만 뒤에서 만듦, `get_thumbs`)·
   소리 줄(`get_waveform`, asr.wav 에너지). 보기 계산은 `app/ui/timeline.js`. 편집은 `실행 취소`/`실행 재개`
   (Api.undo/redo, 메모리 스냅숏 — 옵션 변경은 제외). `말 없는 구간`·`배경 잡음` 은 0~100 슬라이더(50 = 예전 기본).
   자막 수정은 `out/<이름>.subs_edits.json` 에 저장되고 전사가 바뀌면 지워진다.
+  자막은 영상 화면 아래쪽에 겹쳐 그린다(새기는 자리·크기 그대로). 글자 꾸미기는 줄 고치는 칸 안 선택(없으면 줄 전체) 또는 자막 탭 목록에서
+  음절(span.c)을 끌어 선택하면(브라우저 선택이 있는 동안만 켜짐, 꾸민 뒤엔 같은 글자를 다시 선택) 꾸밈 막대(목록 위 — 꺼지면 흐리게·inert, 영상 위에서 고칠 땐 자막 위에 뜨는 한 벌 더)로 글자마다 글꼴·크기·색·굵기를 바꾼다 (Api.set_style, Job.word_styles, 실행 취소 대상). 글꼴은 `app/ui/fonts`(OFL) — 화면 @font-face 와 새기기가 같은 파일을 쓴다.
 - 사용자 데이터: 맥 `~/Library/Application Support/youtube-edit`, 윈도우 `%APPDATA%\youtube-edit` (`YTEDIT_DATA_DIR` 로 덮어씀).
   앱 설치 폴더에는 쓰지 않는다. 화면 문구는 스펙(`docs/superpowers/specs/2026-10-22-desktop-app-design.md` 3장) 그대로 쓴다.
 - 릴리스: `app/__init__.py` 의 `__version__` 과 같은 `v<버전>` 태그(접미사 `-rc1` 은 prerelease)를 push 하면 CI 가 draft 릴리스를 만든다.

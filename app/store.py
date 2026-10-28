@@ -38,6 +38,7 @@ class Job:
     restored: list = field(default_factory=list)  # 사용자가 되살린 컷 [[시작, 끝], ...] (diff.is_restored)
     word_edits: dict = field(default_factory=dict)  # 고친 자막 어절 {"seg:i": 글자}
     line_times: dict = field(default_factory=dict)  # 직접 맞춘 자막 줄 시간 {"seg:i": [시작, 끝]} (원본 초)
+    word_styles: dict = field(default_factory=dict) # 자막 글자 꾸밈 {"seg:i": [글자마다 {font,size,color,bold} 또는 None]}
     range_ops: list = field(default_factory=list)   # 직접 자르기·남기기 구간 작업
     edits_sha1: str | None = None                   # 자막을 고칠 때의 받아쓰기 지문
 

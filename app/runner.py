@@ -61,7 +61,7 @@ def render_command(job: Job, model: ModelPaths, device: str, media_dir: Path,
     return (pipeline_cmd() + [job.src, "--apply-cuts", str(cuts_path),
                               "--progress-json", "--out", str(jd / "out"),
                               "--work-root", str(jd / "work"), "--media-out", str(media_dir)]
-            + extra + _tail(model, device) + render_args(job.options))
+            + extra + _tail(model, device) + render_args(job.options, paths.fonts_dir()))
 
 
 def preview_audio_command(job: Job, model: ModelPaths, device: str, cuts_path: Path, out: Path) -> list[str]:
