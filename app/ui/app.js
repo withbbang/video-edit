@@ -47,6 +47,8 @@ const S = {
   // 타임라인 구간: range 는 {start, end} (원본 초), rangeBusy 는 요청 중
   // mark 는 Shift+클릭·`여기서 시작` 으로 찍어 둔 시작점(끝을 기다림), rangeEnd 는 ←/→ 로 옮길 끝 'start' | 'end'
   range: null, rangeBusy: false, rangeErr: false, mark: null, rangeEnd: 'end',
+  // 확대 타임라인: view 는 {t0, spc} (timeline.js), thumbs 는 get_thumbs 결과(없으면 false), wave 는 {hop, bytes}(없으면 false)
+  view: null, thumbs: null, wave: null, tlDataFor: null,
   // 편집 되돌리기: hist 는 서버가 알려 준 {undo, redo} 가능 여부, histBusy 는 요청 중
   hist: { undo: false, redo: false }, histBusy: false,
 };
@@ -119,6 +121,7 @@ function select(id) {
   S.caps = null; S.capsFor = null; S.dropped = false; S.lineSel = null; S.editing = null; S.scroll = {};
   S.findKeys = new Set(); S.findCount = 0; findBar.find.value = ''; findBar.repl.value = '';
   S.range = null; S.rangeErr = false; S.mark = null; S.rangeEnd = 'end'; tlDrag = null;
+  S.view = null; S.thumbs = null; S.wave = null; S.tlDataFor = null; zoomTl.reset();
   S.hist ={ undo: false, redo: false };
   player.detach();
   if (id) {
@@ -152,6 +155,7 @@ async function loadResult(id) {
   S.result = r; S.resultFor = id; S.resultVersion++;
   noteHist(id, r);
   render();
+  if (S.tlDataFor !== id) { S.tlDataFor = id; loadThumbs(id); loadWave(id); }
 }
 
 let capsSeq = 0;
@@ -360,7 +364,7 @@ function resultParts(j, r) {
   const main = [];
   // 미리보기를 못 만들어도 컷·요약은 그대로 쓸 수 있다
   main.push(...(r.preview || r.preview_url ? [player.slot(), player.sub] : [h('div', { class: 'err' }, '미리보기를 만들지 못했습니다')]));
-  main.push(timeline(r), rangeBar.el);
+  main.push(timeline(r), zoomTl.el, rangeBar.el);
   const back = s.restored || restoreOps(r).length;
   main.push(h('div', { class: 'legend' },
     h('span', {}, h('b', { class: 'cut' }, '■ 잘린 곳'), back ? [' · ', h('b', { class: 'back' }, '▭ 되살린 곳')] : []),
@@ -374,8 +378,8 @@ function resultParts(j, r) {
   return out;
 }
 
-// 타임라인: 그냥 누르면 그 위치로 이동, 4px 이상 끌면 구간 고르기, 구간 양 끝 손잡이로 넓히고 좁히기,
-// Shift+클릭은 홀수 번째가 시작·짝수 번째가 끝
+// 전체 막대: 영상 전체를 한 줄에. 조작은 rangePointer (아래 화면 줄·소리 줄과 같다).
+// 노란 틀(viewWin)은 아래 줄들이 지금 보여 주는 범위
 function timeline(r) {
   const dur = r.duration || player.duration() || 0;
   const bar = h('div', { class: 'tl' });
@@ -385,25 +389,33 @@ function timeline(r) {
     for (const c of r.cut_items || []) if (c.restored) bar.append(h('u', { style: pos(c.start, c.end) }));
     for (const o of restoreOps(r)) bar.append(h('u', { style: pos(o.start, o.end) }));
   }
-  bar.append(rangeSel, rangeMark, player.head);
-  const at = (x, g) => Math.min(g.d, Math.max(0, ((x - g.rect.left) / g.rect.width) * g.d));
-  bar.addEventListener('pointerdown', (e) => {
+  bar.append(rangeSel, rangeMark, viewWin, player.head);
+  rangePointer(bar, (x, rect, d) => ((x - rect.left) / rect.width) * d, (e, rect, d) => {
+    if (!e.target.closest('.hd') || !S.range) return null;
+    // 짧은 구간은 손잡이가 겹친다 → 누른 곳이 두 손잡이 가운데보다 왼쪽이면 시작, 아니면 끝
+    const mid = rect.left + (((S.range.start + S.range.end) / 2) / d) * rect.width;
+    return e.clientX < mid ? 'start' : 'end';
+  });
+  return bar;
+}
+
+// 타임라인 누르기·끌기 (전체 막대·화면 줄·소리 줄이 함께 쓴다): 그냥 누르면 그 위치로 이동, 4px 이상 끌면 구간 고르기,
+// 구간 양 끝 손잡이로 넓히고 좁히기, Shift+클릭은 홀수 번째가 시작·짝수 번째가 끝.
+// toT(clientX, rect, d) → 원본 초, endAt(e, rect, d) → 누른 곳이 구간 손잡이면 'start' | 'end'
+function rangePointer(el, toT, endAt) {
+  const at = (x, g) => Math.min(g.d, Math.max(0, toT(x, g.rect, g.d)));
+  el.addEventListener('pointerdown', (e) => {
     const d = rangeDur();
     if (e.button !== 0 || !d) return;
-    const rect = bar.getBoundingClientRect();
-    let mode = 'press';
-    if (e.target.closest('.hd') && S.range) {
-      // 짧은 구간은 손잡이가 겹친다 → 누른 곳이 두 손잡이 가운데보다 왼쪽이면 시작, 아니면 끝
-      const mid = rect.left + (((S.range.start + S.range.end) / 2) / d) * rect.width;
-      mode = e.clientX < mid ? 'start' : 'end';
-      S.rangeEnd = mode;
-    }
-    tlDrag = { rect, x0: e.clientX, d, mode, anchor: 0, shift: e.shiftKey };
+    const rect = el.getBoundingClientRect();
+    const end = endAt(e, rect, d);
+    if (end) S.rangeEnd = end;
+    tlDrag = { rect, x0: e.clientX, d, mode: end || 'press', anchor: 0, shift: e.shiftKey };
     S.rangeErr = false;
-    try { bar.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ }
+    try { el.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ }
     e.preventDefault();
   });
-  bar.addEventListener('pointermove', (e) => {
+  el.addEventListener('pointermove', (e) => {
     if (!tlDrag) return;
     if (e.buttons === 0) { up(e, false); return; }   // 손 뗀 걸 못 받았다 (창 밖 등)
     if (tlDrag.mode === 'press') {
@@ -426,17 +438,18 @@ function timeline(r) {
       S.rangeEnd = S.range.start < g.anchor - EPS ? 'start' : 'end';
       S.range = makeRange(S.range.start, S.range.end, g.d);
     }
+    let t = null;
     if (cancel) { /* 이동하지 않는다 */ } else if (g.mode === 'press' && g.shift) shiftClick(at(e.clientX, g));
-    else if (g.mode === 'press') player.seek(at(e.clientX, g));
-    else if (g.mode === 'new') { if (S.range) player.seek(S.range.start); }
-    else if (S.range) player.seek(S.range[g.mode]);
+    else if (g.mode === 'press') t = at(e.clientX, g);
+    else if (g.mode === 'new') t = S.range ? S.range.start : null;
+    else if (S.range) t = S.range[g.mode];
+    if (t !== null) { player.seek(t); ensureVisible(t); }
     drawRange();
     flushRender();
   };
-  bar.addEventListener('pointerup', (e) => up(e, false));
-  bar.addEventListener('pointercancel', (e) => up(e, true));
-  bar.addEventListener('lostpointercapture', (e) => up(e, true));   // pointerup 뒤에도 오지만 그땐 tlDrag 가 비어 있다
-  return bar;
+  el.addEventListener('pointerup', (e) => up(e, false));
+  el.addEventListener('pointercancel', (e) => up(e, true));
+  el.addEventListener('lostpointercapture', (e) => up(e, true));   // pointerup 뒤에도 오지만 그땐 tlDrag 가 비어 있다
 }
 
 // ---- 편집 되돌리기·다시 실행 ------------------------------------------------
@@ -539,6 +552,7 @@ function stepEnd(which, n) {
   if (!S.range) return;
   setRangeEnd(which, S.range[which] + n / fps());
   player.seek(S.range[which]);
+  ensureVisible(S.range[which]);
   drawRange();
 }
 
@@ -561,6 +575,7 @@ function pickEnd(which, t) {
   } else if (R && t >= R.start + minGap() - EPS) setRangeEnd('end', t);
   else { S.range = makeRange(0, t, d); S.rangeEnd = 'end'; }
   player.seek(t);
+  ensureVisible(t);
   drawRange();
 }
 
@@ -573,6 +588,7 @@ function shiftClick(t) {
     S.mark = snapT(t, d);
     S.rangeErr = false;
     player.seek(S.mark);
+    ensureVisible(S.mark);
     drawRange();
   } else pickEnd('end', t);
 }
@@ -670,6 +686,7 @@ function drawRange() {
   }
   rangeMark.hidden = S.mark === null || !d;
   if (!rangeMark.hidden) rangeMark.style.left = `${(S.mark / d) * 100}%`;
+  zoomTl.draw();
   // 막대 아래
   const b = rangeBar;
   b.el.hidden = !r || !d;
@@ -691,6 +708,282 @@ function drawRange() {
   b.back.disabled = !can || inCut < 0.01;                     // 잘린 곳과 겹쳐야 되살릴 수 있다
   b.cancel.disabled = S.rangeBusy;
 }
+
+// ---- 확대 타임라인 (화면 줄·소리 줄) -------------------------------------------------
+// 전체 막대 아래에 썸네일을 이어 붙인 화면 줄과 소리 파형 줄. 보기 범위 S.view 는 timeline.js 로 계산한다.
+// 썸네일 시트는 서버가 뒤에서 하나씩 만들고("thumbs" 알림) 오는 대로 채운다.
+const viewWin = h('i', { class: 'vwin', hidden: true });   // 전체 막대 위 노란 틀
+const ROW_H = 54;    // 화면 줄 높이 (px)
+const WAVE_H = 34;   // 소리 줄 높이
+
+async function loadThumbs(id) {
+  const t = await call('get_thumbs', id);
+  if (S.sel !== id) return;
+  S.thumbs = t || false;
+  zoomTl.draw();
+}
+
+async function loadWave(id) {
+  const w = await call('get_waveform', id);
+  if (S.sel !== id) return;
+  if (!w) { S.wave = false; zoomTl.draw(); return; }
+  const raw = atob(w.data);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  S.wave = { hop: w.hop, bytes };
+  zoomTl.draw();
+}
+
+// t 가 아래 줄들에 보이게 (안 보이면 넘긴다)
+function ensureVisible(t) {
+  if (!S.view || t === null || !isFinite(t)) return;
+  const g = zoomTl.geom();
+  if (!g) return;
+  const v = TL.followT(S.view, t, g.d, g.w, g.cw, fps());
+  if (v.t0 !== S.view.t0 || v.spc !== S.view.spc) { S.view = v; zoomTl.draw(); }
+}
+
+const zoomTl = (() => {
+  const frames = h('canvas', { class: 'zt-frames' });
+  const wave = h('canvas', { class: 'zt-wave' });
+  const head = h('i', { class: 'zhead', hidden: true });
+  const rows = h('div', { class: 'zt-rows' }, frames, wave, head);
+  const slider = h('input', { type: 'range', min: '0', max: '1000', step: '1', value: '0', 'aria-label': '확대' });
+  const label = h('span', { class: 'muted' });
+  const zbtn = (text, title, factor) => {
+    const el = h('button', { type: 'button', class: 'btn', onclick: () => zoomBy(factor) }, text);
+    el.title = title;
+    return el;
+  };
+  const el = h('div', { class: 'ztl' }, rows,
+    h('div', { class: 'zt-zoom' }, zbtn('−', '축소', 0.5), slider, zbtn('+', '확대', 2), label));
+  const imgs = new Map();   // 시트 주소 → Image
+  let raf = 0;
+
+  // 지금 줄 너비·칸 너비·영상 길이 (화면에 붙기 전엔 null)
+  function geom() {
+    const d = rangeDur();
+    const w = rows.clientWidth;
+    if (!d || !w) return null;
+    const t = S.thumbs;
+    const cw = t ? Math.max(24, Math.round((ROW_H * t.tile_w) / t.tile_h)) : Math.round((ROW_H * 16) / 9);
+    return { d, w, cw };
+  }
+  // 확대 기준: 재생 위치가 보이면 거기, 아니면 가운데
+  function anchor(g) {
+    const t = player.ready() ? player.time() : null;
+    const span = (S.view.spc * g.w) / g.cw;
+    return t !== null && t >= S.view.t0 && t <= S.view.t0 + span ? t : S.view.t0 + span / 2;
+  }
+  function zoomBy(factor, at) {
+    const g = geom();
+    if (!g || !S.view) return;
+    S.view = TL.zoomAt(S.view, factor, at === undefined ? anchor(g) : at, g.d, g.w, g.cw, fps());
+    draw();
+  }
+  slider.addEventListener('input', () => {
+    const g = geom();
+    if (!g || !S.view) return;
+    const fit = TL.fitView(g.d, g.w, g.cw).spc;
+    const spc = TL.sliderToSpc(Number(slider.value), Math.min(1 / fps(), fit), fit);
+    zoomBy(S.view.spc / spc);
+  });
+  // ⌘/Ctrl+휠·트랙패드 벌리기 = 마우스 자리 기준 확대, 그냥 휠 = 좌우 이동
+  rows.addEventListener('wheel', (e) => {
+    const g = geom();
+    if (!g || !S.view) return;
+    e.preventDefault();
+    const x = e.clientX - rows.getBoundingClientRect().left;
+    if (e.ctrlKey || e.metaKey) {
+      zoomBy(Math.exp(-e.deltaY * 0.01), TL.xToT(S.view, x, g.cw));
+    } else {
+      const dx = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      S.view = TL.clampView({ t0: S.view.t0 + (dx / g.cw) * S.view.spc, spc: S.view.spc }, g.d, g.w, g.cw, fps());
+      draw();
+    }
+  }, { passive: false });
+  // 화면 줄·소리 줄의 누르기·끌기: 손잡이는 구간 끝 ±6px
+  const toT = (x, rect) => { const g = geom(); return g && S.view ? TL.xToT(S.view, x - rect.left, g.cw) : 0; };
+  const endAt = (e, rect) => {
+    const g = geom();
+    if (!S.range || !g || !S.view) return null;
+    const x = e.clientX - rect.left;
+    const xs = TL.tToX(S.view, S.range.start, g.cw), xe = TL.tToX(S.view, S.range.end, g.cw);
+    const ds = Math.abs(x - xs), de = Math.abs(x - xe);
+    if (Math.min(ds, de) > 6) return null;
+    return ds < de || (ds === de && x < (xs + xe) / 2) ? 'start' : 'end';
+  };
+  rangePointer(frames, toT, endAt);
+  rangePointer(wave, toT, endAt);
+
+  function sheetImg(url) {
+    let img = imgs.get(url);
+    if (!img) {
+      img = new Image();
+      img.onload = () => draw();
+      img.src = url;
+      imgs.set(url, img);
+    }
+    return img.complete && img.naturalWidth ? img : null;
+  }
+
+  function colors() {
+    const cs = getComputedStyle(document.documentElement);
+    const v = (n) => cs.getPropertyValue(n).trim();
+    return { cut: v('--cut'), accent: v('--accent'), fg: v('--fg'), soft: v('--soft'), bg: v('--bg'),
+      muted: v('--muted'), back: v('--restored') };
+  }
+  function fit(cv, w, hgt) {
+    const dpr = window.devicePixelRatio || 1;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(hgt * dpr)) {
+      cv.width = Math.round(w * dpr);
+      cv.height = Math.round(hgt * dpr);
+    }
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return ctx;
+  }
+  // 두 줄에 같이 그리는 것: 잘린 곳 빗금, 되살린 곳, 구간, 찍어 둔 시작점
+  function overlays(ctx, g, hgt, c) {
+    const r = S.resultFor === S.sel ? S.result : null;
+    const X = (t) => TL.tToX(S.view, t, g.cw);
+    const span = [S.view.t0, S.view.t0 + (S.view.spc * g.w) / g.cw];
+    const vis = (a, b) => b > span[0] && a < span[1];
+    ctx.save();
+    for (const [a, b] of merge((r && r.cuts) || [])) {
+      if (!vis(a, b)) continue;
+      const x = X(a), w = Math.max(1, X(b) - x);
+      ctx.fillStyle = c.cut + '55';
+      ctx.fillRect(x, 0, w, hgt);
+      ctx.strokeStyle = c.cut + 'aa';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let k = -hgt; k < w; k += 8) { ctx.moveTo(x + k, hgt); ctx.lineTo(x + k + hgt, 0); }
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x, 0, w, hgt);
+      ctx.clip();
+      ctx.beginPath();
+      for (let k = -hgt; k < w; k += 8) { ctx.moveTo(x + k, hgt); ctx.lineTo(x + k + hgt, 0); }
+      ctx.stroke();
+      ctx.restore();
+    }
+    const backs = [...((r && r.cut_items) || []).filter((it) => it.restored), ...restoreOps(r)];
+    ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = c.back;
+    for (const it of backs) if (vis(it.start, it.end)) ctx.strokeRect(X(it.start) + 0.5, 0.5, X(it.end) - X(it.start) - 1, hgt - 1);
+    ctx.setLineDash([]);
+    const R = S.range;
+    if (R && vis(R.start, R.end)) {
+      const x1 = X(R.start), x2 = X(R.end);
+      ctx.fillStyle = c.accent + '33';
+      ctx.fillRect(x1, 0, x2 - x1, hgt);
+      ctx.strokeStyle = c.accent;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x1, 1, x2 - x1, hgt - 2);
+      for (const [which, x] of [['start', x1], ['end', x2]]) {
+        ctx.fillStyle = c.accent;
+        ctx.fillRect(x - 3, 2, 6, hgt - 4);
+        if (which === S.rangeEnd) {   // ←/→ 로 옮길 끝
+          ctx.strokeStyle = c.bg;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(x - 4, 1, 8, hgt - 2);
+        }
+      }
+    }
+    if (S.mark !== null && vis(S.mark, S.mark)) {
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = c.accent;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(X(S.mark), 0);
+      ctx.lineTo(X(S.mark), hgt);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function paint() {
+    raf = 0;
+    const r = S.resultFor === S.sel ? S.result : null;
+    const g = geom();
+    const showFrames = !!(r && r.preview && r.preview.video) && S.thumbs !== false;
+    const showWave = S.wave !== false;
+    frames.hidden = !showFrames;
+    wave.hidden = !showWave;
+    el.hidden = !r || !g || (!showFrames && !showWave);
+    if (el.hidden || !g) { viewWin.hidden = true; return; }
+    S.view = TL.clampView(S.view || TL.fitView(g.d, g.w, g.cw), g.d, g.w, g.cw, fps());
+    const c = colors();
+    const v = S.view;
+    if (showFrames) {
+      const ctx = fit(frames, g.w, ROW_H);
+      ctx.clearRect(0, 0, g.w, ROW_H);   // 바탕색이 반투명이라 지우고 칠한다
+      ctx.fillStyle = c.soft;
+      ctx.fillRect(0, 0, g.w, ROW_H);
+      const T = S.thumbs;
+      for (const cell of TL.cells(v, g.d, g.w, g.cw)) {
+        const sc = T ? TL.sheetCell(cell.t, T) : null;
+        const url = sc && T.sheets[sc.sheet];
+        const img = url && sheetImg(url);
+        if (img) ctx.drawImage(img, sc.col * T.tile_w, sc.row * T.tile_h, T.tile_w, T.tile_h, cell.x, 0, g.cw, ROW_H);
+        ctx.fillStyle = c.bg;
+        ctx.fillRect(cell.x + g.cw - 1, 0, 1, ROW_H);   // 칸 사이 선
+      }
+      overlays(ctx, g, ROW_H, c);
+    }
+    if (showWave) {
+      const ctx = fit(wave, g.w, WAVE_H);
+      ctx.clearRect(0, 0, g.w, WAVE_H);   // 바탕색이 반투명이라 지우고 칠한다
+      ctx.fillStyle = c.soft;
+      ctx.fillRect(0, 0, g.w, WAVE_H);
+      if (S.wave) {
+        ctx.fillStyle = c.muted;
+        const { hop, bytes } = S.wave;
+        for (let x = 0; x < g.w; x++) {
+          const a = TL.xToT(v, x, g.cw), b = TL.xToT(v, x + 1, g.cw);
+          if (a >= g.d) break;
+          const hh = (TL.waveMax(bytes, hop, a, b) / 255) * (WAVE_H - 2);
+          if (hh > 0.5) ctx.fillRect(x, (WAVE_H - hh) / 2, 1, hh);
+        }
+      }
+      overlays(ctx, g, WAVE_H, c);
+    }
+    // 확대 조절·노란 틀
+    const fitSpc = TL.fitView(g.d, g.w, g.cw).spc;
+    if (document.activeElement !== slider) slider.value = String(Math.round(TL.spcToSlider(v.spc, Math.min(1 / fps(), fitSpc), fitSpc)));
+    const frm = v.spc * fps();
+    label.textContent = frm < 1.5 ? '1칸 = 1프레임' : v.spc < 1 ? `1칸 = ${Math.round(frm)}프레임`
+      : `1칸 = ${v.spc < 10 ? v.spc.toFixed(1) : Math.round(v.spc)}초`;
+    const span = (v.spc * g.w) / g.cw;
+    viewWin.hidden = span >= g.d * 0.999;
+    viewWin.style.left = `${(v.t0 / g.d) * 100}%`;
+    viewWin.style.width = `${(Math.min(span, g.d - v.t0) / g.d) * 100}%`;
+    drawHeadLine(player.ready() ? player.time() : null);
+  }
+  function drawHeadLine(t) {
+    const g = geom();
+    if (!g || !S.view || t === null) { head.hidden = true; return; }
+    const x = TL.tToX(S.view, t, g.cw);
+    head.hidden = x < 0 || x > g.w;
+    head.style.left = `${x}px`;
+  }
+  function draw() { if (!raf) raf = requestAnimationFrame(paint); }
+
+  window.addEventListener('resize', draw);
+  return {
+    el, geom, draw,
+    // 재생 위치가 움직일 때 (재생 중 보기 밖으로 나가면 넘긴다)
+    head(t, playing) {
+      if (playing && S.view) {
+        const g = geom();
+        if (g && (t < S.view.t0 || t > S.view.t0 + (S.view.spc * g.w) / g.cw)) { ensureVisible(t); return; }
+      }
+      drawHeadLine(t);
+    },
+    reset() { imgs.clear(); },
+  };
+})();
 
 async function rangeOp(kind) {
   const j = selected();
@@ -744,7 +1037,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     const n = (k === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 10 : 1);
     if (S.range) stepEnd(S.rangeEnd, n);
-    else player.seek(snapT(player.time() + n / fps(), rangeDur()));
+    else { const t = snapT(player.time() + n / fps(), rangeDur()); player.seek(t); ensureVisible(t); }
   } else if ((k === 'i' || k === 'I' || k === 'o' || k === 'O') && !e.shiftKey && !S.rangeBusy) {
     e.preventDefault();
     pickEnd(k.toLowerCase() === 'i' ? 'start' : 'end', player.time());
@@ -1230,6 +1523,7 @@ const player = {
     const d = (S.result && S.result.duration) || this.duration();
     const t = this.time();
     this.head.style.left = d ? `${Math.min(100, (t / d) * 100)}%` : '0';
+    zoomTl.head(t, this.playing());
     this.drawSub(t);
   },
   // 영상 아래 자막: 지금 시간의 줄 (고친 줄 시간 반영). 줄이 바뀔 때만 다시 만든다
@@ -1350,6 +1644,7 @@ window.onAppEvent = (event, data) => {
   data = data || {};
   if (event === 'job' || event === 'jobs') refresh();
   else if (event === 'preview') { if (data.id && data.id === S.sel) loadResult(data.id); }   // 잘린 소리를 다 만들었다
+  else if (event === 'thumbs') { if (data.id && data.id === S.sel) loadThumbs(data.id); }    // 썸네일 시트 하나가 됐다
   else if (event === 'models') {
     if (data.error) coverError();
     else if (data.ready) { $('cover').hidden = true; refresh(); }

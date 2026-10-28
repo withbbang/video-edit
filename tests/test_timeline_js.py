@@ -22,6 +22,7 @@ def run(body: str):
 def test_fit_and_clamp():
     v = run("out = T.fitView(3600, 1000, 100);")
     assert v == {"t0": 0, "spc": 360}
+    assert run("out = T.fitView(120, 950, 96).spc;") == pytest.approx(120 * 96 / 950)   # 줄 너비에 꼭 맞게
     v = run("out = T.clampView({t0: -5, spc: 1e-9}, 3600, 1000, 100, 30);")
     assert v["t0"] == 0 and v["spc"] == pytest.approx(1 / 30)
     v = run("out = T.clampView({t0: 3599, spc: 1}, 3600, 1000, 100, 30);")   # 끝을 넘지 않게
@@ -73,3 +74,10 @@ def test_slider_roundtrip():
     s = run("out = [T.spcToSlider(1/30, 1/30, 360), T.spcToSlider(360, 1/30, 360),"
             " T.sliderToSpc(T.spcToSlider(2, 1/30, 360), 1/30, 360)];")
     assert s[0] == 1000 and s[1] == 0 and s[2] == pytest.approx(2)
+
+
+def test_zoom_past_limit_keeps_anchor():
+    # 이미 1프레임/칸인데 더 확대해도 마우스 자리의 시간이 옆으로 밀리지 않는다
+    x0, x1 = run("const v = {t0: 29.9, spc: 1/30}; const z = T.zoomAt(v, 3, 30, 120, 960, 96, 30);"
+                 "out = [T.tToX(v, 30, 96), T.tToX(z, 30, 96)];")
+    assert x0 == pytest.approx(x1)

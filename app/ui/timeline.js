@@ -1,9 +1,9 @@
 /* 타임라인 보기 범위 계산 (순수 함수 — 화면 app.js 와 node 테스트가 함께 쓴다).
    보기 범위 view = {t0: 왼쪽 끝 원본 초, spc: 칸 하나의 초}. 칸 너비 cw(px), 줄 너비 w(px). */
 
-// 영상 전체가 한 줄에 들어오는 보기
+// 영상 전체가 줄 너비에 꼭 맞는 보기 (마지막 칸은 잘릴 수 있다)
 function fitView(d, w, cw) {
-  return { t0: 0, spc: d / Math.max(1, Math.floor(w / cw)) };
+  return { t0: 0, spc: (d * cw) / Math.max(cw, w) };
 }
 
 // 칸 하나는 1프레임보다 작게, 전체보다 크게 하지 않고, 왼쪽 끝은 영상 안에서
@@ -20,7 +20,7 @@ const xToT = (v, x, cw) => v.t0 + (x / cw) * v.spc;
 // factor 배 확대 (1보다 작으면 축소). anchorT 는 화면에서 같은 자리에 남는다
 function zoomAt(v, factor, anchorT, d, w, cw, fps) {
   const x = tToX(v, anchorT, cw);
-  const spc = v.spc / factor;
+  const spc = clampView({ t0: 0, spc: v.spc / factor }, d, w, cw, fps).spc;   // 한계에서 멈춘 배율로 자리를 잡는다
   return clampView({ t0: anchorT - (x / cw) * spc, spc }, d, w, cw, fps);
 }
 
