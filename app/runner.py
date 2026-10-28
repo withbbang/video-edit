@@ -106,12 +106,18 @@ class Running:
 
 
 def run(cmd: list[str], weights: dict, on_progress: Callable[[float], None],
-        env: dict | None = None, on_start: Callable[[Running], None] | None = None) -> RunResult:
+        env: dict | None = None, on_start: Callable[[Running], None] | None = None,
+        low_priority: bool = False) -> RunResult:
+    """low_priority 면 낮은 우선순위로 띄운다 (썸네일처럼 분석·저장 옆에서 도는 일)."""
     kw: dict = {}
     if IS_WIN:
         kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        if low_priority:
+            kw["creationflags"] |= subprocess.BELOW_NORMAL_PRIORITY_CLASS
     else:
         kw["start_new_session"] = True
+        if low_priority:
+            kw["preexec_fn"] = lambda: os.nice(10)
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 text=True, encoding="utf-8", errors="replace",

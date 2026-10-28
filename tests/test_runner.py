@@ -111,3 +111,8 @@ def test_render_command_passes_edits(tmp_path):
     cmd = runner.render_command(job, ModelPaths("/m/w", "/m/c"), "cpu", tmp_path / "save",
                                 edits_path=tmp_path / "e.json")
     assert cmd[cmd.index("--subs-edits") + 1] == str(tmp_path / "e.json")
+
+
+def test_runner_low_priority_runs():
+    res = runner.run([sys.executable, "-c", "print(1)"], {"x": 1.0}, lambda p: None, low_priority=True)
+    assert res.ok
