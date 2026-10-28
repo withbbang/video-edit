@@ -124,6 +124,7 @@ tests/                pytest (requirements-dev.txt)
 
 - 실행: `.venv/bin/python -m pip install -r requirements-app.txt` 후 `.venv/bin/python -m app`.
   테스트: `.venv/bin/python -m pytest` (`pip install -r requirements-dev.txt`). 파이프라인이나 앱을 고친 뒤엔 전체를 돌린다.
+- 화면의 순수 계산(보기 범위·따라가기 등)은 `app/ui/timeline.js` 에 두고 `tests/test_timeline_js.py` 에서 node 로 테스트한다.
 - `pipeline.py` 의 CLI 기본 동작은 그대로다. 앱은 이를 서브프로세스로 부르며 앱 전용 숨은 옵션만 추가돼 있다
   (기본값은 기존 동작): `--progress-json`(@progress 줄 출력), `--render-denoise`/`--render-loudnorm`(렌더 때만 배경 잡음·음량; 앱은 지금 `--denoise-level` 을 쓴다),
   `--preview`(미리보기 폴더: video.mp4/video.index.json/audio_full.m4a/audio_full.index.json), `--preview-cut-audio <m4a>`(`--apply-cuts` 와만: 컷 적용한 미리보기 소리 + index 만 만들고 끝. 캐시된 전사·분석 오디오만 쓰고 없거나 맞지 않으면 오류로 멈춤), `--vbitrate-scale`(화질 배율 0.6/1/1.5), `--work-root`(작업 캐시 폴더),
