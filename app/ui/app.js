@@ -734,6 +734,56 @@ async function loadWave(id) {
   zoomTl.draw();
 }
 
+// 확대했을 때(칸 < 썸네일 간격)나 시트가 아직 없을 때의 썸네일: 숨은 <video> 로 미리보기 영상을 그 프레임에 맞춰
+// 작은 canvas 에 그린다 (미리보기 영상은 모든 프레임이 기준 프레임이라 빠르다). 키는 원본 프레임 번호, 최대 FRAME_CACHE 장.
+const FRAME_CACHE = 600;
+const frameGrab = (() => {
+  const v = h('video', { class: 'grab', muted: true, preload: 'auto', playsinline: true });
+  v.muted = true;
+  let url = null, tw = 160, th = 90, busy = false, queue = [];
+  const cache = new Map();   // 프레임 번호 → canvas (넣은 순서 = 오래된 순서)
+  const key = (t) => Math.round(t * fps());
+  function pump() {
+    if (busy || !url || !queue.length || v.readyState < 1) return;
+    busy = true;
+    v.currentTime = queue.shift() + 0.25 / fps();   // 프레임 경계에 딱 맞추면 앞 프레임이 나올 수 있다
+  }
+  v.addEventListener('loadedmetadata', pump);
+  v.addEventListener('seeked', () => {
+    if (!url) return;
+    const c = document.createElement('canvas');
+    c.width = tw; c.height = th;
+    try { c.getContext('2d').drawImage(v, 0, 0, tw, th); } catch (e) { /* 아직 못 그림 */ }
+    cache.set(key(v.currentTime - 0.25 / fps()), c);
+    while (cache.size > FRAME_CACHE) cache.delete(cache.keys().next().value);
+    busy = false;
+    zoomTl.draw();
+    pump();
+  });
+  v.addEventListener('error', () => { busy = false; queue = []; });
+  return {
+    attach(u, w, hgt) {
+      if (u === url) return;
+      this.detach();
+      url = u; tw = w; th = hgt;
+      if (!v.isConnected) document.body.append(v);
+      v.src = u;
+    },
+    detach() {
+      url = null; queue = []; busy = false; cache.clear();
+      v.removeAttribute('src');
+      v.load();
+    },
+    get(t) {
+      const c = cache.get(key(t));
+      if (c) { cache.delete(key(t)); cache.set(key(t), c); }   // 최근에 쓴 것은 뒤로
+      return c || null;
+    },
+    // 지금 보이는 칸들만 (보기 범위가 바뀌면 대기열을 새로 바꾼다)
+    want(ts) { queue = ts.filter((t) => !cache.has(key(t))); pump(); },
+  };
+})();
+
 // t 가 아래 줄들에 보이게 (안 보이면 넘긴다)
 function ensureVisible(t) {
   if (!S.view || t === null || !isFinite(t)) return;
@@ -922,14 +972,21 @@ const zoomTl = (() => {
       ctx.fillStyle = c.soft;
       ctx.fillRect(0, 0, g.w, ROW_H);
       const T = S.thumbs;
+      frameGrab.attach(r.preview.video, T ? T.tile_w : 160, T ? T.tile_h : 90);
+      const fine = !T || v.spc < T.step * 0.999;   // 칸이 썸네일 간격보다 좁으면 프레임을 직접 그린다
+      const need = [];
       for (const cell of TL.cells(v, g.d, g.w, g.cw)) {
         const sc = T ? TL.sheetCell(cell.t, T) : null;
         const url = sc && T.sheets[sc.sheet];
         const img = url && sheetImg(url);
-        if (img) ctx.drawImage(img, sc.col * T.tile_w, sc.row * T.tile_h, T.tile_w, T.tile_h, cell.x, 0, g.cw, ROW_H);
+        const fc = fine || !img ? frameGrab.get(cell.t) : null;
+        if (fc) ctx.drawImage(fc, cell.x, 0, g.cw, ROW_H);
+        else if (img) ctx.drawImage(img, sc.col * T.tile_w, sc.row * T.tile_h, T.tile_w, T.tile_h, cell.x, 0, g.cw, ROW_H);
+        if (!fc && (fine || !img)) need.push(cell.t);
         ctx.fillStyle = c.bg;
         ctx.fillRect(cell.x + g.cw - 1, 0, 1, ROW_H);   // 칸 사이 선
       }
+      frameGrab.want(need);
       overlays(ctx, g, ROW_H, c);
     }
     if (showWave) {
@@ -981,7 +1038,7 @@ const zoomTl = (() => {
       }
       drawHeadLine(t);
     },
-    reset() { imgs.clear(); },
+    reset() { imgs.clear(); frameGrab.detach(); },
   };
 })();
 

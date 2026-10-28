@@ -217,6 +217,7 @@ input[type=text] { -webkit-user-select: text; user-select: text; }
 .tl .vwin { position: absolute; top: -4px; bottom: -4px; min-width: 3px; border: 2px solid #f5c400; border-radius: 3px;
   pointer-events: none; }
 .ztl { margin: 4px 0 2px; }
+video.grab { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }   /* 프레임 썸네일 뽑기용 */
 .ztl[hidden], .ztl canvas[hidden], .ztl .zhead[hidden] { display: none; }
 .zt-rows { position: relative; display: flex; flex-direction: column; gap: 3px; }
 .zt-rows canvas { display: block; width: 100%; border-radius: 3px; cursor: pointer; touch-action: none; }
