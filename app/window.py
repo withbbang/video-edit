@@ -36,8 +36,8 @@ FILE_TYPES = ("영상과 오디오 (" + ";".join(f"*{e}" for e in sorted(api_mod
 _UI_ORIGIN = re.compile(r"null|http://(?:127\.0\.0\.1|localhost):[0-9]{1,5}")
 _PREVIEW_PATH = re.compile(
     r"/([0-9a-f]{12})/(preview\.mp4|preview/(?:video\.mp4|video\.index\.json|audio_full\.m4a|audio_full\.index\.json"
-    r"|audio_cut\.[0-9a-f]{16}\.m4a|audio_cut\.[0-9a-f]{16}\.index\.json))")
-_CONTENT_TYPES = {".mp4": "video/mp4", ".m4a": "audio/mp4", ".json": "application/json"}
+    r"|audio_cut\.[0-9a-f]{16}\.m4a|audio_cut\.[0-9a-f]{16}\.index\.json|thumbs/sheet_[0-9]{4}\.jpg))")
+_CONTENT_TYPES = {".mp4": "video/mp4", ".m4a": "audio/mp4", ".json": "application/json", ".jpg": "image/jpeg"}
 _CHUNK = 1 << 16
 _BAD_RANGE = "bad"
 
@@ -276,7 +276,8 @@ def build(data_root: Path, push, dialogs, preview_base: str):
     queue = None
     api = None
     execute = api_mod.make_execute(store, manifest, data_root, lambda: queue,
-                                   lambda: api._cut_audio if api is not None else None)
+                                   lambda: api._cut_audio if api is not None else None,
+                                   lambda: api._thumbs if api is not None else None)
     queue = Queue(store, execute, api_mod.make_on_change(push))
     api = api_mod.Api(store, queue, push, dialogs, manifest=manifest, data_root=data_root,
                       preview_base=preview_base)

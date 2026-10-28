@@ -17,12 +17,13 @@ import math
 import logging
 import os
 import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Callable, Protocol
 
-from . import __version__, diff, models, paths, preview, runner, subtitles, updates
+from . import __version__, diff, models, paths, preview, runner, subtitles, thumbs, updates
 from .jobqueue import ANALYZE, RENDER
 from .options import FAST_KEYS, LEVEL_KEYS, JobOptions, parse_level
 from .progress import ANALYZE_WEIGHTS, RENDER_WEIGHTS
@@ -191,12 +192,24 @@ CUT_AUDIO_WAIT = 10.0   # 분석·저장 전에 그 영상의 미리보기 소�
 
 
 def make_execute(store: Store, manifest: dict, data_root: Path, queue_getter: Callable[[], object],
-                 cut_audio_getter: Callable[[], "preview.CutAudio | None"] | None = None):
+                 cut_audio_getter: Callable[[], "preview.CutAudio | None"] | None = None,
+                 thumbs_getter: Callable[[], "thumbs.Thumbs | None"] | None = None):
     """Queue(execute=...) 에 넘긴다. queue_getter 는 Queue 를 만든 뒤에 돌려줄 수 있게 함수로 받는다.
     진행률은 queue.set_progress 로 넘기고(그게 on_change → push("job") 로 이어진다) 작업마다 초당 5번까지만.
     cut_audio_getter 가 주는 CutAudio 의 그 영상 작업은 실행 전에 멈추고(같은 영상 잠금을 쥐고 있으면 파이프라인이
-    "이미 처리 중" 으로 멈춘다) 끝나면 다시 받는다."""
+    "이미 처리 중" 으로 멈춘다) 끝나면 다시 받는다. thumbs_getter 의 썸네일 일꾼은 분석(미리보기 영상을 다시 만듦) 때만 멈춘다."""
     def execute(job: Job, kind: str, on_start) -> RunResult:
+        th = thumbs_getter() if thumbs_getter and kind == ANALYZE else None
+        if th is None:
+            return _execute_audio(job, kind, on_start)
+        if not th.cancel(job.id, CUT_AUDIO_WAIT):
+            log.warning("썸네일 만들기를 %s초 안에 멈추지 못했습니다: %s", CUT_AUDIO_WAIT, job.id)
+        try:
+            return _execute_audio(job, kind, on_start)
+        finally:
+            th.release(job.id)
+
+    def _execute_audio(job: Job, kind: str, on_start) -> RunResult:
         cut_audio = cut_audio_getter() if cut_audio_getter else None
         if cut_audio is None:
             return _execute(job, kind, on_start)
@@ -238,7 +251,8 @@ def make_execute(store: Store, manifest: dict, data_root: Path, queue_getter: Ca
 class Api:
     def __init__(self, store: Store, queue, push: Push, dialogs: Dialogs, *,
                  manifest: dict, data_root: Path, preview_base: str,
-                 cut_audio_run: Callable[[list[str]], RunResult] | None = None):
+                 cut_audio_run: Callable[[list[str]], RunResult] | None = None,
+                 thumbs_run: Callable[[list[str]], RunResult] | None = None):
         self._store = store
         self._queue = queue
         self._push = push
@@ -255,6 +269,8 @@ class Api:
         # 컷을 적용한 미리보기 소리 (cut_audio_run 은 테스트가 가짜를 넣는다)
         self._cut_audio = preview.CutAudio(cut_audio_run or self._run_cut_audio,
                                            lambda job_id: self._push("preview", {"id": job_id}))
+        # 타임라인 썸네일 시트 (열어 본 영상만, thumbs_run 은 테스트가 가짜를 넣는다)
+        self._thumbs = thumbs.Thumbs(thumbs_run or self._run_thumbs, lambda job_id: self._push("thumbs", {"id": job_id}))
 
     # ---- 내부 ----------------------------------------------------------------
 
@@ -264,9 +280,13 @@ class Api:
         env = models.pipeline_env(self._manifest, self._data_root, settings)
         return runner.run(cmd, {"preview": 1.0}, lambda p: None, env=env, on_start=self._cut_audio.started)
 
+    def _run_thumbs(self, cmd: list[str]) -> RunResult:
+        return runner.run(cmd, {"thumbs": 1.0}, lambda p: None, on_start=self._thumbs.started, low_priority=True)
+
     def _shutdown(self) -> None:
-        """창을 닫을 때: 미리보기 소리를 만들던 프로세스를 멈춘다."""
+        """창을 닫을 때: 미리보기 소리·썸네일을 만들던 프로세스를 멈춘다."""
         self._cut_audio.shutdown()
+        self._thumbs.shutdown()
 
     def _job(self, job_id: str) -> Job | None:
         return self._store.get(job_id)
@@ -355,6 +375,7 @@ class Api:
         """대기 중이면 빼고, 처리·저장 중이면 멈추고 뺀다 (확인은 화면이 먼저 받는다)."""
         self._queue.cancel(job_id)
         self._cut_audio.drop(job_id)
+        self._thumbs.drop(job_id)
         with self._queue.lock:
             self._history.pop(job_id, None)
         return self.list_jobs()
@@ -699,6 +720,8 @@ class Api:
                   "range_ops": ops, "history": self._hist(job_id),
                   "duration": duration, "fps": float(subtitles._fps(cur or {}))}   # 화면의 프레임 단위 구간 다듬기
         result.update(self._preview(snap, status, effective, settings))
+        if status in (Status.REVIEW, Status.SAVED):
+            self._request_thumbs(snap, duration)
         if dropped:
             result["edits_dropped"] = True
         if status == Status.SAVED:
@@ -742,6 +765,73 @@ class Api:
                 "preview": {"video": url("video.mp4"), "video_index": url("video.index.json"),
                             "audio_full": url("audio_full.m4a"), "audio_full_index": url("audio_full.index.json"),
                             "cut_audio": cut_audio, "cut_index": cut_index, "pending": pending}}
+
+    # ---- 타임라인 썸네일 ------------------------------------------------------
+
+    @staticmethod
+    def _preview_size(video: Path) -> tuple[int, int] | None:
+        """미리보기 영상의 가로·세로. ffprobe 결과를 thumbs/size.json 에 영상 서명과 함께 남긴다."""
+        cache = video.parent / "thumbs" / "size.json"
+        try:
+            sig = thumbs.video_sig(video)
+        except OSError:
+            return None
+        c = _read_json(cache)
+        if c and c.get("video") == sig and c.get("w") and c.get("h"):
+            return int(c["w"]), int(c["h"])
+        kw = {"creationflags": subprocess.CREATE_NO_WINDOW} if runner.IS_WIN else {}
+        try:
+            out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                  "stream=width,height", "-of", "csv=p=0", str(video)], capture_output=True, text=True,
+                                 env=runner.build_env(), timeout=30, **kw).stdout.strip()
+            w, h = (int(x) for x in out.split(",")[:2])
+        except (OSError, ValueError, subprocess.SubprocessError):
+            log.warning("미리보기 영상 크기를 읽지 못했습니다: %s", video)
+            return None
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps({"video": sig, "w": w, "h": h}), encoding="utf-8")
+        except OSError:
+            pass
+        return w, h
+
+    def _thumbs_meta(self, job: Job, duration: float, request: bool) -> dict | None:
+        video = paths.job_dir(Path(job.src)) / "preview" / "video.mp4"
+        if duration <= 0 or not video.is_file():
+            return None
+        size = self._preview_size(video)
+        if size is None:
+            return None
+        if request:
+            return self._thumbs.request(job.id, video, video.parent / "thumbs", duration, size)
+        try:
+            return thumbs.load_meta(video.parent / "thumbs", video, thumbs.plan(duration, *size))
+        except OSError:
+            return None
+
+    def _request_thumbs(self, job: Job, duration: float) -> None:
+        """결과를 열어 본 영상의 썸네일 시트를 뒤에서 만들기 시작한다 (다른 영상 것은 멈춘다)."""
+        try:
+            self._thumbs_meta(job, duration, request=True)
+        except OSError:
+            log.exception("썸네일 요청 실패: %s", job.id)
+
+    def get_thumbs(self, job_id: str) -> dict | None:
+        """타임라인 썸네일 배치와 시트 주소 (아직 없는 시트는 None). 미리보기 영상이 없으면 None."""
+        with self._queue.lock:
+            job = self._job(job_id)
+            snap = copy.deepcopy(job) if job else None
+        if snap is None:
+            return None
+        meta = self._thumbs_meta(snap, self._duration(snap), request=False)
+        if meta is None:
+            return None
+        d = paths.job_dir(Path(snap.src)) / "preview" / "thumbs"
+        base = f"{self._preview_base}/{snap.id}/preview/thumbs"
+        done = set(meta["done"])
+        sheets = [_preview_url(f"{base}/{thumbs.sheet_name(i)}", d / thumbs.sheet_name(i)) if i in done else None
+                  for i in range(meta["sheets"])]
+        return {k: meta[k] for k in ("step", "tile_w", "tile_h", "cols", "rows", "per_sheet", "count")} | {"sheets": sheets}
 
     # ---- 설정 ----------------------------------------------------------------
 

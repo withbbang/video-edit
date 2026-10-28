@@ -306,3 +306,15 @@ def test_build_prunes_caches_of_removed_jobs(tmp_path, monkeypatch):
 def test_ui_index_exists():
     assert window.ui_index().is_file()
     assert sys.modules["app.window"] is window
+
+
+def test_serves_thumb_sheet_as_jpeg(served, tmp_path):
+    d = tmp_path / "jobs" / "0123456789ab" / "preview" / "thumbs"
+    d.mkdir(parents=True)
+    (d / "sheet_0000.jpg").write_bytes(b"jpg")
+    (d / "thumbs.json").write_bytes(b"{}")
+    r, body = _req(served[0], "/0123456789ab/preview/thumbs/sheet_0000.jpg")
+    assert r.status == 200 and body == b"jpg" and r.getheader("Content-Type") == "image/jpeg"
+    for name in ("thumbs.json", "sheet_0.jpg", "../video.mp4"):
+        r, _ = _req(served[0], f"/0123456789ab/preview/thumbs/{name}")
+        assert r.status == 404

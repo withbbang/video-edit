@@ -948,3 +948,127 @@ def test_install_update_asks_when_busy(tmp_path, monkeypatch, status):
 def test_shutdown_is_not_exposed_to_page():
     """pywebview 는 Api 의 공개 메서드를 모두 화면 JS 에 내보낸다 — 종료는 창(window.stop)만 부른다."""
     assert not hasattr(Api, "shutdown") and callable(Api._shutdown)
+
+
+# ---- 타임라인 썸네일 -------------------------------------------------------------
+
+def make_thumbs(tmp_path, thumbs_run):
+    store = Store(tmp_path / "state.json")
+    store.settings["save_dir"] = str(tmp_path / "saved")
+    q, push = FakeQueue(), Pushes()
+    a = Api(store, q, push, FakeDialogs(), manifest=MANIFEST, data_root=tmp_path / "data",
+            preview_base="http://127.0.0.1:9999/jobs", cut_audio_run=lambda cmd: RunResult(False, "x"),
+            thumbs_run=thumbs_run)
+    return a, store, push
+
+
+def thumbs_job(tmp_path, a, store, status=Status.REVIEW, duration=250.0):
+    from app import thumbs
+    job = add_job(tmp_path, a, store, status=status)
+    write_out(job, "a.cuts.json", {"cuts": []})
+    write_out(job, "a.transcript.json", {"duration": duration, "segments": []})
+    d = preview_dir(job)
+    (d / "thumbs").mkdir()
+    (d / "thumbs" / "size.json").write_text(json.dumps({"video": thumbs.video_sig(d / "video.mp4"), "w": 960, "h": 540}))
+    return job, d
+
+
+def write_sheet(cmd):
+    Path(cmd[-1]).write_bytes(b"jpg")
+    return RunResult(True)
+
+
+def test_get_result_requests_thumbs_for_review_job(tmp_path):
+    calls = []
+    a, store, push = make_thumbs(tmp_path, lambda cmd: calls.append(cmd) or write_sheet(cmd))
+    job, d = thumbs_job(tmp_path, a, store)
+    a.get_result(job.id)
+    assert a._thumbs.wait_idle(5)
+    assert len(calls) == 3 and push.of("thumbs") == [{"id": job.id}] * 3
+    t = a.get_thumbs(job.id)
+    assert (t["step"], t["tile_w"], t["tile_h"], t["cols"], t["rows"], t["per_sheet"], t["count"]) == (1.0, 160, 90, 10, 10, 100, 250)
+    assert t["sheets"] == [_url(job, d / "thumbs", f"sheet_{i:04d}.jpg").replace("/preview/", "/preview/thumbs/")
+                           for i in range(3)]
+    a._shutdown()
+
+
+def test_get_thumbs_partial_sheets_are_none(tmp_path):
+    a, store, push = make_thumbs(tmp_path, lambda cmd: RunResult(False, "boom") if cmd[-1].endswith("0001.jpg")
+                                 else write_sheet(cmd))
+    job, d = thumbs_job(tmp_path, a, store)
+    a.get_result(job.id)
+    assert a._thumbs.wait_idle(5)
+    s = a.get_thumbs(job.id)["sheets"]
+    assert s[0] and s[1] is None and s[2]
+    a._shutdown()
+
+
+def test_get_thumbs_none_without_preview(tmp_path):
+    a, store, push = make_thumbs(tmp_path, write_sheet)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    assert a.get_thumbs(job.id) is None and a.get_thumbs("nope") is None
+    a._shutdown()
+
+
+def test_get_result_skips_thumbs_while_processing(tmp_path):
+    calls = []
+    a, store, push = make_thumbs(tmp_path, lambda cmd: calls.append(cmd) or write_sheet(cmd))
+    job, d = thumbs_job(tmp_path, a, store, status=Status.PROCESSING)
+    a.get_result(job.id)
+    assert a._thumbs.wait_idle(5) and calls == []
+    a._shutdown()
+
+
+def test_remove_job_drops_thumbs(tmp_path):
+    started, gate = threading.Event(), threading.Event()
+    holder = {}
+
+    def run(cmd):
+        class H:
+            def cancel(self):
+                gate.set()
+        holder["a"]._thumbs.started(H())
+        started.set()
+        gate.wait(5)
+        return RunResult(False, "cancelled")
+
+    a, store, push = make_thumbs(tmp_path, run)
+    holder["a"] = a
+    job, d = thumbs_job(tmp_path, a, store)
+    a.get_result(job.id)
+    assert started.wait(5)
+    a.remove_job(job.id)
+    assert gate.is_set() and a._thumbs.wait_idle(5)
+    a._shutdown()
+
+
+class FakeHold:
+    def __init__(self):
+        self.calls = []
+
+    def cancel(self, job_id, timeout):
+        self.calls.append(("cancel", job_id))
+        return True
+
+    def release(self, job_id):
+        self.calls.append(("release", job_id))
+
+
+def test_make_execute_holds_thumbs_only_for_analyze(tmp_path, monkeypatch):
+    store = Store(tmp_path / "s.json")
+    store.settings["save_dir"] = str(tmp_path / "saved")
+    job = _job(tmp_path, store)
+    hold, order = FakeHold(), []
+
+    def fake_run(cmd, weights, on_progress, env=None, on_start=None):
+        order.append(list(hold.calls))
+        return RunResult(True)
+
+    monkeypatch.setattr(api_mod.runner, "run", fake_run)
+    monkeypatch.setattr(api_mod, "publish_media", lambda media, save_dir: [])
+    execute = make_execute(store, MANIFEST, tmp_path / "data", lambda: FakeQueue(), None, lambda: hold)
+    assert execute(job, ANALYZE, lambda h: None) == RunResult(True)
+    assert order == [[("cancel", job.id)]] and hold.calls == [("cancel", job.id), ("release", job.id)]
+    hold.calls.clear()
+    assert execute(job, RENDER, lambda h: None) == RunResult(True)
+    assert hold.calls == []
