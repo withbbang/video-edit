@@ -1141,6 +1141,21 @@ document.addEventListener('keydown', (e) => {
     else { const t = snapT(player.time() + n / fps(), rangeDur()); player.seek(t); ensureVisible(t); }
   }
 });
+// 스페이스: 재생/멈춤 (캡처 단계라 영상 컨트롤보다 먼저 받는다). 단추·영상에 포커스가 있어도 그쪽 기본 동작(누르기·영상 자체 토글) 대신 이것만 한다
+let spaceOwned = false;
+document.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space' && e.key !== ' ') return;
+  spaceOwned = false;
+  if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing || S.editing || typingIn(e.target)) return;
+  if (!player.ready()) return;
+  e.preventDefault();
+  e.stopPropagation();   // 영상 자체 키 처리까지 가면 두 번 토글된다
+  spaceOwned = true;
+  if (!e.repeat) player.toggle();
+}, true);
+document.addEventListener('keyup', (e) => {
+  if (spaceOwned && (e.code === 'Space' || e.key === ' ')) { e.preventDefault(); spaceOwned = false; }
+}, true);
 
 const KIND = { silence: '말 없는 구간', filler: '망설임', habit: '말버릇', manual: '직접 자름', restore_op: '직접 되살림' };
 // 잘린 곳 목록의 종류 탭
@@ -1869,6 +1884,12 @@ const player = {
   playing() {
     const v = this.el();
     return !!v && !v.paused && !v.ended;
+  },
+  toggle() {
+    if (!this.mode) return;
+    if (this.wait) { this.wait.play = !this.wait.play; return; }   // 다 열면 그 상태로
+    const v = this.el();
+    if (this.playing()) v.pause(); else v.play().catch(() => {});   // 원본 보기면 onPlay 가 이어 붙인 재생기로 넘긴다
   },
   duration() {
     if (this.mode === 'mse') return this.map ? this.map.toOrig(this.map.total) : 0;
