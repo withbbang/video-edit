@@ -1628,13 +1628,16 @@ function lineEditor(j, c) {
   const now = () => (player.ready() ? player.time() : null);
   const part = (label, t, which) => {
     const go = (v) => (v === null ? null : which === 'start' ? set(v, null) : set(null, v));
-    return h('span', { class: 'lt' }, `${label} `, h('b', {}, clock1(t)),
-      h('button', { type: 'button', class: 'btn', disabled: !can, onclick: () => go(t - 0.1) }, '◀0.1'),
-      h('button', { type: 'button', class: 'btn', disabled: !can, onclick: () => go(t + 0.1) }, '0.1▶'),
-      h('button', { type: 'button', class: 'btn', disabled: !can || !player.ready(), onclick: () => go(now()) }, '지금 위치로'));
+    // 시작·끝 글자 없이 윗줄이 시작, 아랫줄이 끝. 말풍선·시간 툴팁에서 어느 쪽인지 알려 준다
+    const ico = (glyph, tip, dis, fn) =>
+      h('button', { type: 'button', class: 'btn ico', 'data-tip': `${label}을 ${tip}`, 'aria-label': `${label}을 ${tip}`, disabled: dis, onclick: fn }, glyph);
+    return h('span', { class: 'lt' }, h('b', { title: label }, clock1(t)),
+      ico('❚◀', '0.1초 앞으로', !can, () => go(t - 0.1)),
+      ico('▶❚', '0.1초 뒤로', !can, () => go(t + 0.1)),
+      ico('⌖', '재생 위치로', !can || !player.ready(), () => go(now())));
   };
-  return h('div', { class: 'line-time' }, part('시작', c.start, 'start'), part('끝', c.end, 'end'),
-    h('button', { type: 'button', class: 'btn', disabled: !can || !c.timed, onclick: () => set(null, null) }, '원래대로'));
+  return h('div', { class: 'line-time-wrap' }, h('div', { class: 'line-time' }, part('시작', c.start, 'start'), part('끝', c.end, 'end'),
+    h('button', { type: 'button', class: 'btn rst', disabled: !can || !c.timed, onclick: () => set(null, null) }, '복원')));
 }
 
 async function setLineTime(id, key, start, end) {
