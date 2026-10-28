@@ -204,3 +204,15 @@ def test_drop_forgets_failures(tmp_path):
 def test_request_without_video_is_none(tmp_path):
     w, _ = worker(FakeRun())
     assert w.request("A", tmp_path / "nope.mp4", tmp_path / "thumbs", 10.0, (960, 540)) is None
+
+
+def test_mark_done_does_not_recreate_deleted_folder(tmp_path):
+    # 영상을 빼서 작업 폴더가 지워진 뒤 일꾼이 늦게 써도 폴더를 되살리지 않는다
+    v = video(tmp_path)
+    d = tmp_path / "job" / "preview" / "thumbs"
+    d.parent.mkdir(parents=True)
+    m = thumbs.load_meta(d, v, thumbs.plan(50, 960, 540))
+    shutil.rmtree(tmp_path / "job")
+    with pytest.raises(OSError):
+        thumbs.mark_done(d, m, 0)
+    assert not (tmp_path / "job").exists()

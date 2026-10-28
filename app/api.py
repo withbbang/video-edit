@@ -192,6 +192,7 @@ def save_subs_edits(job: Job, lock=None) -> Path | None:
 WAVE_HOP = 0.01      # 파형 한 값의 길이 (초)
 WAVE_FLOOR = -60.0   # 이보다 작은 소리는 0
 CUT_AUDIO_WAIT = 10.0   # 분석·저장 전에 그 영상의 미리보기 소리 만들기가 멈추길 기다리는 최대 초
+THUMBS_STOP_WAIT = 3.0   # 영상을 뺄 때 썸네일 만들기가 멈추길 기다리는 최대 초
 
 
 def make_execute(store: Store, manifest: dict, data_root: Path, queue_getter: Callable[[], object],
@@ -376,9 +377,10 @@ class Api:
 
     def remove_job(self, job_id: str) -> list[dict]:
         """대기 중이면 빼고, 처리·저장 중이면 멈추고 뺀다 (확인은 화면이 먼저 받는다)."""
+        # 썸네일 ffmpeg 가 미리보기 영상을 연 채로 작업 폴더를 지우지 않게 먼저 멈춘다 (윈도우는 열린 파일을 못 지움)
+        self._thumbs.drop(job_id, THUMBS_STOP_WAIT)
         self._queue.cancel(job_id)
         self._cut_audio.drop(job_id)
-        self._thumbs.drop(job_id)
         with self._queue.lock:
             self._history.pop(job_id, None)
         return self.list_jobs()

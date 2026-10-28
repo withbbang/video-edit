@@ -1,4 +1,6 @@
 import json
+
+import pytest
 import sys
 import time
 from pathlib import Path
@@ -116,3 +118,26 @@ def test_render_command_passes_edits(tmp_path):
 def test_runner_low_priority_runs():
     res = runner.run([sys.executable, "-c", "print(1)"], {"x": 1.0}, lambda p: None, low_priority=True)
     assert res.ok
+
+
+@pytest.mark.skipif(runner.IS_WIN, reason="posix 전용")
+def test_runner_low_priority_without_preexec_fn(monkeypatch):
+    # 스레드가 여럿 도는 앱에서 preexec_fn 은 fork 한 자식을 멈추게 할 수 있다 → 띄운 뒤 우선순위를 낮춘다
+    seen, nice = {}, []
+    real_popen, real_set = runner.subprocess.Popen, runner.os.setpriority
+
+    def popen(*a, **kw):
+        seen.update(kw)
+        return real_popen(*a, **kw)
+
+    def setpriority(which, who, prio):
+        nice.append((which, who, prio))
+        return real_set(which, who, prio)
+
+    monkeypatch.setattr(runner.subprocess, "Popen", popen)
+    monkeypatch.setattr(runner.os, "setpriority", setpriority)
+    res = runner.run([sys.executable, "-c", "print(1)"], {"x": 1.0}, lambda p: None, low_priority=True)
+    assert res.ok and "preexec_fn" not in seen
+    assert len(nice) == 1 and nice[0][0] == runner.os.PRIO_PROCESS and nice[0][2] == 10
+    nice.clear()
+    assert runner.run([sys.executable, "-c", "print(1)"], {"x": 1.0}, lambda p: None).ok and nice == []

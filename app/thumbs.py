@@ -55,7 +55,7 @@ def sheet_cmd(video: Path, i: int, p: dict, out: Path) -> list[str]:
 
 
 def _write(d: Path, meta: dict) -> None:
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(exist_ok=True)   # 위 폴더는 만들지 않는다 — 영상을 빼서 지운 작업 폴더를 되살리지 않게
     tmp = d / "thumbs.json.part"
     tmp.write_text(json.dumps(meta), encoding="utf-8")
     os.replace(tmp, d / "thumbs.json")
@@ -162,13 +162,16 @@ class Thumbs:
             else:
                 self._held.pop(job_id, None)
 
-    def drop(self, job_id: str) -> None:
-        """영상을 목록에서 뺄 때: 멈추되 기다리지 않는다. 실패 기억도 지운다."""
+    def drop(self, job_id: str, timeout: float = 0.0) -> bool:
+        """영상을 목록에서 뺄 때: 멈추고 실패 기억도 지운다. timeout 초까지 멈추길 기다린다 (작업 폴더를 지우기 전에).
+        멈췄으면(또는 돌고 있지 않았으면) True."""
         with self._cv:
             self._failed = {f for f in self._failed if f[0] != job_id}
             handle = self._stop_job(job_id)
         if handle is not None:
             handle.cancel()
+        with self._cv:
+            return self._cv.wait_for(lambda: self._current != job_id, timeout)
 
     def wait_idle(self, timeout: float | None = None) -> bool:
         """만들 것도 도는 것도 없어질 때까지 기다린다 (테스트용)."""

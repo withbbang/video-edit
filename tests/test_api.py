@@ -1114,3 +1114,33 @@ def test_waveform_none_without_asr_or_while_processing(tmp_path):
     write_asr(job, [0.1] * 1600)
     job.status = Status.PROCESSING
     assert a.get_waveform(job.id) is None
+
+
+def test_remove_job_stops_thumbs_before_deleting_folder(tmp_path):
+    started, seen = threading.Event(), {}
+    holder = {}
+
+    def run(cmd):
+        gate = threading.Event()
+
+        class H:
+            def cancel(self):
+                seen["dir_at_cancel"] = jd.exists()
+                gate.set()
+        holder["a"]._thumbs.started(H())
+        started.set()
+        gate.wait(5)
+        return RunResult(False, "cancelled")
+
+    a, store, push = make_thumbs(tmp_path, run)
+    holder["a"] = a
+    job, d = thumbs_job(tmp_path, a, store)
+    jd = paths.job_dir(Path(job.src))
+    a.get_result(job.id)
+    assert started.wait(5)
+    import shutil
+    a._queue.cancel = lambda job_id: shutil.rmtree(jd, ignore_errors=True)   # 실제 Queue 처럼 작업 폴더를 지운다
+    a.remove_job(job.id)
+    assert seen["dir_at_cancel"] is True                 # 멈춘 뒤에 지운다
+    assert a._thumbs.wait_idle(0.01)                     # 돌려줄 때는 이미 멈춰 있다
+    a._shutdown()

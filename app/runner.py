@@ -116,14 +116,18 @@ def run(cmd: list[str], weights: dict, on_progress: Callable[[float], None],
             kw["creationflags"] |= subprocess.BELOW_NORMAL_PRIORITY_CLASS
     else:
         kw["start_new_session"] = True
-        if low_priority:
-            kw["preexec_fn"] = lambda: os.nice(10)
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 text=True, encoding="utf-8", errors="replace",
                                 env=build_env(env), **kw)
     except OSError as e:
         return RunResult(False, f"처리 프로그램을 시작하지 못했습니다: {e}")
+    if low_priority and not IS_WIN:
+        # preexec_fn 대신 띄운 뒤 낮춘다 (스레드가 여럿인 앱에서 preexec_fn 은 fork 한 자식을 멈추게 할 수 있다)
+        try:
+            os.setpriority(os.PRIO_PROCESS, proc.pid, 10)
+        except OSError:
+            pass
     handle = Running(proc)
     if on_start:
         on_start(handle)

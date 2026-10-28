@@ -740,27 +740,28 @@ const FRAME_CACHE = 600;
 const frameGrab = (() => {
   const v = h('video', { class: 'grab', muted: true, preload: 'auto', playsinline: true });
   v.muted = true;
-  let url = null, tw = 160, th = 90, busy = false, queue = [];
+  let url = null, tw = 160, th = 90, busy = null, queue = [];   // busy: 지금 찾는 프레임 번호
   const cache = new Map();   // 프레임 번호 → canvas (넣은 순서 = 오래된 순서)
   const key = (t) => Math.round(t * fps());
   function pump() {
-    if (busy || !url || !queue.length || v.readyState < 1) return;
-    busy = true;
-    v.currentTime = queue.shift() + 0.25 / fps();   // 프레임 경계에 딱 맞추면 앞 프레임이 나올 수 있다
+    if (busy !== null || !url || !queue.length || v.readyState < 1) return;
+    const t = queue.shift();
+    busy = key(t);   // 찾은 뒤 currentTime 에서 다시 셈하지 않는다 (재생기가 시간을 조금 바꿔 돌려주면 끝없이 다시 찾게 됨)
+    v.currentTime = t + 0.25 / fps();   // 프레임 경계에 딱 맞추면 앞 프레임이 나올 수 있다
   }
   v.addEventListener('loadedmetadata', pump);
   v.addEventListener('seeked', () => {
-    if (!url) return;
+    if (!url || busy === null) return;
     const c = document.createElement('canvas');
     c.width = tw; c.height = th;
     try { c.getContext('2d').drawImage(v, 0, 0, tw, th); } catch (e) { /* 아직 못 그림 */ }
-    cache.set(key(v.currentTime - 0.25 / fps()), c);
+    cache.set(busy, c);
     while (cache.size > FRAME_CACHE) cache.delete(cache.keys().next().value);
-    busy = false;
+    busy = null;
     zoomTl.draw();
     pump();
   });
-  v.addEventListener('error', () => { busy = false; queue = []; });
+  v.addEventListener('error', () => { busy = null; queue = []; });
   return {
     attach(u, w, hgt) {
       if (u === url) return;
@@ -770,7 +771,7 @@ const frameGrab = (() => {
       v.src = u;
     },
     detach() {
-      url = null; queue = []; busy = false; cache.clear();
+      url = null; queue = []; busy = null; cache.clear();
       v.removeAttribute('src');
       v.load();
     },
