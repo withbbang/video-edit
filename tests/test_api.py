@@ -1072,3 +1072,45 @@ def test_make_execute_holds_thumbs_only_for_analyze(tmp_path, monkeypatch):
     hold.calls.clear()
     assert execute(job, RENDER, lambda h: None) == RunResult(True)
     assert hold.calls == []
+
+
+# ---- 소리 파형 ---------------------------------------------------------------------
+
+def write_asr(job, samples):
+    import wave
+    import numpy as np
+    d = paths.job_dir(Path(job.src)) / "work" / Path(job.src).stem
+    d.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(d / "asr.wav"), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes((np.asarray(samples) * 32767).astype("<i2").tobytes())
+
+
+def test_waveform_bytes_and_cache(tmp_path, monkeypatch):
+    import base64
+    import numpy as np
+    from app import subtitles
+    a, store, q, push = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    t = np.arange(16000) / 16000
+    write_asr(job, np.where(t < 0.5, 0.0, 0.5 * np.sin(2 * np.pi * 300 * t)))
+    w = a.get_waveform(job.id)
+    data = base64.b64decode(w["data"])
+    assert w["hop"] == 0.01 and w["floor"] == -60.0 and len(data) == 100
+    assert set(data[:50]) == {0} and min(data[60:]) > 200
+    pl = subtitles.pipeline_module()
+    calls = []
+    real = pl.load_rms
+    monkeypatch.setattr(pl, "load_rms", lambda *x, **k: calls.append(1) or real(*x, **k))
+    assert a.get_waveform(job.id) == w and calls == []    # 캐시
+
+
+def test_waveform_none_without_asr_or_while_processing(tmp_path):
+    a, store, q, push = make(tmp_path)
+    job = add_job(tmp_path, a, store, status=Status.REVIEW)
+    assert a.get_waveform(job.id) is None and a.get_waveform("nope") is None
+    write_asr(job, [0.1] * 1600)
+    job.status = Status.PROCESSING
+    assert a.get_waveform(job.id) is None

@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import copy
 import json
@@ -188,6 +189,8 @@ def save_subs_edits(job: Job, lock=None) -> Path | None:
     return path
 
 
+WAVE_HOP = 0.01      # 파형 한 값의 길이 (초)
+WAVE_FLOOR = -60.0   # 이보다 작은 소리는 0
 CUT_AUDIO_WAIT = 10.0   # 분석·저장 전에 그 영상의 미리보기 소리 만들기가 멈추길 기다리는 최대 초
 
 
@@ -832,6 +835,45 @@ class Api:
         sheets = [_preview_url(f"{base}/{thumbs.sheet_name(i)}", d / thumbs.sheet_name(i)) if i in done else None
                   for i in range(meta["sheets"])]
         return {k: meta[k] for k in ("step", "tile_w", "tile_h", "cols", "rows", "per_sheet", "count")} | {"sheets": sheets}
+
+    def get_waveform(self, job_id: str) -> dict | None:
+        """타임라인 소리 줄: 분석용 오디오의 10ms 에너지를 dB 로 바꿔 [floor, 0] 을 0~255 한 바이트씩 (base64).
+        preview/wave.bin 에 asr.wav 서명과 함께 캐시한다. 확인 대기·저장됨이 아니거나 asr.wav 가 없으면 None."""
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None or job.status not in (Status.REVIEW, Status.SAVED):
+                return None
+            src = Path(job.src)
+        jd = paths.job_dir(src)
+        wav = jd / "work" / src.stem / "asr.wav"
+        bin_path, meta_path = jd / "preview" / "wave.bin", jd / "preview" / "wave.meta.json"
+        try:
+            st = wav.stat()
+        except OSError:
+            return None
+        sig = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "floor": WAVE_FLOOR}
+        data = None
+        if _read_json(meta_path) == sig:
+            try:
+                data = bin_path.read_bytes()
+            except OSError:
+                data = None
+        if data is None:
+            import numpy as np
+            try:
+                rms, _hop = subtitles.pipeline_module().load_rms(wav, WAVE_HOP)
+            except (OSError, EOFError, ValueError) as e:
+                log.warning("파형을 만들지 못했습니다: %s", e)
+                return None
+            db = 20 * np.log10(np.maximum(np.asarray(rms, dtype=np.float64), 1e-6))
+            data = np.round((np.clip(db, WAVE_FLOOR, 0.0) - WAVE_FLOOR) / -WAVE_FLOOR * 255).astype(np.uint8).tobytes()
+            try:
+                bin_path.parent.mkdir(parents=True, exist_ok=True)
+                bin_path.write_bytes(data)
+                meta_path.write_text(json.dumps(sig), encoding="utf-8")
+            except OSError:
+                pass
+        return {"hop": WAVE_HOP, "floor": WAVE_FLOOR, "data": base64.b64encode(data).decode("ascii")}
 
     # ---- 설정 ----------------------------------------------------------------
 
