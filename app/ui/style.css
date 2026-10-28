@@ -9,10 +9,15 @@
   --changed: #e07b00;
   --habit: #8a5cd6;
   --restored: #2a9d5c;
+  --tl-panel: #f4f4f6;   /* 타임라인 패널 바탕 */
+  --tl-lane: #e6e6eb;    /* 화면 줄·소리 줄 바탕 */
+  --tl-cell: #d3d3da;    /* 아직 그림이 없는 썸네일 칸 */
+  --tl-wave: #6b6b78;
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #1e1e1f; --fg: #ececec; --muted: #9a9aa0; --line: #3a3a3c; }
+  :root { --bg: #1e1e1f; --fg: #ececec; --muted: #9a9aa0; --line: #3a3a3c;
+    --tl-panel: #262628; --tl-lane: #19191a; --tl-cell: #303033; --tl-wave: #a5a5b0; }
 }
 
 * { box-sizing: border-box; }
@@ -41,16 +46,23 @@ button { font: inherit; color: inherit; }
 
 /* 배치 */
 .app { flex: 1; display: flex; min-height: 0; }
-.left { width: 24%; min-width: 250px; max-width: 300px; padding: 14px; border-right: 1px solid var(--line);
-  overflow-y: auto; display: flex; flex-direction: column; }
+/* 왼쪽: 목록·옵션만 스크롤하고 시작/저장 버튼 줄은 늘 아래에 보인다 */
+.left { width: 24%; min-width: 250px; max-width: 300px; border-right: 1px solid var(--line);
+  overflow: hidden; display: flex; flex-direction: column; }
+.left-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px 14px 8px; }
 .right { flex: 1; min-width: 0; padding: 14px; overflow: hidden; display: flex; flex-direction: column; }
 /* 오른쪽은 통째로 스크롤하지 않는다: 잘린 곳·자막 목록(.cut-list)만 남는 높이를 채우고 스크롤 */
 #work:not([hidden]) { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #result { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #result > * { flex-shrink: 0; }
-/* 결과: 왼쪽 재생기·타임라인, 오른쪽 잘린 곳·자막 목록 (목록만 남는 높이를 채우고 스크롤) */
+/* 결과: 위 왼쪽 재생기·오른쪽 잘린 곳·자막 목록 (목록만 남는 높이를 채우고 스크롤), 아래 전체 폭 타임라인 패널 */
 #result > .res-cols { flex: 1 1 auto; min-height: 0; display: flex; gap: 16px; }
-.res-main { flex: 1 1 0; min-width: 300px; min-height: 0; overflow-y: auto; }
+/* 가운데(재생기)는 스크롤하지 않는다: 타임라인 패널은 제 높이, 재생기가 남는 높이를 채우며 줄어든다 */
+.res-main { flex: 1 1 0; min-width: 300px; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.res-main > * { flex-shrink: 0; }
+.res-main > .pv { flex: 1 1 0; min-height: 120px; display: flex; flex-direction: column; }
+.res-main > .pv > video { flex: 1 1 0; min-height: 0; height: auto; max-height: none; object-fit: contain; }
+.res-main > .pv > .pv-note { flex-shrink: 0; }
 .res-side { flex: 0 0 30%; min-width: 250px; max-width: 340px; min-height: 0; display: flex; flex-direction: column; }
 .res-side > * { flex-shrink: 0; }
 
@@ -66,7 +78,7 @@ button { font: inherit; color: inherit; }
 .adv-toggle { display: block; width: 100%; background: none; border: 0; border-bottom: 1px dashed var(--soft); text-align: left;
   cursor: pointer; color: var(--muted); }
 .path { word-break: break-all; }
-.actions { margin-top: 14px; text-align: right; }
+.actions { flex-shrink: 0; padding: 10px 14px; text-align: right; border-top: 1px solid var(--line); }
 .primary { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 6px 18px; cursor: pointer; }
 .primary:disabled { opacity: .45; cursor: default; }
 
@@ -216,18 +228,46 @@ input[type=text] { -webkit-user-select: text; user-select: text; }
 /* 확대 타임라인: 썸네일 줄·소리 줄 (canvas), 재생 위치 선, 확대 조절. 전체 막대 위 노란 틀 = 지금 보는 범위 */
 .tl .vwin { position: absolute; top: -4px; bottom: -4px; min-width: 3px; border: 2px solid #f5c400; border-radius: 3px;
   pointer-events: none; }
-.ztl { margin: 4px 0 2px; }
 video.grab { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }   /* 프레임 썸네일 뽑기용 */
-.ztl[hidden], .ztl canvas[hidden], .ztl .zhead[hidden] { display: none; }
-.zt-rows { position: relative; display: flex; flex-direction: column; gap: 3px; }
-.zt-rows canvas { display: block; width: 100%; border-radius: 3px; cursor: pointer; touch-action: none; }
+/* 타임라인 패널: 전체 막대 / 시간 눈금·화면 줄·소리 줄 (왼쪽에 줄 이름) / 도구 줄 */
+/* 아래 전체 폭(왼쪽 옵션 칸 밑까지) 타임라인 자리 */
+#dock { flex-shrink: 0; padding: 0 14px 12px; }
+#dock:empty { display: none; }
+#dock.busy { opacity: .55; pointer-events: none; }
+.tlp { --names: 38px; margin-top: 0; padding: 8px 10px 6px; background: var(--tl-panel); border: 1px solid var(--line);
+  border-radius: 8px; }
+.tlp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-bottom: 8px; font-size: 12px; }
+.tlp-head .range-acts { display: inline-flex; gap: 4px; }
+.zt-now { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; min-width: 72px; }
+.tlp-over { padding-left: var(--names); }
+.tlp-over .tl { margin: 0 0 6px; height: 12px; }
+.ztl { display: grid; grid-template-columns: var(--names) 1fr; }
+.ztl[hidden], .ztl canvas[hidden], .ztl .zhead[hidden], .zt-name[hidden] { display: none; }
+.zt-names { display: flex; flex-direction: column; gap: 4px; }
+.zt-name { font-size: 11px; color: var(--muted); display: flex; align-items: center; }
+.zt-name.n-ruler { height: 18px; }
+.zt-name.n-frames { height: 54px; }
+.zt-name.n-wave { height: 34px; }
+.zt-rows { position: relative; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.zt-rows canvas { display: block; width: 100%; cursor: pointer; touch-action: none; }
+.zt-ruler { height: 18px; }
+.zt-frames, .zt-wave { background: var(--tl-lane); border-radius: 5px; }
 .zt-frames { height: 54px; }
 .zt-wave { height: 34px; }
-.zt-rows .zhead { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: var(--fg);
+/* 재생 위치: 눈금 위 작은 삼각형 + 줄을 가로지르는 선 */
+.zt-rows .zhead { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--fg);
   pointer-events: none; }
-.zt-zoom { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; }
-.zt-zoom input[type=range] { width: 140px; }
+.zt-rows .zhead::before { content: ""; position: absolute; top: 0; left: -4px; border: 5px solid transparent;
+  border-top: 7px solid var(--fg); border-bottom: 0; }
+.tlp-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; min-height: 34px;
+  margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--line); }
+.tlp-tools .range-bar { margin: 0; }
+.tlp-right { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-left: auto; }
+.tlp-right .btn, .tlp-tools .btn { min-height: 24px; }
+.zt-zoom { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; }
+.zt-zoom input[type=range] { width: 110px; }
 .zt-zoom .btn { min-width: 24px; padding: 0 6px; }
+.zt-zoom .muted { min-width: 74px; font-variant-numeric: tabular-nums; }
 .range-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 4px 0 6px; font-size: 12px; }
 .range-bar .lt { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .range-bar .rt { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }

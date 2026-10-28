@@ -135,10 +135,10 @@ tests/                pytest (requirements-dev.txt)
   51~100 비율 1.0 까지 + afftdn 추가. 분석 오디오·전사는 그대로. `--preview` 와 쓰면 미리보기 소리만 다시 만들고 preview_video.mp4 는 캐시 재사용),
   `--subs-edits <json>`(앱의 자막 수정 `{transcript_sha1, words, lines}` 을 SRT 에 적용. `transcript_sha1` 이 지금 전사와 다르면 로그만 남기고 무시).
 - 앱 화면: 자막 탭·영상 위 자막에서 어절을 눌러 고침(빈칸 = 뺌, `원래대로`), 찾아 바꾸기, 줄 시간 ±0.1초·`지금 위치로`.
-  타임라인을 끌거나 Shift+클릭 두 번·`여기서 시작`/`여기서 끝`(I/O)으로 구간을 골라 직접 자르거나 되살림
+  타임라인을 끌거나 Shift+클릭 두 번으로 구간을 골라 직접 자르거나 되살림
   (잘린 곳 목록에 `직접 자름`/`직접 되살림`). 구간 끝은 원본 프레임 격자(결과의 `fps`), ←/→ 로 1프레임(Shift 10프레임).
   막대 아래 확대 타임라인: 썸네일 줄(`app/thumbs.py` 가 미리보기 영상에서 1초 간격 시트를 열어 본 영상만 뒤에서 만듦, `get_thumbs`)·
-  소리 줄(`get_waveform`, asr.wav 에너지). 보기 계산은 `app/ui/timeline.js`. 편집은 `실행 취소`/`다시 실행`
+  소리 줄(`get_waveform`, asr.wav 에너지). 보기 계산은 `app/ui/timeline.js`. 편집은 `실행 취소`/`실행 재개`
   (Api.undo/redo, 메모리 스냅숏 — 옵션 변경은 제외). `말 없는 구간`·`배경 잡음` 은 0~100 슬라이더(50 = 예전 기본).
   자막 수정은 `out/<이름>.subs_edits.json` 에 저장되고 전사가 바뀌면 지워진다.
 - 사용자 데이터: 맥 `~/Library/Application Support/youtube-edit`, 윈도우 `%APPDATA%\youtube-edit` (`YTEDIT_DATA_DIR` 로 덮어씀).

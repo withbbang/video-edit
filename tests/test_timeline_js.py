@@ -52,6 +52,23 @@ def test_follow_pages():
     assert f["t0"] == pytest.approx(49)
 
 
+def test_play_follow_scrolls_continuously():
+    v = {"t0": 100, "spc": 1}   # 보이는 범위 [100, 110), 가운데 105
+    assert run(f"out = T.playFollow({json.dumps(v)}, 103, 3600, 1000, 100, 30);") == v   # 가운데 전엔 그대로
+    f = run(f"out = T.playFollow({json.dumps(v)}, 105.3, 3600, 1000, 100, 30);")
+    assert f["spc"] == 1 and f["t0"] == pytest.approx(100.3)   # 가운데를 넘으면 재생 위치를 가운데에 두고 같이 흐른다
+    f = run(f"out = T.playFollow({json.dumps(v)}, 300, 3600, 1000, 100, 30);")
+    assert f["t0"] == pytest.approx(295)   # 보기 밖(찾아가기)이면 가운데로
+    f = run(f"out = T.playFollow({json.dumps(v)}, 3599, 3600, 1000, 100, 30);")
+    assert f["t0"] == pytest.approx(3590)   # 끝에선 더 넘기지 않는다
+
+
+def test_play_spc_limits_scroll_speed():
+    # 칸 100px, 초당 160px 까지 → 칸 하나 0.625초보다 잘게는 재생하지 않는다
+    assert run("out = T.playSpc(1 / 30, 100, 160);") == pytest.approx(0.625)
+    assert run("out = T.playSpc(2, 100, 160);") == 2   # 이미 충분히 느리면 그대로
+
+
 def test_cells():
     c = run("out = T.cells({t0: 10.5, spc: 1}, 13, 400, 100);")
     assert [x["t"] for x in c] == [10, 11, 12] and c[0]["x"] == pytest.approx(-50)

@@ -31,6 +31,18 @@ function followT(v, t, d, w, cw, fps) {
   return clampView({ t0: t - 0.1 * span, spc: v.spc }, d, w, cw, fps);
 }
 
+// 재생 중 따라가기: 재생 위치가 가운데를 넘거나 보기 밖이면 가운데에 두고 보기가 같이 흐른다 (쪽 넘김 없이)
+function playFollow(v, t, d, w, cw, fps) {
+  const span = (v.spc * w) / cw;
+  if (t >= v.t0 && t <= v.t0 + span / 2) return v;
+  return clampView({ t0: t - span / 2, spc: v.spc }, d, w, cw, fps);
+}
+
+// 재생 중 칸 하나의 초: 줄이 초당 pxPerSec 보다 빨리 흐르지 않게 (1칸 = 1프레임이면 너무 빨라 알아볼 수 없다)
+function playSpc(spc, cw, pxPerSec) {
+  return Math.max(spc, cw / pxPerSec);
+}
+
 // 보이는 칸들: 칸 시작 시간 t (spc 격자), 화면 x
 function cells(v, d, w, cw) {
   const out = [];
@@ -72,6 +84,6 @@ function sliderToSpc(s, minSpc, maxSpc) {
   return maxSpc * Math.pow(minSpc / maxSpc, s / 1000);
 }
 
-const TL = { fitView, clampView, tToX, xToT, zoomAt, followT, cells, sheetCell, waveMax, spcToSlider, sliderToSpc };
+const TL = { fitView, clampView, tToX, xToT, zoomAt, followT, playFollow, playSpc, cells, sheetCell, waveMax, spcToSlider, sliderToSpc };
 if (typeof window !== 'undefined') window.TL = TL;
 if (typeof module !== 'undefined') module.exports = TL;
