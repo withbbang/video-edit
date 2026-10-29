@@ -55,6 +55,8 @@ const S = {
   view: null, thumbs: null, wave: null, tlDataFor: null,
   // 편집 되돌리기: hist 는 서버가 알려 준 {undo, redo} 가능 여부, histBusy 는 요청 중
   hist: { undo: false, redo: false }, histBusy: false,
+  // 이미지 겹쳐 넣기: 고른 이미지 id (영상 위·타임라인 줄에서 함께 강조)
+  ovSel: null,
 };
 
 // ---- 작은 도우미 ---------------------------------------------------------
@@ -125,7 +127,7 @@ function select(id) {
   S.caps = null; S.capsFor = null; S.dropped = false; S.lineSel = null; S.editing = null; S.scroll = {};
   S.findKeys = new Set(); S.findCount = 0; findBar.find.value = ''; findBar.repl.value = '';
   S.range = null; S.rangeErr = false; S.mark = null; S.rangeEnd = 'end'; tlDrag = null;
-  S.view = null; S.thumbs = null; S.wave = null; S.tlDataFor = null; zoomTl.reset();
+  S.view = null; S.thumbs = null; S.wave = null; S.tlDataFor = null; zoomTl.reset(); ovl.reset();
   S.hist ={ undo: false, redo: false };
   player.detach();
   if (id) {
@@ -359,6 +361,7 @@ function renderResult(force) {
   else if (r) player.detach();
   drawRange();
   drawHist();
+  ovl.renderTools();
 }
 
 function resultParts(j, r) {
@@ -388,7 +391,7 @@ function tlPanel(r) {
     h('div', { class: 'tlp-head' }, zoomTl.now, rangeBar.acts, h('span', { class: 'tlp-right' }, histBar.el, zoomTl.zoom)),
     h('div', { class: 'tlp-over' }, timeline(r)),
     zoomTl.el,
-    h('div', { class: 'tlp-tools' }, rangeBar.el));
+    h('div', { class: 'tlp-tools' }, rangeBar.el, ovl.tools));
 }
 
 // 전체 막대: 영상 전체를 한 줄에. 조작은 rangePointer (아래 화면 줄·소리 줄과 같다).
@@ -779,12 +782,281 @@ function ensureVisible(t) {
   if (v.t0 !== S.view.t0 || v.spc !== S.view.spc) { S.view = v; zoomTl.draw(); }
 }
 
+// ---- 이미지 겹쳐 넣기 -------------------------------------------------------
+// 항목 {id, img, name, aspect, x, y, w, start, end, url}: x·y·w 는 영상 화면 비율, start/end 는 원본 초 (저장 때 컷을 따라간다).
+// 영상 위 층: 지금 시각의 이미지를 그리고, 멈췄을 때 눌러 고르기·끌어 옮기기·오른쪽 아래 손잡이로 크기.
+// 타임라인 줄: 이미지마다 이름 + 막대 (몸통 끌기 = 구간 옮기기, 양 끝 6px = 시작·끝). 손을 뗄 때만 서버에 알린다.
+const ovl = (() => {
+  const layer = h('div', { class: 'ovlayer' });
+  const names = h('div', { class: 'ov-names', hidden: true });
+  const rows = h('div', { class: 'ov-rows', hidden: true });
+  const tools = h('span', { class: 'ov-tools' });
+  const nodes = new Map();   // id → 영상 위 요소
+  const lanes = new Map();   // id → {name, lane, bar}
+  let box = null;            // 영상 자리 (재생기 안 px)
+  let drag = null;           // {id, kind, x0, y0, o, live, moved}
+  let busy = false, naming = false, presets = null, menuOpen = false;
+
+  const result = () => (S.resultFor === S.sel ? S.result : null);
+  const list = () => { const r = result(); return (r && r.overlays) || []; };
+  const editable = () => { const j = selected(); return !!j && HAS_RESULT.has(j.status); };
+  // 화면이 있는 영상만 (소리만 있는 파일은 이미지 기능을 숨긴다)
+  function hasPicture() {
+    const r = result();
+    if (!r || !(r.preview ? r.preview.video : r.preview_url)) return false;
+    const v = player.el();
+    return !(v && v.readyState >= 1 && v.videoWidth === 0);
+  }
+  // 끄는 중이면 끄는 값을 덧씌운 항목
+  const cur = (o) => (drag && drag.id === o.id && drag.live ? { ...o, ...drag.live } : o);
+
+  async function send(name, ...args) {
+    const j = selected();
+    if (!j || busy) return null;
+    busy = true;
+    try {
+      const res = await call(name, j.id, ...args);
+      if (res && S.sel === j.id && S.resultFor === j.id && S.result) {
+        S.result.overlays = res.overlays;
+        if (S.ovSel && !res.overlays.some((o) => o.id === S.ovSel)) S.ovSel = null;
+        noteHist(j.id, res);
+      }
+      return res;
+    } finally {
+      busy = false;
+      refresh();
+    }
+  }
+  function refresh() {
+    renderTools();
+    drawLayer(player.ready() ? player.time() : 0);
+    zoomTl.draw();
+  }
+  function select(id) {
+    if (S.ovSel === id) return;
+    S.ovSel = id;
+    naming = false;
+    refresh();
+  }
+
+  // ---- 영상 위 층 ----
+  function layout(b) {
+    box = b;
+    if (b) Object.assign(layer.style, { left: `${b.x}px`, top: `${b.y}px`, width: `${b.w}px`, height: `${b.h}px` });
+    drawLayer(player.ready() ? player.time() : 0);
+  }
+  function node(o) {
+    let el = nodes.get(o.id);
+    if (!el) {
+      const img = h('img', { alt: '', draggable: 'false' });
+      const grip = h('i', { class: 'grip', title: '크기' });
+      el = h('div', { class: 'ov' }, img, grip);
+      el.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0 || player.playing() || !editable()) return;
+        e.preventDefault();
+        e.stopPropagation();
+        select(o.id);
+        const it = list().find((x) => x.id === o.id);
+        if (!it) return;
+        drag = { id: o.id, kind: e.target === grip ? 'resize' : 'move', x0: e.clientX, y0: e.clientY, o: it, live: null, moved: false };
+        try { el.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ }
+      });
+      el.addEventListener('pointermove', (e) => {
+        if (!drag || drag.id !== o.id || !box) return;
+        const dx = e.clientX - drag.x0, dy = e.clientY - drag.y0;
+        if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 3) return;
+        drag.moved = true;
+        const bx = { x: 0, y: 0, w: box.w, h: box.h };
+        drag.live = drag.kind === 'move' ? TL.ovMove(drag.o, dx, dy, bx) : TL.ovResize(drag.o, dx, bx);
+        drawLayer(player.time());
+      });
+      const up = () => {
+        if (!drag || drag.id !== o.id) return;
+        const g = drag;
+        drag = null;
+        if (g.moved && g.live) send('update_overlay', g.id, g.live);
+        else refresh();
+      };
+      el.addEventListener('pointerup', up);
+      el.addEventListener('pointercancel', up);
+      nodes.set(o.id, el);
+    }
+    const img = el.firstChild;
+    if (img.getAttribute('src') !== o.url) img.src = o.url;
+    return el;
+  }
+  function drawLayer(t) {
+    const all = hasPicture() ? list() : [];
+    for (const id of nodes.keys()) if (!all.some((o) => o.id === id)) { nodes.get(id).remove(); nodes.delete(id); }
+    layer.hidden = !box || !all.length;
+    if (layer.hidden) return;
+    layer.classList.toggle('edit', !player.playing() && editable());
+    const kids = [];
+    for (const raw of all) {   // 뒤의 이미지가 위 (저장 결과와 같은 순서)
+      const o = cur(raw);
+      if (!(o.start <= t && t < o.end) && !(drag && drag.id === o.id)) continue;
+      const el = node(o);
+      const r = TL.ovRect(o, { x: 0, y: 0, w: box.w, h: box.h });
+      Object.assign(el.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
+      el.classList.toggle('sel', o.id === S.ovSel);
+      kids.push(el);
+    }
+    if (kids.length !== layer.children.length || kids.some((k, i) => layer.children[i] !== k)) layer.replaceChildren(...kids);
+  }
+
+  // ---- 타임라인 줄 ----
+  function lane(o) {
+    let L = lanes.get(o.id);
+    if (!L) {
+      const name = h('span', { class: 'zt-name n-ov' });
+      const bar = h('b', { class: 'ov-bar' });
+      const ln = h('div', { class: 'ov-lane' }, bar);
+      bar.addEventListener('pointerdown', (e) => {
+        const g = zoomTl.geom();
+        if (e.button !== 0 || !g || !S.view) return;
+        e.preventDefault();
+        e.stopPropagation();
+        select(o.id);
+        const it = list().find((x) => x.id === o.id);
+        if (!it || !editable()) return;
+        const rect = bar.getBoundingClientRect();
+        const kind = e.clientX - rect.left <= 6 ? 'start' : rect.right - e.clientX <= 6 ? 'end' : 'move';
+        drag = { id: o.id, kind, x0: e.clientX, o: it, live: null, moved: false, g };
+        try { bar.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ }
+      });
+      bar.addEventListener('pointermove', (e) => {
+        if (!drag || drag.id !== o.id || !drag.g) return;
+        const dx = e.clientX - drag.x0;
+        if (!drag.moved && Math.abs(dx) < 3) return;
+        drag.moved = true;
+        drag.live = TL.barDrag(drag.kind, drag.o.start, drag.o.end, (dx / drag.g.cw) * S.view.spc, drag.g.d, fps());
+        zoomTl.draw();
+        drawLayer(player.time());
+      });
+      const up = () => {
+        if (!drag || drag.id !== o.id) return;
+        const g = drag;
+        drag = null;
+        if (g.moved && g.live) send('update_overlay', g.id, { start: g.live.start, end: g.live.end });
+        else {
+          // 눌러 고르기만 했으면 그 이미지가 보이는 곳으로
+          const t = player.time();
+          if (!(g.o.start <= t && t < g.o.end)) { player.seek(g.o.start); ensureVisible(g.o.start); }
+          refresh();
+        }
+      };
+      bar.addEventListener('pointerup', up);
+      bar.addEventListener('pointercancel', up);
+      rangePointer(ln, (x, rect) => { const gg = zoomTl.geom(); return gg && S.view ? TL.xToT(S.view, x - rect.left, gg.cw) : 0; }, () => null);
+      L = { name, lane: ln, bar };
+      lanes.set(o.id, L);
+    }
+    return L;
+  }
+  function paintRows(g) {
+    const all = hasPicture() ? list() : [];
+    for (const id of lanes.keys()) if (!all.some((o) => o.id === id)) lanes.delete(id);
+    names.hidden = rows.hidden = !g || !all.length;
+    if (names.hidden) return;
+    const Ls = all.map(lane);
+    if (Ls.some((L, i) => rows.children[i] !== L.lane) || rows.children.length !== Ls.length) {
+      names.replaceChildren(...Ls.map((L) => L.name));
+      rows.replaceChildren(...Ls.map((L) => L.lane));
+    }
+    all.forEach((raw, i) => {
+      const o = cur(raw), L = Ls[i];
+      if (L.name.textContent !== o.name) { L.name.textContent = o.name; L.name.title = o.name; }
+      const x1 = TL.tToX(S.view, o.start, g.cw), x2 = TL.tToX(S.view, o.end, g.cw);
+      L.bar.style.left = `${x1}px`;
+      L.bar.style.width = `${Math.max(2, x2 - x1)}px`;
+      L.bar.textContent = o.name;
+      L.bar.classList.toggle('sel', o.id === S.ovSel);
+      L.lane.classList.toggle('sel', o.id === S.ovSel);
+    });
+  }
+
+  // ---- 도구 줄: 이미지 넣기 · (고른 이미지) 로고로 저장 · 지우기 · 저장한 이미지 ----
+  async function add() {
+    const v = player.el();
+    const aspect = v && v.videoWidth && v.videoHeight ? v.videoWidth / v.videoHeight : 16 / 9;
+    const res = await send('add_overlay', player.ready() ? player.time() : 0, aspect);
+    if (res && res.overlays.length) select(res.overlays[res.overlays.length - 1].id);
+  }
+  async function remove() {
+    if (S.ovSel) await send('delete_overlay', S.ovSel);
+  }
+  async function savePreset(name) {
+    const j = selected();
+    if (!j || !S.ovSel) return;
+    const res = await call('save_preset', j.id, S.ovSel, name);
+    if (res) { presets = res; naming = false; }
+    renderTools();
+  }
+  async function loadPresets() {
+    presets = await call('list_presets');
+    renderTools();
+  }
+  function presetMenu() {
+    const items = (presets || []).map((p) => h('div', { class: 'ov-preset' },
+      h('button', { type: 'button', class: 'link', title: '이 영상에 넣기',
+        onclick: async (e) => {
+          menuOpen = false;
+          e.target.closest('details').open = false;
+          const res = await send('insert_preset', p.id);
+          if (res && res.overlays.length) select(res.overlays[res.overlays.length - 1].id);
+        } }, h('img', { src: p.url, alt: '' }), h('span', {}, p.name)),
+      h('button', { type: 'button', class: 'x', title: '지우기',
+        onclick: async () => { presets = await call('delete_preset', p.id); renderTools(); } }, '✕')));
+    const d = h('details', { class: 'ov-presets', open: menuOpen }, h('summary', { class: 'btn' }, '저장한 이미지'),
+      h('div', { class: 'ov-menu' }, presets === null ? h('div', { class: 'muted' }, '…')
+        : items.length ? items : h('div', { class: 'muted' }, '저장한 이미지가 없습니다')));
+    // 다시 그릴 때 열린 채로 만들어도 toggle 이 오므로, 실제로 열고 닫을 때만 반응한다
+    d.addEventListener('toggle', () => {
+      if (d.open === menuOpen) return;
+      menuOpen = d.open;
+      if (menuOpen) loadPresets();
+    });
+    return d;
+  }
+  function renderTools() {
+    const show = editable() && hasPicture();
+    tools.hidden = !show;
+    if (!show) { tools.replaceChildren(); return; }
+    const o = list().find((x) => x.id === S.ovSel);
+    const kids = [h('button', { type: 'button', class: 'btn', disabled: busy, onclick: add }, '이미지 넣기'), presetMenu()];
+    if (o && naming) {
+      const input = h('input', { type: 'text', class: 'ov-name', maxlength: '40', value: o.name, 'aria-label': '이름' });
+      input.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter' && input.value.trim()) savePreset(input.value.trim());
+        if (e.key === 'Escape') { naming = false; renderTools(); }
+      });
+      kids.push(input, h('button', { type: 'button', class: 'btn', onclick: () => input.value.trim() && savePreset(input.value.trim()) }, '저장'));
+      requestAnimationFrame(() => { input.focus(); input.select(); });
+    } else if (o) {
+      kids.push(h('span', { class: 'muted ov-sel-name' }, o.name),
+        h('button', { type: 'button', class: 'btn', onclick: () => { naming = true; renderTools(); } }, '로고로 저장'),
+        h('button', { type: 'button', class: 'btn', disabled: busy, onclick: remove }, '지우기'));
+    }
+    tools.replaceChildren(...kids);
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (!S.ovSel || S.editing || typingIn(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); remove(); }
+    else if (e.key === 'Escape') select(null);
+  });
+
+  return { layer, names, rows, tools, layout, drawLayer, paintRows, renderTools,
+    reset() { S.ovSel = null; naming = false; presets = null; menuOpen = false; drag = null; } };
+})();
+
 const zoomTl = (() => {
   const ruler = h('canvas', { class: 'zt-ruler' });
   const frames = h('canvas', { class: 'zt-frames' });
   const wave = h('canvas', { class: 'zt-wave' });
   const head = h('i', { class: 'zhead', hidden: true });
-  const rows = h('div', { class: 'zt-rows' }, ruler, frames, wave, head);
+  const rows = h('div', { class: 'zt-rows' }, ruler, ovl.rows, frames, wave, head);
   const nFrames = h('span', { class: 'zt-name n-frames' }, '화면');
   const nWave = h('span', { class: 'zt-name n-wave' }, '소리');
   const slider = h('input', { type: 'range', min: '0', max: '1000', step: '1', value: '0', 'aria-label': '확대' });
@@ -794,7 +1066,7 @@ const zoomTl = (() => {
     el.title = title;
     return el;
   };
-  const el = h('div', { class: 'ztl' }, h('div', { class: 'zt-names' }, h('span', { class: 'zt-name n-ruler' }), nFrames, nWave), rows);
+  const el = h('div', { class: 'ztl' }, h('div', { class: 'zt-names' }, h('span', { class: 'zt-name n-ruler' }), ovl.names, nFrames, nWave), rows);
   const now = h('b', { class: 'zt-now', title: '재생 위치' });   // 프레임 단위 현재 위치
   const zoom = h('span', { class: 'zt-zoom' }, zbtn('−', '축소', 0.5), slider, zbtn('+', '확대', 2), label);
   const imgs = new Map();   // 시트 주소 → Image
@@ -980,11 +1252,12 @@ const zoomTl = (() => {
     el.hidden = !r || (!showFrames && !showWave);
     zoom.hidden = el.hidden;
     const g = el.hidden ? null : geom();
-    if (!g) { viewWin.hidden = true; return; }
+    if (!g) { viewWin.hidden = true; ovl.paintRows(null); return; }
     S.view = TL.clampView(S.view || TL.fitView(g.d, g.w, g.cw), g.d, g.w, g.cw, fps());
     const c = colors();
     const v = S.view;
     paintRuler(g, c);
+    ovl.paintRows(g);
     if (showFrames) {
       const ctx = fit(frames, g.w, ROW_H);
       ctx.clearRect(0, 0, g.w, ROW_H);
@@ -1755,7 +2028,7 @@ const player = {
         if (this.playing() || !window.getSelection().isCollapsed) return;
         openLine(this.lineAt(this.time()), this.sub, 'over', e);
       });
-      this.box = h('div', { class: 'pv' }, mse, orig, this.cap, this.note);
+      this.box = h('div', { class: 'pv' }, mse, orig, ovl.layer, this.cap, this.note);
       new ResizeObserver(() => this.layoutSub()).observe(this.box);
     }
     return this.box;
@@ -1777,6 +2050,7 @@ const player = {
     const br = this.box.getBoundingClientRect(), vr = v.getBoundingClientRect();
     const c = CS.contentBox(vr.width, vr.height, v.videoWidth, v.videoHeight);
     const st = this.cap.style;
+    ovl.layout(c && { x: vr.left - br.left + c.x, y: vr.top - br.top + c.y, w: c.w, h: c.h });
     if (!c) {
       st.left = '0'; st.width = '100%';
       st.bottom = `${Math.max(0, br.bottom - vr.top) + 6}px`;   // 소리만: 재생 막대 위
@@ -1986,6 +2260,7 @@ const player = {
     const t = this.time();
     this.head.style.left = d ? `${Math.min(100, (t / d) * 100)}%` : '0';
     zoomTl.head(t, this.playing());
+    ovl.drawLayer(t);
     this.drawSub(t);
   },
   lineAt(t) {
