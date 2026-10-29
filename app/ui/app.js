@@ -42,7 +42,7 @@ const S = {
   result: null, resultFor: null, resultKey: null,
   saveDir: '', advOpen: false, update: null,
   resultVersion: 0, drawn: null,
-  // 자막: caps 는 선택한 영상의 자막 줄(원본 초), tab 은 'cuts' | 'subs', editing 은 열린 어절 입력칸 {key}
+  // 자막: caps 는 선택한 영상의 자막 줄(원본 초), tab 은 'cuts' | 'subs' | 'imgs', editing 은 열린 어절 입력칸 {key}
   // cutKind 는 잘린 곳 목록의 종류 탭 'all' | 'silence' | 'filler' | 'habit'
   tab: 'cuts', cutKind: 'all', renderPending: false, caps: null, capsFor: null, capsVersion: 0, dropped: false, lineSel: null, editing: null,
   findKeys: new Set(), findCount: 0, scroll: {},
@@ -56,7 +56,7 @@ const S = {
   // 편집 되돌리기: hist 는 서버가 알려 준 {undo, redo} 가능 여부, histBusy 는 요청 중
   hist: { undo: false, redo: false }, histBusy: false,
   // 이미지 겹쳐 넣기: 고른 이미지 id (영상 위·타임라인 줄에서 함께 강조)
-  ovSel: null,
+  ovSel: null, ovTab: 'used',   // 이미지 탭 안 'used'(사용 중) | 'saved'(보관함)
 };
 
 // ---- 작은 도우미 ---------------------------------------------------------
@@ -385,13 +385,12 @@ function resultParts(j, r) {
   return out;
 }
 
-// 편집기처럼 창 아래 전체 폭 한 패널: 전체 막대 → 시간 눈금·화면 줄·소리 줄 → 도구 줄(구간·실행 취소·확대)
+// 편집기처럼 창 아래 전체 폭 한 패널: 머리 줄(위치·구간·실행 취소·확대) → 전체 막대 → 시간 눈금·이미지 줄·화면 줄·소리 줄
 function tlPanel(r) {
   return h('div', { class: 'tlp' },
-    h('div', { class: 'tlp-head' }, zoomTl.now, rangeBar.acts, h('span', { class: 'tlp-right' }, histBar.el, zoomTl.zoom)),
+    h('div', { class: 'tlp-head' }, zoomTl.now, rangeBar.acts, rangeBar.el, h('span', { class: 'tlp-right' }, histBar.el, zoomTl.zoom)),
     h('div', { class: 'tlp-over' }, timeline(r)),
-    zoomTl.el,
-    h('div', { class: 'tlp-tools' }, rangeBar.el, ovl.tools));
+    zoomTl.el);
 }
 
 // 전체 막대: 영상 전체를 한 줄에. 조작은 rangePointer (아래 화면 줄·소리 줄과 같다).
@@ -791,12 +790,15 @@ const ovl = (() => {
   const layer = h('div', { class: 'ovlayer' });
   const names = h('div', { class: 'ov-names', hidden: true });
   const rows = h('div', { class: 'ov-rows', hidden: true });
-  const tools = h('span', { class: 'ov-tools' });
+  const panel = h('div', { class: 'ov-panel' });   // 이미지 탭 내용 (잘린 곳·자막 목록 자리)
+  const tabText = h('span', {}, '이미지');         // 이미지 탭 이름 (개수는 탭을 다시 그리지 않고 바꾼다)
   const nodes = new Map();   // id → 영상 위 요소
   const lanes = new Map();   // id → {name, lane, bar}
   let box = null;            // 영상 자리 (재생기 안 px)
   let drag = null;           // {id, kind, x0, y0, o, live, moved}
-  let busy = false, naming = false, presets = null, menuOpen = false;
+  let busy = false, naming = false, presets = null, loading = false;
+  let renaming = null;       // 이름 바꾸는 중 {kind: 'ov' | 'preset', id, bad}
+  let finishRename = null;   // 열린 이름 칸 마치기 (save) — 고르기가 풀려 칸이 사라지기 전에 반영한다
 
   const OV_EDGES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
   const result = () => (S.resultFor === S.sel ? S.result : null);
@@ -838,6 +840,10 @@ const ovl = (() => {
     if (S.ovSel === id) return;
     S.ovSel = id;
     naming = false;
+    if (renaming && renaming.kind === 'ov') {   // 칸 밖을 누르면 반영 (고르기가 풀려 다시 그리기 전에)
+      if (finishRename) finishRename(true);
+      renaming = null;
+    }
     refresh();
   }
 
@@ -879,6 +885,7 @@ const ovl = (() => {
         drag = null;
         if (g.moved && g.live) send('update_overlay', g.id, g.live);
         else refresh();
+        showTab();
       };
       el.addEventListener('pointerup', up);
       el.addEventListener('pointercancel', up);
@@ -948,13 +955,10 @@ const ovl = (() => {
         drag = null;
         if (g.moved && g.live) send('update_overlay', g.id, { start: g.live.start, end: g.live.end });
         else {
-          // 눌러 고르기만 했으면 그 이미지가 보이는 곳으로
-          const t = player.time();
-          // 시작 프레임 가운데로 (딱 시작 시각이면 재생기 반올림으로 그 앞 프레임에 떨어질 수 있다)
-          const at = Math.min(g.o.start + 0.5 / fps(), g.o.end);
-          if (!(g.o.start <= t && t < g.o.end)) { player.seek(at); ensureVisible(at); }
+          seekInto(g.o);   // 눌러 고르기만 했으면 그 이미지가 보이는 곳으로
           refresh();
         }
+        showTab();
       };
       bar.addEventListener('pointerup', up);
       bar.addEventListener('pointercancel', up);
@@ -988,12 +992,12 @@ const ovl = (() => {
     });
   }
 
-  // ---- 도구 줄: 이미지 넣기 · (고른 이미지) 로고로 저장 · 지우기 · 저장한 이미지 ----
+  // ---- 이미지 탭 (잘린 곳·자막 옆): 왼쪽 사용 중·보관함 탭, 오른쪽 불러오기. 사용 중에서 고르면 보관·지우기 ----
   async function add() {
     const v = player.el();
     const aspect = v && v.videoWidth && v.videoHeight ? v.videoWidth / v.videoHeight : 16 / 9;
     const res = await send('add_overlay', player.ready() ? player.time() : 0, aspect);
-    if (res && res.overlays.length) select(res.overlays[res.overlays.length - 1].id);
+    if (res && res.overlays.length) { S.ovTab = 'used'; select(res.overlays[res.overlays.length - 1].id); }
   }
   async function remove() {
     if (S.ovSel) await send('delete_overlay', S.ovSel);
@@ -1006,57 +1010,146 @@ const ovl = (() => {
     renderTools();
   }
   async function loadPresets() {
-    presets = await call('list_presets');
+    loading = true;
+    try { presets = await call('list_presets'); } finally { loading = false; }
     renderTools();
   }
-  function presetMenu() {
-    const items = (presets || []).map((p) => h('div', { class: 'ov-preset' },
-      h('button', { type: 'button', class: 'link', title: '이 영상에 넣기',
-        onclick: async (e) => {
-          menuOpen = false;
-          e.target.closest('details').open = false;
-          const res = await send('insert_preset', p.id);
-          if (res && res.overlays.length) select(res.overlays[res.overlays.length - 1].id);
-        } }, h('img', { src: p.url, alt: '' }), h('span', {}, p.name)),
-      h('button', { type: 'button', class: 'x', title: '지우기',
-        onclick: async () => { presets = await call('delete_preset', p.id); renderTools(); } }, '✕')));
-    const d = h('details', { class: 'ov-presets', open: menuOpen }, h('summary', { class: 'btn' }, '저장한 이미지'),
-      h('div', { class: 'ov-menu' }, presets === null ? h('div', { class: 'muted' }, '…')
-        : items.length ? items : h('div', { class: 'muted' }, '저장한 이미지가 없습니다')));
-    // 다시 그릴 때 열린 채로 만들어도 toggle 이 오므로, 실제로 열고 닫을 때만 반응한다
-    d.addEventListener('toggle', () => {
-      if (d.open === menuOpen) return;
-      menuOpen = d.open;
-      if (menuOpen) loadPresets();
-    });
-    return d;
+  // 그 이미지가 지금 안 보이면 시작 프레임 가운데로 (딱 시작 시각이면 재생기 반올림으로 그 앞 프레임에 떨어질 수 있다)
+  function seekInto(o) {
+    const t = player.time();
+    const at = Math.min(o.start + 0.5 / fps(), o.end);
+    if (!(o.start <= t && t < o.end)) { player.seek(at); ensureVisible(at); }
   }
-  function renderTools() {
-    const show = editable() && hasPicture();
-    tools.hidden = !show;
-    if (!show) { tools.replaceChildren(); return; }
-    const o = list().find((x) => x.id === S.ovSel);
-    const kids = [h('button', { type: 'button', class: 'btn', disabled: busy, onclick: add }, '이미지 넣기'), presetMenu()];
-    if (o && naming) {
-      const input = h('input', { type: 'text', class: 'ov-name', maxlength: '40', value: o.name, 'aria-label': '이름' });
+  // 영상 위·타임라인에서 고르면 도구가 있는 이미지 탭(사용 중)으로
+  function showTab() {
+    if (!S.ovSel) return;
+    if (S.ovTab !== 'used') { S.ovTab = 'used'; renderTools(); }
+    if (S.tab !== 'imgs') { S.tab = 'imgs'; renderResult(); }
+  }
+  // 이름 바꾸기: 이름을 두 번 누르거나 [이름 변경]. Enter·칸 밖을 누르면 반영, Esc 는 취소
+  function startRename(kind, id) {
+    naming = false;
+    renaming = { kind, id, bad: false };
+    renderTools();
+  }
+  async function commitRename(r, name) {
+    if (!r) return;
+    const it = r.kind === 'ov' ? list().find((o) => o.id === r.id) : (presets || []).find((p) => p.id === r.id);
+    if (!name || !it || name === it.name) { renaming = null; renderTools(); return; }
+    if (r.kind === 'ov') {
+      renaming = null;
+      await send('rename_overlay', r.id, name);
+      return;
+    }
+    const res = await call('rename_preset', r.id, name);
+    if (res) { presets = res; renaming = null; }
+    else renaming = { ...r, bad: true, value: name };   // 다른 보관 이미지와 같은 이름
+    renderTools();
+  }
+  function nameEl(kind, it) {
+    if (!(renaming && renaming.kind === kind && renaming.id === it.id)) {
+      return h('span', { class: 'ov-item-name', title: it.name, 'data-kind': kind, 'data-id': it.id }, it.name);
+    }
+    const input = h('input', { type: 'text', class: 'ov-name' + (renaming.bad ? ' bad' : ''), maxlength: '40',
+      value: renaming.value || it.name, 'aria-label': '이미지 이름', 'aria-invalid': renaming.bad ? 'true' : 'false',
+      onclick: (e) => e.stopPropagation() });
+    const r = renaming;
+    let done = false;
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      if (finishRename === finish) finishRename = null;
+      if (save) commitRename(r, input.value.trim());
+      else { renaming = null; renderTools(); }
+    };
+    finishRename = finish;
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') finish(true);
+      if (e.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
+    requestAnimationFrame(() => { input.focus(); input.select(); });
+    return input;
+  }
+  function itemRows(o, can) {
+    const sel = o.id === S.ovSel;
+    const row = h('div', { class: 'opt row ov-item' + (sel ? ' sel' : ''),
+      onclick: () => { select(o.id); seekInto(o); } },
+      h('span', { class: 'ov-item-main' }, h('img', { src: o.url, alt: '' }), nameEl('ov', o)),
+      h('span', { class: 'sec' }, `${clock(o.start)} ~ ${clock(o.end)}`));
+    if (!sel) return [row];
+    let acts;
+    if (naming) {
+      const input = h('input', { type: 'text', class: 'ov-name', maxlength: '40', value: o.name, 'aria-label': '저장할 이름' });
       input.addEventListener('keydown', (e) => {
         e.stopPropagation();
         if (e.key === 'Enter' && input.value.trim()) savePreset(input.value.trim());
         if (e.key === 'Escape') { naming = false; renderTools(); }
       });
-      kids.push(input, h('button', { type: 'button', class: 'btn', onclick: () => input.value.trim() && savePreset(input.value.trim()) }, '저장'));
+      acts = [input, h('button', { type: 'button', class: 'btn', onclick: () => input.value.trim() && savePreset(input.value.trim()) }, '저장'),
+        h('button', { type: 'button', class: 'btn', onclick: () => { naming = false; renderTools(); } }, '취소')];
       requestAnimationFrame(() => { input.focus(); input.select(); });
-    } else if (o) {
-      kids.push(h('span', { class: 'muted ov-sel-name' }, o.name),
-        h('button', { type: 'button', class: 'btn', onclick: () => { naming = true; renderTools(); } }, '로고로 저장'),
-        h('button', { type: 'button', class: 'btn', disabled: busy, onclick: remove }, '지우기'));
+    } else {
+      acts = [h('button', { type: 'button', class: 'btn', disabled: !can, onclick: () => startRename('ov', o.id) }, '이름 변경'),
+        h('button', { type: 'button', class: 'btn', disabled: !can, onclick: () => { renaming = null; naming = true; renderTools(); } }, '보관'),
+        h('button', { type: 'button', class: 'btn', disabled: !can || busy, onclick: remove }, '지우기')];
     }
-    tools.replaceChildren(...kids);
+    return [row, h('div', { class: 'ov-acts' }, acts)];
+  }
+  function presetRow(p, can) {
+    const bad = renaming && renaming.kind === 'preset' && renaming.id === p.id && renaming.bad;
+    const row = h('div', { class: 'opt ov-item' },
+      h('span', { class: 'ov-item-main' }, h('img', { src: p.url, alt: '' }), nameEl('preset', p)),
+      h('span', { class: 'ov-item-btns' },
+        h('button', { type: 'button', class: 'btn', title: '지금 재생 위치에 삽입', disabled: !can || busy,
+          onclick: async () => {
+            const res = await send('insert_preset', p.id);
+            if (res && res.overlays.length) { S.ovTab = 'used'; select(res.overlays[res.overlays.length - 1].id); }
+          } }, '삽입'),
+        h('button', { type: 'button', class: 'x', title: '보관함에서 지우기',
+          onclick: async () => { presets = await call('delete_preset', p.id); renderTools(); } }, '✕')));
+    return bad ? [row, h('div', { class: 'ov-err err' }, '보관함에 같은 이름이 있습니다')] : [row];
+  }
+  function renderTools() {
+    const all = list();
+    tabText.textContent = all.length ? `이미지 ${all.length}` : '이미지';
+    if (S.tab !== 'imgs') return;
+    if (!hasPicture()) {
+      panel.replaceChildren(h('div', { class: 'opt muted' }, h('span', {}, '소리만 있는 파일에는 이미지를 넣을 수 없습니다')));
+      return;
+    }
+    if (presets === null && !loading) loadPresets();
+    const can = editable();
+    const scroll = panel.scrollTop;
+    const sub = (key, text) => h('button', { type: 'button', class: S.ovTab === key ? 'on' : null,
+      onclick: () => { if (S.ovTab !== key) { S.ovTab = key; naming = false; renaming = null; panel.scrollTop = 0; renderTools(); } } }, text);
+    const head = h('div', { class: 'ov-top' },
+      h('div', { class: 'kinds', role: 'tablist' },
+        sub('used', `사용 중 ${all.length}`), sub('saved', presets ? `보관함 ${presets.length}` : '보관함')),
+      h('button', { type: 'button', class: 'btn', title: '파일에서 이미지를 골라 지금 재생 위치에 넣기', disabled: !can || busy, onclick: add }, '불러오기'));
+    const body = S.ovTab === 'used'
+      ? (all.length ? all.flatMap((o) => itemRows(o, can)) : [h('div', { class: 'opt muted' }, h('span', {}, '넣은 이미지가 없습니다'))])
+      : presets === null ? [h('div', { class: 'opt muted' }, h('span', {}, '…'))]
+        : presets.length ? presets.flatMap((p) => presetRow(p, can))
+          : [h('div', { class: 'opt muted' }, h('span', {}, '사용 중인 이미지를 저장하면 여기에 모입니다'))];
+    panel.replaceChildren(head, ...body);
+    panel.scrollTop = scroll;
   }
 
-  // 이미지·이미지 막대·이미지 도구 밖을 누르면 고르기를 푼다 (Delete 가 다른 일을 하다 이미지를 지우지 않게)
+  // 이름을 두 번 누르면 이름 바꾸기. 첫 번째 누름에 목록을 다시 그려 두 누름의 요소가 달라지므로
+  // 그대로 남는 panel 에서 받고, 누른 자리의 이름을 다시 찾는다
+  panel.addEventListener('dblclick', (e) => {
+    const at = document.elementFromPoint(e.clientX, e.clientY);
+    const n = at && at.closest && at.closest('.ov-item-name');
+    if (!n || !editable()) return;
+    if (n.dataset.kind === 'ov') select(n.dataset.id);
+    startRename(n.dataset.kind, n.dataset.id);
+  });
+
+  // 이미지·이미지 막대·이미지 탭 밖을 누르면 고르기를 푼다 (Delete 가 다른 일을 하다 이미지를 지우지 않게)
   document.addEventListener('pointerdown', (e) => {
-    if (S.ovSel && !(e.target.closest && e.target.closest('.ovlayer .ov, .ov-bar, .ov-tools'))) select(null);
+    if (S.ovSel && !(e.target.closest && e.target.closest('.ovlayer .ov, .ov-bar, .ov-panel, .ov-tab'))) select(null);
   }, true);
   document.addEventListener('keydown', (e) => {
     if (!S.ovSel || S.editing || typingIn(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -1064,8 +1157,8 @@ const ovl = (() => {
     else if (e.key === 'Escape') select(null);
   });
 
-  return { layer, names, rows, tools, layout, drawLayer, paintRows, renderTools,
-    reset() { S.ovSel = null; naming = false; presets = null; menuOpen = false; drag = null; } };
+  return { layer, names, rows, panel, tabText, layout, drawLayer, paintRows, renderTools, available: hasPicture,
+    reset() { S.ovSel = null; naming = false; renaming = null; presets = null; drag = null; } };
 })();
 
 const zoomTl = (() => {
@@ -1478,17 +1571,24 @@ function cutRows(j, items) {
   return rows.length ? rows : [h('div', { class: 'opt muted' }, h('span', {}, '없음'))];
 }
 
-// "잘린 곳" 자리를 탭 두 개로 나눠 쓴다. 목록만 따로 스크롤한다 (재생기·타임라인은 그대로 보이게)
+// "잘린 곳" 자리를 탭 세 개(잘린 곳·자막·이미지)로 나눠 쓴다. 목록만 따로 스크롤한다 (재생기·타임라인은 그대로 보이게)
 function listParts(j, r) {
   const items = r.cut_items || [];
   const n = items.filter((c) => c.restored).length + restoreOps(r).length;
   const caps = S.capsFor === j.id ? S.caps : null;
-  if (!items.length && !n && !(caps && caps.length)) return [];
-  const tab = (key, text) => h('button', { type: 'button', class: S.tab === key ? 'on' : null,
+  const imgs = ovl.available();
+  if (!items.length && !n && !(caps && caps.length) && !imgs) return [];
+  if (S.tab === 'imgs' && !imgs) S.tab = 'cuts';
+  const tab = (key, text, cls) => h('button', { type: 'button', class: [S.tab === key ? 'on' : '', cls || ''].join(' ').trim() || null,
     onclick: () => { if (S.tab !== key) { S.tab = key; renderResult(); } } }, text);
   const out = [h('div', { class: 'tabs', role: 'tablist' },
     tab('cuts', `잘린 곳 ${items.length}` + (n ? ` · 되살린 곳 ${n}` : '')),
-    tab('subs', caps ? `자막 ${caps.filter((c) => !c.empty).length}` : '자막'))];
+    tab('subs', caps ? `자막 ${caps.filter((c) => !c.empty).length}` : '자막'),
+    imgs ? tab('imgs', ovl.tabText, 'ov-tab') : null)];
+  if (S.tab === 'imgs') {
+    out.push(ovl.panel);
+    return out;
+  }
   if (S.tab === 'subs') {
     syncFindBar(HAS_RESULT.has(j.status));
     out.push(findBar.el, capTools.list.el,

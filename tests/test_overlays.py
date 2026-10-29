@@ -173,6 +173,30 @@ def test_presets_roundtrip(tmp_path):
     assert a.delete_preset(p["id"]) == [] and a.list_presets() == []
 
 
+def test_rename_overlay(tmp_path):
+    a, store, job = api_with_image(tmp_path, logo(tmp_path))
+    oid = a.add_overlay(job.id, 3.0, 1.0)["overlays"][0]["id"]
+    assert a.rename_overlay(job.id, oid, "   ") is None
+    assert a.rename_overlay(job.id, oid, "가" * 41) is None
+    assert a.rename_overlay(job.id, "없음", "구독") is None
+    r = a.rename_overlay(job.id, oid, " 구독 버튼 ")
+    assert r["overlays"][0]["name"] == "구독 버튼" and job.overlays[0]["name"] == "구독 버튼"
+
+
+def test_rename_preset(tmp_path):
+    a, store, job = api_with_image(tmp_path, logo(tmp_path))
+    oid = a.add_overlay(job.id, 3.0, 1.0)["overlays"][0]["id"]
+    a.save_preset(job.id, oid, "왼쪽")
+    [p, q] = a.save_preset(job.id, oid, "오른쪽")
+    assert a.rename_preset(p["id"], " ") is None
+    assert a.rename_preset(p["id"], "오른쪽") is None                 # 다른 항목과 같은 이름은 안 됨 (저장 때 덮어쓰는 기준)
+    assert a.rename_preset("없음", "위") is None
+    items = a.rename_preset(p["id"], " 위 ")
+    assert [x["name"] for x in items] == ["위", "오른쪽"] and items[0]["url"]
+    assert [x["name"] for x in a.list_presets()] == ["위", "오른쪽"]
+    assert a.rename_preset(p["id"], "위") is not None                 # 제 이름 그대로는 괜찮음
+
+
 def test_add_tall_png_fits_inside_video(tmp_path):
     a, store, job = api_with_image(tmp_path, logo(tmp_path, "세로.png", 30, 100))
     o = a.add_overlay(job.id, 0.0, 16 / 9)["overlays"][0]

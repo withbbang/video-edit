@@ -124,6 +124,9 @@ tests/                pytest (requirements-dev.txt)
 
 - 실행: `.venv/bin/python -m pip install -r requirements-app.txt` 후 `.venv/bin/python -m app`.
   테스트: `.venv/bin/python -m pytest` (`pip install -r requirements-dev.txt`). 파이프라인이나 앱을 고친 뒤엔 전체를 돌린다.
+  실행 중인 앱은 `app/ui` 를 고쳐도 다시 읽지 않는다. 확인하려면 앱을 껐다 다시 띄운다.
+- `h()` 로 목록을 통째로 다시 그리는 화면에서 첫 클릭에 다시 그리면 그 줄의 dblclick 이 안 온다. 그대로 남는 바깥 요소에서 받고
+  `elementFromPoint` 로 누른 곳을 다시 찾는다 (이미지 탭 이름 바꾸기 참고).
 - 화면의 순수 계산(보기 범위·따라가기 등)은 `app/ui/timeline.js` 에 두고 `tests/test_timeline_js.py` 에서 node 로 테스트한다.
 - `pipeline.py` 의 CLI 기본 동작은 그대로다. 앱은 이를 서브프로세스로 부르며 앱 전용 숨은 옵션만 추가돼 있다
   (기본값은 기존 동작): `--progress-json`(@progress 줄 출력), `--render-denoise`/`--render-loudnorm`(렌더 때만 배경 잡음·음량; 앱은 지금 `--denoise-level` 을 쓴다),
@@ -149,7 +152,7 @@ tests/                pytest (requirements-dev.txt)
   (Api.undo/redo, 메모리 스냅숏 — 옵션 변경은 제외). `말 없는 구간`·`배경 잡음` 은 0~100 슬라이더(50 = 예전 기본).
   자막 수정은 `out/<이름>.subs_edits.json` 에 저장되고 전사가 바뀌면 지워진다.
   이미지 겹쳐 넣기: `Job.overlays`(비율·원본 초), PNG 는 작업 폴더 `overlays/<sha16>.png` 로 복사, 저장한 로고는
-  `<데이터>/overlay_presets/`(presets.json). 영상 위 층(`ovl` in app.js)·확대 타임라인 이미지 줄, 계산은 `TL.ovRect/ovMove/ovResizeEdge/barDrag`.
+  `<데이터>/overlay_presets/`(presets.json). 영상 위 층(`ovl` in app.js)·확대 타임라인 이미지 줄·오른쪽 목록의 `이미지` 탭(잘린 곳·자막 옆: `사용 중`·`보관함` 탭과 `불러오기`, 고른 이미지 `이름 변경`·`보관`·`지우기`, 보관함 `삽입`, 이름 두 번 누르기로 이름 바꾸기 — Api.rename_overlay/rename_preset), 계산은 `TL.ovRect/ovMove/ovResizeEdge/barDrag`.
   저장 때 `out/<이름>.overlays.json` → `--overlays`.
   자막은 영상 화면 아래쪽에 겹쳐 그린다(새기는 자리·크기 그대로). 글자 꾸미기는 줄 고치는 칸 안 선택(없으면 줄 전체) 또는 자막 탭 목록에서
   음절(span.c)을 끌어 선택하면(브라우저 선택이 있는 동안만 켜짐, 꾸민 뒤엔 같은 글자를 다시 선택) 꾸밈 막대(목록 위 — 꺼지면 흐리게·inert, 영상 위에서 고칠 땐 자막 위에 뜨는 한 벌 더)로 글자마다 글꼴·크기·색·굵기를 바꾼다 (Api.set_style, Job.word_styles, 실행 취소 대상). 글꼴은 `app/ui/fonts`(OFL) — 화면 @font-face 와 새기기가 같은 파일을 쓴다.

@@ -657,6 +657,20 @@ class Api:
             return True
         return self._change_overlays(job_id, change)
 
+    def rename_overlay(self, job_id: str, oid: str, name: str) -> dict | None:
+        """이미지 이름을 바꾼다 (앞뒤 공백 제거, 1~PRESET_NAME_MAX 글자)."""
+        name = name.strip() if isinstance(name, str) else ""
+        if not 1 <= len(name) <= PRESET_NAME_MAX:
+            return None
+
+        def change(job: Job, _d: float) -> bool:
+            i = next((i for i, o in enumerate(job.overlays) if o["id"] == oid), None)
+            if i is None:
+                return False
+            job.overlays = [*job.overlays[:i], {**job.overlays[i], "name": name}, *job.overlays[i + 1:]]
+            return True
+        return self._change_overlays(job_id, change)
+
     def delete_overlay(self, job_id: str, oid: str) -> dict | None:
         def change(job: Job, _d: float) -> bool:
             kept = [o for o in job.overlays if o["id"] != oid]
@@ -711,6 +725,19 @@ class Api:
             items = [p for p in items if p is not same]
             items.append({"id": same["id"] if same else secrets.token_hex(4), "name": name, "img": img,
                           **{k: o[k] for k in ("aspect", "x", "y", "w", "h") if k in o}})
+            self._write_presets(items)
+            return self._preset_views(items)
+
+    def rename_preset(self, pid: str, name: str) -> list[dict] | None:
+        """저장한 이미지 이름을 바꾼다. 다른 항목과 같은 이름은 안 된다 (저장할 때 같은 이름을 덮어쓰므로). → 목록, 안 되면 None."""
+        name = name.strip() if isinstance(name, str) else ""
+        if not 1 <= len(name) <= PRESET_NAME_MAX:
+            return None
+        with self._presets_lock:
+            items = self._read_presets()
+            if not any(p["id"] == pid for p in items) or any(p["id"] != pid and p.get("name") == name for p in items):
+                return None
+            items = [{**p, "name": name} if p["id"] == pid else p for p in items]
             self._write_presets(items)
             return self._preset_views(items)
 
