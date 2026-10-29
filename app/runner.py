@@ -51,13 +51,15 @@ def analyze_command(job: Job, model: ModelPaths, device: str) -> list[str]:
 
 
 def render_command(job: Job, model: ModelPaths, device: str, media_dir: Path,
-                   cuts_path: Path | None = None, edits_path: Path | None = None) -> list[str]:
+                   cuts_path: Path | None = None, edits_path: Path | None = None,
+                   overlays_path: Path | None = None) -> list[str]:
     """media_dir 은 결과 영상·SRT 를 쓸 임시 폴더 (성공하면 api 가 저장 폴더로 옮긴다).
     cuts_path 는 되살린 곳을 뺀 컷 목록 (없으면 판정 결과 그대로)."""
     src = Path(job.src)
     jd = paths.job_dir(src)
     cuts_path = cuts_path or jd / "out" / f"{src.stem}.cuts.json"
     extra = ["--subs-edits", str(edits_path)] if edits_path else []
+    extra += ["--overlays", str(overlays_path)] if overlays_path else []
     return (pipeline_cmd() + [job.src, "--apply-cuts", str(cuts_path),
                               "--progress-json", "--out", str(jd / "out"),
                               "--work-root", str(jd / "work"), "--media-out", str(media_dir)]

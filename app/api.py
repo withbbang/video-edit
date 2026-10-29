@@ -142,7 +142,8 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
         media = media_dir(job)
         shutil.rmtree(media, ignore_errors=True)   # 지난번에 멈춘 저장의 찌꺼기
         media.mkdir(parents=True, exist_ok=True)
-        cmd, weights = runner.render_command(job, model, device, media, save_cuts(job, lock), save_subs_edits(job, lock)), RENDER_WEIGHTS
+        cmd, weights = runner.render_command(job, model, device, media, save_cuts(job, lock), save_subs_edits(job, lock),
+                                         save_overlays(job, lock)), RENDER_WEIGHTS
     else:
         raise ValueError(f"알 수 없는 작업 종류: {kind}")
     return cmd, weights, models.pipeline_env(manifest, data_root, store.settings)
@@ -190,6 +191,22 @@ def save_subs_edits(job: Job, lock=None) -> Path | None:
     data = {"transcript_sha1": sha, "words": words, "lines": lines}
     if styles:
         data["styles"] = styles
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
+
+
+def save_overlays(job: Job, lock=None) -> Path | None:
+    """저장용 이미지 목록 <이름>.overlays.json (파이프라인 --overlays). 이미지가 없으면 낡은 파일을 지우고 None.
+    job 필드는 lock(queue.lock) 을 쥐고 복사한 뒤 락 밖에서 쓴다."""
+    with lock or contextlib.nullcontext():
+        src, ovs = Path(job.src), copy.deepcopy(job.overlays)
+    jd = paths.job_dir(src)
+    path = jd / "out" / f"{src.stem}.overlays.json"
+    if not ovs:
+        path.unlink(missing_ok=True)
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = [{"path": str(jd / "overlays" / o["img"]), **{k: o[k] for k in ("x", "y", "w", "start", "end")}} for o in ovs]
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
 
@@ -309,11 +326,13 @@ class Api:
 
     @staticmethod
     def _snap(job: Job) -> tuple:
-        return copy.deepcopy((job.restored, job.range_ops, job.word_edits, job.line_times, job.word_styles, job.edits_sha1))
+        return copy.deepcopy((job.restored, job.range_ops, job.word_edits, job.line_times, job.word_styles, job.edits_sha1,
+                              job.overlays))
 
     @staticmethod
     def _put(job: Job, snap: tuple) -> None:
-        job.restored, job.range_ops, job.word_edits, job.line_times, job.word_styles, job.edits_sha1 = copy.deepcopy(snap)
+        (job.restored, job.range_ops, job.word_edits, job.line_times, job.word_styles, job.edits_sha1,
+         job.overlays) = copy.deepcopy(snap)
 
     def _record(self, job: Job, before: tuple) -> None:
         """편집 뒤에 부른다 (queue.lock 안). 실제로 바뀌었으면 편집 전 상태를 쌓고 다시 실행 목록을 비운다."""
