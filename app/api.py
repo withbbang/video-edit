@@ -243,7 +243,8 @@ def save_overlays(job: Job, lock=None) -> Path | None:
         path.unlink(missing_ok=True)
         return None
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = [{"path": str(jd / "overlays" / o["img"]), **{k: o[k] for k in ("x", "y", "w", "start", "end")}} for o in ovs]
+    data = [{"path": str(jd / "overlays" / o["img"]), **{k: o[k] for k in ("x", "y", "w", "h", "start", "end") if k in o}}
+            for o in ovs]
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
 
@@ -628,16 +629,17 @@ class Api:
                 return False
             # 세로로 긴 그림은 화면 높이 안에 들어오게 줄인다
             w = max(OVERLAY_MIN_W, min(OVERLAY_W, aspect / vid_aspect))
-            y = max(0.0, (1 - w * vid_aspect / aspect) / 2)
+            hr = w * vid_aspect / aspect   # 높이 (영상 높이 대비) — 처음엔 그림 비율대로, 손잡이로 따로 늘릴 수 있다
+            y = max(0.0, (1 - hr) / 2)
             job.overlays = [*job.overlays, {"id": secrets.token_hex(4), "img": img, "name": Path(picked).stem,
-                                            "aspect": aspect, "x": (1 - w) / 2, "y": y, "w": w,
+                                            "aspect": aspect, "x": (1 - w) / 2, "y": y, "w": w, "h": hr,
                                             "start": start, "end": end}]
             return True
         return self._change_overlays(job_id, change)
 
     def update_overlay(self, job_id: str, oid: str, patch: dict) -> dict | None:
-        """x·y·w·start·end 만 바꾼다. 0 <= start < end <= 영상 길이, OVERLAY_MIN_W <= w <= 1."""
-        if not isinstance(patch, dict) or not patch or set(patch) - {"x", "y", "w", "start", "end"}:
+        """x·y·w·h·start·end 만 바꾼다. 0 <= start < end <= 영상 길이, OVERLAY_MIN_W <= w·h <= 1."""
+        if not isinstance(patch, dict) or not patch or set(patch) - {"x", "y", "w", "h", "start", "end"}:
             return None
         if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in patch.values()):
             return None
@@ -648,6 +650,7 @@ class Api:
                 return False
             o = {**job.overlays[i], **{k: float(v) for k, v in patch.items()}}
             if not (0 <= o["start"] < o["end"] <= d + 1e-6 and OVERLAY_MIN_W <= o["w"] <= 1
+                    and (o.get("h") is None or OVERLAY_MIN_W <= o["h"] <= 1)
                     and -1 <= o["x"] <= 1 and -1 <= o["y"] <= 1):
                 return False
             job.overlays = [*job.overlays[:i], o, *job.overlays[i + 1:]]
@@ -707,7 +710,7 @@ class Api:
             same = next((p for p in items if p.get("name") == name), None)   # 같은 이름은 덮어쓰되 id 는 그대로
             items = [p for p in items if p is not same]
             items.append({"id": same["id"] if same else secrets.token_hex(4), "name": name, "img": img,
-                          **{k: o[k] for k in ("aspect", "x", "y", "w")}})
+                          **{k: o[k] for k in ("aspect", "x", "y", "w", "h") if k in o}})
             self._write_presets(items)
             return self._preset_views(items)
 
@@ -740,7 +743,7 @@ class Api:
             if d <= 0:
                 return False
             job.overlays = [*job.overlays, {"id": secrets.token_hex(4), "img": img, "name": p["name"],
-                                            **{k: float(p[k]) for k in ("aspect", "x", "y", "w")},
+                                            **{k: float(p[k]) for k in ("aspect", "x", "y", "w", "h") if p.get(k) is not None},
                                             "start": 0.0, "end": d}]
             return True
         return self._change_overlays(job_id, change)

@@ -784,7 +784,8 @@ function ensureVisible(t) {
 
 // ---- 이미지 겹쳐 넣기 -------------------------------------------------------
 // 항목 {id, img, name, aspect, x, y, w, start, end, url}: x·y·w 는 영상 화면 비율, start/end 는 원본 초 (저장 때 컷을 따라간다).
-// 영상 위 층: 지금 시각의 이미지를 그리고, 멈췄을 때 눌러 고르기·끌어 옮기기·오른쪽 아래 손잡이로 크기.
+// 영상 위 층: 지금 시각의 이미지를 그리고, 멈췄을 때 눌러 고르기·끌어 옮기기·손잡이 8개로 크기
+// (변 손잡이는 그 변만, 모서리는 가로·세로 따로, Shift 면 비율 유지).
 // 타임라인 줄: 이미지마다 이름 + 막대 (몸통 끌기 = 구간 옮기기, 양 끝 6px = 시작·끝). 손을 뗄 때만 서버에 알린다.
 const ovl = (() => {
   const layer = h('div', { class: 'ovlayer' });
@@ -797,6 +798,7 @@ const ovl = (() => {
   let drag = null;           // {id, kind, x0, y0, o, live, moved}
   let busy = false, naming = false, presets = null, menuOpen = false;
 
+  const OV_EDGES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
   const result = () => (S.resultFor === S.sel ? S.result : null);
   const list = () => { const r = result(); return (r && r.overlays) || []; };
   const editable = () => { const j = selected(); return !!j && HAS_RESULT.has(j.status); };
@@ -849,8 +851,8 @@ const ovl = (() => {
     let el = nodes.get(o.id);
     if (!el) {
       const img = h('img', { alt: '', draggable: 'false' });
-      const grip = h('i', { class: 'grip', title: '크기' });
-      el = h('div', { class: 'ov' }, img, grip);
+      const grips = OV_EDGES.map((edge) => h('i', { class: `grip g-${edge}`, 'data-edge': edge }));
+      el = h('div', { class: 'ov' }, img, ...grips);
       el.addEventListener('pointerdown', (e) => {
         if (e.button !== 0 || player.playing() || !editable()) return;
         e.preventDefault();
@@ -858,7 +860,8 @@ const ovl = (() => {
         select(o.id);
         const it = list().find((x) => x.id === o.id);
         if (!it) return;
-        drag = { id: o.id, kind: e.target === grip ? 'resize' : 'move', x0: e.clientX, y0: e.clientY, o: it, live: null, moved: false };
+        const edge = e.target.dataset && e.target.dataset.edge;
+        drag = { id: o.id, kind: edge ? 'resize' : 'move', edge, x0: e.clientX, y0: e.clientY, o: it, live: null, moved: false };
         try { el.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ }
       });
       el.addEventListener('pointermove', (e) => {
@@ -867,7 +870,7 @@ const ovl = (() => {
         if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 3) return;
         drag.moved = true;
         const bx = { x: 0, y: 0, w: box.w, h: box.h };
-        drag.live = drag.kind === 'move' ? TL.ovMove(drag.o, dx, dy, bx) : TL.ovResize(drag.o, dx, bx);
+        drag.live = drag.kind === 'move' ? TL.ovMove(drag.o, dx, dy, bx) : TL.ovResizeEdge(drag.o, drag.edge, dx, dy, bx, e.shiftKey);
         drawLayer(player.time());
       });
       const up = () => {
@@ -921,11 +924,16 @@ const ovl = (() => {
         const it = list().find((x) => x.id === o.id);
         if (!it || !editable()) return;
         const rect = bar.getBoundingClientRect();
-        const kind = e.clientX - rect.left <= 6 ? 'start' : rect.right - e.clientX <= 6 ? 'end' : 'move';
+        const kind = e.clientX - rect.left <= BAR_END ? 'start' : rect.right - e.clientX <= BAR_END ? 'end' : 'move';
         drag = { id: o.id, kind, x0: e.clientX, o: it, live: null, moved: false, g };
         try { bar.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ }
       });
+      const BAR_END = 6;   // 막대 양 끝 이만큼(px)은 시작·끝 손잡이
       bar.addEventListener('pointermove', (e) => {
+        if (!drag) {   // 끝 위에선 이미지 크기 손잡이와 같은 커서
+          const rect = bar.getBoundingClientRect();
+          bar.style.cursor = e.clientX - rect.left <= BAR_END || rect.right - e.clientX <= BAR_END ? 'ew-resize' : '';
+        }
         if (!drag || drag.id !== o.id || !drag.g) return;
         const dx = e.clientX - drag.x0;
         if (!drag.moved && Math.abs(dx) < 3) return;
@@ -942,7 +950,9 @@ const ovl = (() => {
         else {
           // 눌러 고르기만 했으면 그 이미지가 보이는 곳으로
           const t = player.time();
-          if (!(g.o.start <= t && t < g.o.end)) { player.seek(g.o.start); ensureVisible(g.o.start); }
+          // 시작 프레임 가운데로 (딱 시작 시각이면 재생기 반올림으로 그 앞 프레임에 떨어질 수 있다)
+          const at = Math.min(g.o.start + 0.5 / fps(), g.o.end);
+          if (!(g.o.start <= t && t < g.o.end)) { player.seek(at); ensureVisible(at); }
           refresh();
         }
       };

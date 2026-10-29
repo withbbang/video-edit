@@ -107,3 +107,20 @@ def test_overlay_goes_under_subtitles(tmp_path, monkeypatch):
 def test_overlays_arg_defaults_to_none():
     assert pl.build_parser().parse_args(["x.mp4"]).overlays is None
     assert pl.build_parser().parse_args(["x.mp4", "--overlays", "o.json"]).overlays == Path("o.json")
+
+
+def test_filter_uses_free_height_when_given():
+    ov = [{"path": "/x/a.png", "x": 0, "y": 0, "w": 0.25, "h": 0.5, "start": 0.0, "end": 1.0}]
+    frag, _ = pl.overlay_filter(ov, [(0, 300)], F, 1920, 1080, 2)
+    assert "[2:v]scale=480:540" in frag                       # 가로·세로를 따로 (늘인 모양 그대로)
+    frag, _ = pl.overlay_filter([{**ov[0], "h": None}], [(0, 300)], F, 1920, 1080, 2)
+    assert "scale=480:-2" in frag                              # 높이가 없으면 그림 비율대로
+
+
+def test_load_overlays_keeps_optional_height(tmp_path):
+    png = tmp_path / "a.png"
+    png.write_bytes(b"x")
+    item = {"path": str(png), "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4, "start": 0.0, "end": 1.0}
+    p = tmp_path / "o.json"
+    p.write_text(json.dumps([item, {**item, "h": "높이"}, {"h": 0.5}, {**item, "x": None}]), encoding="utf-8")
+    assert pl.load_overlays(p) == [item]

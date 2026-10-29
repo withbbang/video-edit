@@ -1656,7 +1656,8 @@ def overlay_windows(start: float, end: float, keeps: list[tuple[int, int]], fps:
 
 
 def load_overlays(path: Path | None) -> list[dict]:
-    """--overlays json [{path, x, y, w, start, end}]. 형식이 틀리거나 이미지 파일이 없는 항목은 로그만 남기고 뺀다."""
+    """--overlays json [{path, x, y, w, h?, start, end}]. h(영상 높이 대비)가 없으면 그림 비율대로.
+    형식이 틀리거나 이미지 파일이 없는 항목은 로그만 남기고 뺀다."""
     if not path:
         return []
     try:
@@ -1664,13 +1665,14 @@ def load_overlays(path: Path | None) -> list[dict]:
     except (OSError, ValueError) as e:
         log(f"이미지 목록을 읽지 못해 이미지 없이 렌더합니다: {e}")
         return []
+    def num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
     out = []
     for o in data if isinstance(data, list) else []:
         ok = (isinstance(o, dict) and isinstance(o.get("path"), str)
-              and all(isinstance(o.get(k), (int, float)) and not isinstance(o.get(k), bool) and math.isfinite(o[k])
-                      for k in ("x", "y", "w", "start", "end")))
+              and all(num(o.get(k)) for k in ("x", "y", "w", "start", "end")) and (o.get("h") is None or num(o.get("h"))))
         if ok and Path(o["path"]).is_file():
-            out.append({k: o[k] for k in ("path", "x", "y", "w", "start", "end")})
+            out.append({k: o[k] for k in ("path", "x", "y", "w", "h", "start", "end") if k in o})
         else:
             log(f"이미지 항목을 건너뜀: {o!r}")
     return out
@@ -1688,9 +1690,10 @@ def overlay_filter(ovs: list[dict], keeps: list[tuple[int, int]], fps: Fraction,
             continue
         n = first_input + len(inputs) // 2
         pw = max(2, round(W * o["w"] / 2) * 2)
+        ph = max(2, round(H * o["h"] / 2) * 2) if o.get("h") else -2   # 높이를 따로 늘였으면 그대로
         expr = sum_tree([f"between(t,{(a-0.5)/f:.6f},{(b-0.5)/f:.6f})" for a, b in wins])
         # format=auto: 10비트 원본을 8비트로 줄이지 않는다
-        parts.append(f"[{n}:v]scale={pw}:-2[ov{n}];{prev}[ov{n}]overlay=x={round(o['x'] * W)}:y={round(o['y'] * H)}"
+        parts.append(f"[{n}:v]scale={pw}:{ph}[ov{n}];{prev}[ov{n}]overlay=x={round(o['x'] * W)}:y={round(o['y'] * H)}"
                      f":format=auto:enable='{expr}'[vo{n}]")
         prev = f"[vo{n}]"
         inputs += ["-i", o["path"]]

@@ -178,3 +178,25 @@ def test_add_tall_png_fits_inside_video(tmp_path):
     o = a.add_overlay(job.id, 0.0, 16 / 9)["overlays"][0]
     h = o["w"] * (16 / 9) / o["aspect"]                 # 화면 높이 대비 이미지 높이
     assert h <= 1 + 1e-9 and o["y"] + h <= 1 + 1e-9 and o["x"] + o["w"] <= 1
+
+
+def test_free_height_stored_and_validated(tmp_path):
+    a, store, job = api_with_image(tmp_path, logo(tmp_path))           # 200x100
+    o = a.add_overlay(job.id, 0.0, 16 / 9)["overlays"][0]
+    assert math.isclose(o["h"], 0.25 * (16 / 9) / 2)                  # 처음엔 그림 비율대로
+    for bad in ({"h": 0}, {"h": 1.5}, {"h": float("inf")}):
+        assert a.update_overlay(job.id, o["id"], bad) is None
+    r = a.update_overlay(job.id, o["id"], {"x": 0.0, "y": 0.0, "w": 0.5, "h": 0.1})
+    assert (r["overlays"][0]["w"], r["overlays"][0]["h"]) == (0.5, 0.1)
+    from app.api import save_overlays
+    assert json.loads(save_overlays(job).read_text(encoding="utf-8"))[0]["h"] == 0.1
+    [p] = a.save_preset(job.id, o["id"], "납작 로고")
+    assert p["h"] == 0.1
+    assert a.insert_preset(job.id, p["id"])["overlays"][1]["h"] == 0.1
+
+
+def test_old_overlay_without_height_still_saves(tmp_path):
+    a, store, job = api_with_image(tmp_path, logo(tmp_path))
+    job.overlays = [dict(OV)]                                           # 예전 항목: h 없음
+    from app.api import save_overlays
+    assert "h" not in json.loads(save_overlays(job).read_text(encoding="utf-8"))[0]

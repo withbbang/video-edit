@@ -119,13 +119,33 @@ def test_ov_move_clamps_inside():
     assert run(f"out = T.ovMove({O}, -99999, -99999, {BOX});") == {"x": 0, "y": 0}
 
 
-def test_ov_resize_limits():
-    assert run(f"out = T.ovResize({O}, 160, {BOX}).w;") == pytest.approx(0.35)
-    assert run(f"out = T.ovResize({O}, -99999, {BOX}).w;") == pytest.approx(0.02)
-    # 오른쪽 끝(1 - 0.1 = 0.9)과 아래 끝(높이 0.8*900=720px → 너비 1440px = 0.9) 중 작은 쪽
-    assert run(f"out = T.ovResize({O}, 99999, {BOX}).w;") == pytest.approx(0.9)
-    assert run("out = T.ovResize({x: 0, y: 0.9, w: 0.25, aspect: 2}, 99999, {x: 0, y: 0, w: 1600, h: 900}).w;") \
-        == pytest.approx(0.1125)                                     # 아래 여백 90px → 너비 180px
+def test_ov_rect_free_height():
+    r = run("out = T.ovRect({x: 0, y: 0, w: 0.5, h: 0.1, aspect: 2}, {x: 0, y: 0, w: 1600, h: 900});")
+    assert r == pytest.approx({"x": 0, "y": 0, "w": 800, "h": 90})
+
+
+def test_ov_resize_edges_independent():
+    o = "{x: 0.25, y: 0.25, w: 0.5, h: 0.5, aspect: 1}"
+    bx = "{x: 0, y: 0, w: 1000, h: 1000}"
+    # 위 변만: 위로 100px → 위쪽만 늘어남
+    assert run(f"out = T.ovResizeEdge({o}, 'n', 0, -100, {bx}, false);") == pytest.approx({"x": 0.25, "y": 0.15, "w": 0.5, "h": 0.6})
+    # 왼쪽 변만
+    assert run(f"out = T.ovResizeEdge({o}, 'w', -50, 999, {bx}, false);") == pytest.approx({"x": 0.2, "y": 0.25, "w": 0.55, "h": 0.5})
+    # 오른쪽 아래 모서리: 가로·세로 따로
+    assert run(f"out = T.ovResizeEdge({o}, 'se', 100, -200, {bx}, false);") == pytest.approx({"x": 0.25, "y": 0.25, "w": 0.6, "h": 0.3})
+    # Shift(비율 유지) 모서리: 가로 기준, 반대쪽 모서리 고정
+    assert run(f"out = T.ovResizeEdge({o}, 'nw', -100, 0, {bx}, true);") == pytest.approx({"x": 0.15, "y": 0.15, "w": 0.6, "h": 0.6})
+
+
+def test_ov_resize_edges_clamped():
+    o = "{x: 0.25, y: 0.25, w: 0.5, h: 0.5, aspect: 1}"
+    bx = "{x: 0, y: 0, w: 1000, h: 1000}"
+    assert run(f"out = T.ovResizeEdge({o}, 'e', 99999, 0, {bx}, false);") == pytest.approx({"x": 0.25, "y": 0.25, "w": 0.75, "h": 0.5})
+    assert run(f"out = T.ovResizeEdge({o}, 'n', 0, 99999, {bx}, false);") == pytest.approx({"x": 0.25, "y": 0.73, "w": 0.5, "h": 0.02})
+    assert run(f"out = T.ovResizeEdge({o}, 'se', 99999, 0, {bx}, true);") == pytest.approx({"x": 0.25, "y": 0.25, "w": 0.75, "h": 0.75})
+    # 높이가 없는 예전 항목은 그림 비율에서 높이를 구해 시작
+    r = run("out = T.ovResizeEdge({x: 0, y: 0, w: 0.5, aspect: 2}, 's', 0, 0, {x: 0, y: 0, w: 1600, h: 900}, false);")
+    assert r["h"] == pytest.approx(400 / 900)
 
 
 def test_bar_drag():

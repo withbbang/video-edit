@@ -398,9 +398,17 @@ video.grab { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity:
 .ovlayer .ov img { display: block; width: 100%; height: 100%; -webkit-user-select: none; user-select: none; }
 .ovlayer.edit .ov { pointer-events: auto; cursor: move; }
 .ovlayer.edit .ov:hover { outline: 1px dashed var(--accent); }
-.ovlayer .ov.sel { outline: 2px solid var(--accent); }
-.ovlayer .ov .grip { display: none; position: absolute; right: -5px; bottom: -5px; width: 10px; height: 10px;
-  background: var(--accent); border: 1px solid #fff; border-radius: 2px; cursor: nwse-resize; }
+.ovlayer .ov.sel { outline: 2px solid var(--accent); z-index: 1; }   /* 고른 이미지는 편집 중에만 맨 위 (저장 순서는 그대로) */
+.ovlayer .ov .grip { display: none; position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px;
+  background: var(--accent); border: 1px solid #fff; border-radius: 2px; box-sizing: border-box; }
+.ov .g-nw { left: 0; top: 0; cursor: nwse-resize; }
+.ov .g-n { left: 50%; top: 0; cursor: ns-resize; }
+.ov .g-ne { left: 100%; top: 0; cursor: nesw-resize; }
+.ov .g-e { left: 100%; top: 50%; cursor: ew-resize; }
+.ov .g-se { left: 100%; top: 100%; cursor: nwse-resize; }
+.ov .g-s { left: 50%; top: 100%; cursor: ns-resize; }
+.ov .g-sw { left: 0; top: 100%; cursor: nesw-resize; }
+.ov .g-w { left: 0; top: 50%; cursor: ew-resize; }
 .ovlayer.edit .ov.sel .grip { display: block; }
 .ov-names, .ov-rows { display: flex; flex-direction: column; gap: 4px; }
 .zt-name.n-ov { height: 20px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; display: block; line-height: 20px; }

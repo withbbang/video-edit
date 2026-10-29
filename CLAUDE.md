@@ -138,7 +138,7 @@ tests/                pytest (requirements-dev.txt)
   `--burn-subs on`·`--burn-fonts <폴더>`(유튜브용 자막 새기기: `styles`(어절마다 글자별 `{font,size,color,bold}`)를 반영한 ASS 를
   `work/<이름>/burn.ass` 로 만들어 컷 뒤 영상에 `ass` 필터로 새김. 켜면 자막 트랙은 넣지 않음. ffmpeg 에 libass 필요 —
   홈브루 ffmpeg 9 엔 없고 `packaging/bin/ffmpeg`(배포용)엔 있다. 크기·여백 비율은 `BURN_*` 와 `app/ui/capstyle.js` 의 `BASE` 가 같아야 함),
-  `--overlays <json>`(이미지 겹쳐 새기기 `[{path, x, y, w, start, end}]`: x·y·w 는 화면 비율, start/end 는 원본 초 → keeps 로 결과 구간
+  `--overlays <json>`(이미지 겹쳐 새기기 `[{path, x, y, w, h?, start, end}]`: x·y·w·h 는 화면 비율(h 없으면 그림 비율대로), start/end 는 원본 초 → keeps 로 결과 구간
   (`overlay_windows`)으로 바꿔 컷 뒤·자막(ass) 앞에 `overlay` 필터. 소리만 있는 파일이면 무시).
 - 앱 화면: 자막 탭 줄·(멈췄을 때) 영상 위 자막을 누르면 그 줄 전체를 고치는 칸(contenteditable)이 열리고 꾸밈 막대도 켜짐
   (Api.set_line → `subtitles.plan_line` 이 띄어쓰기 낱말을 어절에 다시 나눠 담고 꾸밈을 글자 따라 옮김, `원문 복원`), 찾아 바꾸기, 줄 시간 ±0.1초·`지금 위치로`.
@@ -149,7 +149,7 @@ tests/                pytest (requirements-dev.txt)
   (Api.undo/redo, 메모리 스냅숏 — 옵션 변경은 제외). `말 없는 구간`·`배경 잡음` 은 0~100 슬라이더(50 = 예전 기본).
   자막 수정은 `out/<이름>.subs_edits.json` 에 저장되고 전사가 바뀌면 지워진다.
   이미지 겹쳐 넣기: `Job.overlays`(비율·원본 초), PNG 는 작업 폴더 `overlays/<sha16>.png` 로 복사, 저장한 로고는
-  `<데이터>/overlay_presets/`(presets.json). 영상 위 층(`ovl` in app.js)·확대 타임라인 이미지 줄, 계산은 `TL.ovRect/ovMove/ovResize/barDrag`.
+  `<데이터>/overlay_presets/`(presets.json). 영상 위 층(`ovl` in app.js)·확대 타임라인 이미지 줄, 계산은 `TL.ovRect/ovMove/ovResizeEdge/barDrag`.
   저장 때 `out/<이름>.overlays.json` → `--overlays`.
   자막은 영상 화면 아래쪽에 겹쳐 그린다(새기는 자리·크기 그대로). 글자 꾸미기는 줄 고치는 칸 안 선택(없으면 줄 전체) 또는 자막 탭 목록에서
   음절(span.c)을 끌어 선택하면(브라우저 선택이 있는 동안만 켜짐, 꾸민 뒤엔 같은 글자를 다시 선택) 꾸밈 막대(목록 위 — 꺼지면 흐리게·inert, 영상 위에서 고칠 땐 자막 위에 뜨는 한 벌 더)로 글자마다 글꼴·크기·색·굵기를 바꾼다 (Api.set_style, Job.word_styles, 실행 취소 대상). 글꼴은 `app/ui/fonts`(OFL) — 화면 @font-face 와 새기기가 같은 파일을 쓴다.

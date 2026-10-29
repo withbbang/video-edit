@@ -85,23 +85,38 @@ function sliderToSpc(s, minSpc, maxSpc) {
 }
 
 // ---- 이미지 겹쳐 넣기 ----
-// 이미지 o = {x, y, w, aspect}: x·y(왼쪽 위)·w 는 영상 화면 비율, aspect = 이미지 너비/높이. box = 화면에 그려진 영상 자리(px)
+// 이미지 o = {x, y, w, h?, aspect}: x·y(왼쪽 위)·w 는 영상 화면 비율, h 는 영상 높이 대비(없으면 그림 비율대로),
+// aspect = 그림 너비/높이. box = 화면에 그려진 영상 자리(px)
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
 const OV_MIN_W = 0.02;
+const ovH = (o, box) => (o.h != null ? o.h : (o.w * box.w) / o.aspect / box.h);   // 높이 (영상 높이 대비)
 
 function ovRect(o, box) {
-  const w = o.w * box.w;
-  return { x: box.x + o.x * box.w, y: box.y + o.y * box.h, w, h: w / o.aspect };
+  return { x: box.x + o.x * box.w, y: box.y + o.y * box.h, w: o.w * box.w, h: ovH(o, box) * box.h };
 }
 // px 만큼 옮긴 자리 (영상 밖으로 나가지 않게)
 function ovMove(o, dx, dy, box) {
-  const hr = (o.w * box.w) / o.aspect / box.h;
-  return { x: clamp(o.x + dx / box.w, 0, 1 - o.w), y: clamp(o.y + dy / box.h, 0, 1 - hr) };
+  return { x: clamp(o.x + dx / box.w, 0, 1 - o.w), y: clamp(o.y + dy / box.h, 0, 1 - ovH(o, box)) };
 }
-// 오른쪽 아래 모서리를 가로로 dx px 끈 너비 (비율 유지, 오른쪽·아래 끝을 넘지 않게)
-function ovResize(o, dx, box) {
-  const maxW = Math.min(1 - o.x, ((1 - o.y) * box.h * o.aspect) / box.w);
-  return { w: clamp(o.w + dx / box.w, OV_MIN_W, maxW) };
+// 손잡이 끌기: edge 는 'n','s','e','w' 또는 모서리 'ne','nw','se','sw'. 끄는 변만 움직이고 반대쪽은 그대로.
+// keep(Shift)이면 모서리는 지금 가로세로 비율을 유지 (가로 기준). 영상 안, 최소 OV_MIN_W. → {x, y, w, h} 비율
+function ovResizeEdge(o, edge, dx, dy, box, keep) {
+  const minW = OV_MIN_W * box.w, minH = OV_MIN_W * box.h;
+  let l = o.x * box.w, t = o.y * box.h, r = l + o.w * box.w, b = t + ovH(o, box) * box.h;
+  const ratio = (r - l) / (b - t);
+  if (edge.includes('w')) l = clamp(l + dx, 0, r - minW);
+  if (edge.includes('e')) r = clamp(r + dx, l + minW, box.w);
+  if (edge.includes('n')) t = clamp(t + dy, 0, b - minH);
+  if (edge.includes('s')) b = clamp(b + dy, t + minH, box.h);
+  if (keep && edge.length === 2) {
+    // 가로를 기준으로 세로를 맞추되, 세로가 영상 밖으로 나가면 가로를 줄인다
+    const room = edge.includes('n') ? b : box.h - t;
+    const w = Math.min(r - l, room * ratio);
+    const h = w / ratio;
+    if (edge.includes('w')) l = r - w; else r = l + w;
+    if (edge.includes('n')) t = b - h; else b = t + h;
+  }
+  return { x: l / box.w, y: t / box.h, w: (r - l) / box.w, h: (b - t) / box.h };
 }
 // 타임라인 막대 끌기: kind 'move' | 'start' | 'end', dt 초. 프레임 격자, [0, d] 안, 최소 1프레임
 function barDrag(kind, s, e, dt, d, fps) {
@@ -116,6 +131,6 @@ function barDrag(kind, s, e, dt, d, fps) {
 }
 
 const TL = { fitView, clampView, tToX, xToT, zoomAt, followT, playFollow, playSpc, cells, sheetCell, waveMax, spcToSlider, sliderToSpc,
-  ovRect, ovMove, ovResize, barDrag };
+  ovRect, ovMove, ovResizeEdge, barDrag };
 if (typeof window !== 'undefined') window.TL = TL;
 if (typeof module !== 'undefined') module.exports = TL;
