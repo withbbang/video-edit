@@ -1632,10 +1632,78 @@ def video_encoder_args(info: dict, hw: bool, encoders: str, crf: int, vbitrate: 
     return "libx264", ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", preset, "-crf", str(crf)]
 
 
+def output_size(info: dict) -> tuple[int, int]:
+    """필터가 받는 화면 크기: 짝수로 줄이고(홀수 크롭), 세로로 찍은 휴대폰 영상은 돌린 화면."""
+    w, h = info["width"] // 2 * 2, info["height"] // 2 * 2
+    return (h, w) if info.get("rotation") in (90, 270) else (w, h)
+
+
+def overlay_windows(start: float, end: float, keeps: list[tuple[int, int]], fps: Fraction) -> list[tuple[int, int]]:
+    """원본 초 [start, end) 를 결과 프레임 반구간 [a, b) 목록으로 (잘린 곳은 빠지고 이어지는 조각은 합침)."""
+    fs, fe = round(start * fps), round(end * fps)
+    out: list[tuple[int, int]] = []
+    off = 0
+    for sf, ef in keeps:
+        a, b = max(fs, sf), min(fe, ef)
+        if a < b:
+            a, b = a - sf + off, b - sf + off
+            if out and out[-1][1] == a:
+                out[-1] = (out[-1][0], b)
+            else:
+                out.append((a, b))
+        off += ef - sf
+    return out
+
+
+def load_overlays(path: Path | None) -> list[dict]:
+    """--overlays json [{path, x, y, w, start, end}]. 형식이 틀리거나 이미지 파일이 없는 항목은 로그만 남기고 뺀다."""
+    if not path:
+        return []
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log(f"이미지 목록을 읽지 못해 이미지 없이 렌더합니다: {e}")
+        return []
+    out = []
+    for o in data if isinstance(data, list) else []:
+        ok = (isinstance(o, dict) and isinstance(o.get("path"), str)
+              and all(isinstance(o.get(k), (int, float)) and not isinstance(o.get(k), bool) and math.isfinite(o[k])
+                      for k in ("x", "y", "w", "start", "end")))
+        if ok and Path(o["path"]).is_file():
+            out.append({k: o[k] for k in ("path", "x", "y", "w", "start", "end")})
+        else:
+            log(f"이미지 항목을 건너뜀: {o!r}")
+    return out
+
+
+def overlay_filter(ovs: list[dict], keeps: list[tuple[int, int]], fps: Fraction, W: int, H: int,
+                   first_input: int) -> tuple[str, list[str]]:
+    """[vb] 를 받아 이미지를 차례로 겹친 [vo] 를 내는 필터 조각과 ffmpeg 입력 인자. 뒤의 이미지가 위.
+    결과에 나오지 않는(구간이 통째로 잘린) 이미지는 뺀다. 없으면 ("", [])."""
+    f = float(fps)
+    parts, inputs, prev = [], [], "[vb]"
+    for o in ovs:
+        wins = overlay_windows(o["start"], o["end"], keeps, fps)
+        if not wins:
+            continue
+        n = first_input + len(inputs) // 2
+        pw = max(2, round(W * o["w"] / 2) * 2)
+        expr = sum_tree([f"between(t,{(a-0.5)/f:.6f},{(b-0.5)/f:.6f})" for a, b in wins])
+        # format=auto: 10비트 원본을 8비트로 줄이지 않는다
+        parts.append(f"[{n}:v]scale={pw}:-2[ov{n}];{prev}[ov{n}]overlay=x={round(o['x'] * W)}:y={round(o['y'] * H)}"
+                     f":format=auto:enable='{expr}'[vo{n}]")
+        prev = f"[vo{n}]"
+        inputs += ["-i", o["path"]]
+    if not parts:
+        return "", []
+    return ";".join(parts)[:-len(prev)] + "[vo]", inputs
+
+
 def render_video(src: Path, cut_wav: Path, srt: Path | None, out_mp4: Path,
                  keeps: list[tuple[int, int]], info: dict, work: Path, enc_args: list,
-                 burn: tuple[Path, Path | None] | None = None) -> None:
-    """burn = (ASS 파일, 글꼴 폴더): 컷을 적용한 뒤(결과 시간) 자막을 화면에 새긴다."""
+                 burn: tuple[Path, Path | None] | None = None, overlays: list[dict] | None = None) -> None:
+    """burn = (ASS 파일, 글꼴 폴더): 컷을 적용한 뒤(결과 시간) 자막을 화면에 새긴다.
+    overlays = load_overlays 결과: 컷 뒤 화면에 이미지를 겹친다 (자막 아래)."""
     fps = info["fps"]
     f = float(fps)
     terms = [f"between(t,{(sf-0.5)/f:.6f},{(ef-0.5)/f:.6f})" for sf, ef in keeps]
@@ -1646,18 +1714,19 @@ def render_video(src: Path, cut_wav: Path, srt: Path | None, out_mp4: Path,
         sub = f",ass=filename={ffmpeg_filter_path(burn[0])}"
         if burn[1]:
             sub += f":fontsdir={ffmpeg_filter_path(burn[1])}"
+    base = (f"[0:v]setpts=PTS-STARTPTS,fps={fps.numerator}/{fps.denominator},"
+            f"select='{sum_tree(terms)}',setpts=N/FRAME_RATE/TB{crop}")
+    ov_frag, ov_inputs = overlay_filter(overlays or [], keeps, fps, *output_size(info), 3 if srt else 2)
     script = work / "video_filter.txt"
-    script.write_text(
-        f"[0:v]setpts=PTS-STARTPTS,fps={fps.numerator}/{fps.denominator},"
-        f"select='{sum_tree(terms)}',setpts=N/FRAME_RATE/TB{crop}{sub}[v]",
-        encoding="utf-8")
+    script.write_text(f"{base}[vb];{ov_frag};[vo]{sub[1:] or 'null'}[v]" if ov_frag else f"{base}{sub}[v]",
+                      encoding="utf-8")
     # ffmpeg 7 부터 파일에서 옵션 값을 읽는 문법이 -/옵션 이고, 9.0 에서 -filter_complex_script 가 제거됐다
     fc = ["-/filter_complex", script] if ffmpeg_major() >= 7 else ["-filter_complex_script", script]
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y",
            "-i", src, "-i", cut_wav]
     if srt:
         cmd += ["-i", srt]
-    cmd += [*fc, "-map", "[v]", "-map", "1:a"]
+    cmd += [*ov_inputs, *fc, "-map", "[v]", "-map", "1:a"]
     if srt:
         # 끄고 켤 수 있는 자막 트랙(번인 아님). 렌더하면서 같이 넣어 파일을 한 번 더 쓰지 않는다
         cmd += ["-map", "2:s", "-c:s", "mov_text", "-metadata:s:s:0", "language=kor"]
@@ -2011,6 +2080,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="자막을 영상 화면에 새김 (유튜브용, 끌 수 없음). --subs-edits 의 글자 꾸밈을 반영. ffmpeg 에 libass 필요")
     ap.add_argument("--burn-fonts", type=Path, default=None,
                     help="--burn-subs 가 쓸 글꼴 폴더 (기본: 시스템 글꼴)")
+    ap.add_argument("--overlays", type=Path, default=None,
+                    help="(앱 전용) 겹쳐 새길 이미지 목록 json [{path, x, y, w, start, end}] — 위치는 화면 비율, 시간은 원본 초")
     ap.add_argument("--crf", type=int, default=18, help="--hw off 일 때 화질")
     ap.add_argument("--vbitrate", default="auto",
                     help="--hw on 일 때 비트레이트 (기본 auto: 해상도·프레임 수에 맞춤, 예: 20M)")
@@ -2199,13 +2270,16 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         if not ffmpeg_has("filters", "ass"):
             sys.exit("오류: 이 ffmpeg 는 자막 새기기(libass)를 지원하지 않습니다. libass 가 들어간 ffmpeg 로 다시 실행하세요")
         ass_path = work / "burn.ass"
-        w, h = info["width"] // 2 * 2, info["height"] // 2 * 2
-        if info.get("rotation") in (90, 270):   # 세로로 찍은 휴대폰 영상: 필터에는 돌린 화면이 온다
-            w, h = h, w
+        w, h = output_size(info)
         ass_path.write_text(build_ass(caption_cues(caps, remap_, final_dur, sub_lines),
                                       load_subs_styles(args.subs_edits, tr), w, h), encoding="utf-8")
         fonts = args.burn_fonts.resolve() if args.burn_fonts and args.burn_fonts.is_dir() else None
         burn = (ass_path, fonts)
+
+    ovs = load_overlays(args.overlays)
+    if ovs and not info["has_video"]:
+        log("오디오만 있는 파일이라 이미지는 넣지 않습니다")
+        ovs = []
 
     # 5) 렌더
     render_wav = clean_wav
@@ -2226,18 +2300,20 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         encoder, enc_args = video_encoder_args(info, args.hw == "on", encoders, args.crf,
                                                args.vbitrate, args.preset, args.vbitrate_scale)
         try:
-            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args, burn)
+            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args, burn, ovs)
         except subprocess.CalledProcessError:
             if "videotoolbox" not in encoder:
                 raise
             log(f"{encoder} 인코딩 실패 → 소프트웨어 인코더로 다시 렌더합니다")
             encoder, enc_args = video_encoder_args(info, False, encoders, args.crf,
                                                    args.vbitrate, args.preset, args.vbitrate_scale)
-            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args, burn)
+            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args, burn, ovs)
         if embed:
             log("자막 트랙을 영상에 넣음 (번인 아님, 플레이어에서 켜고 끄기)")
         if burn:
             log("자막을 영상 화면에 새김 (유튜브용, 끌 수 없음)")
+        if ovs:
+            log(f"이미지 {len(ovs)}개를 영상 화면에 새김")
     else:
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", cut_wav,
                "-c:a", "aac", "-b:a", "192k", out_media]
