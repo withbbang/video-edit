@@ -36,8 +36,12 @@ FILE_TYPES = ("영상과 오디오 (" + ";".join(f"*{e}" for e in sorted(api_mod
 _UI_ORIGIN = re.compile(r"null|http://(?:127\.0\.0\.1|localhost):[0-9]{1,5}")
 _PREVIEW_PATH = re.compile(
     r"/([0-9a-f]{12})/(preview\.mp4|preview/(?:video\.mp4|video\.index\.json|audio_full\.m4a|audio_full\.index\.json"
-    r"|audio_cut\.[0-9a-f]{16}\.m4a|audio_cut\.[0-9a-f]{16}\.index\.json|thumbs/sheet_[0-9]{4}\.jpg))")
-_CONTENT_TYPES = {".mp4": "video/mp4", ".m4a": "audio/mp4", ".json": "application/json", ".jpg": "image/jpeg"}
+    r"|audio_cut\.[0-9a-f]{16}\.m4a|audio_cut\.[0-9a-f]{16}\.index\.json|thumbs/sheet_[0-9]{4}\.jpg)"
+    r"|overlays/[0-9a-f]{16}\.png)")
+# 저장한 이미지(로고): <data_root>/overlay_presets/<16자>.png
+_PRESET_PATH = re.compile(r"/presets/([0-9a-f]{16}\.png)")
+_CONTENT_TYPES = {".mp4": "video/mp4", ".m4a": "audio/mp4", ".json": "application/json", ".jpg": "image/jpeg",
+                  ".png": "image/png"}
 _CHUNK = 1 << 16
 _BAD_RANGE = "bad"
 
@@ -69,6 +73,7 @@ def parse_range(header: str | None, size: int):
 
 def _handler(root: Path):
     jobs = Path(root) / "jobs"
+    presets = Path(root) / "overlay_presets"
 
     class PreviewHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -102,7 +107,8 @@ def _handler(root: Path):
             if not self._host_ok() or not self._ui_origin():
                 self.send_error(403)
                 return
-            if not _PREVIEW_PATH.fullmatch(urllib.parse.urlsplit(self.path).path):
+            path = urllib.parse.urlsplit(self.path).path
+            if not (_PREVIEW_PATH.fullmatch(path) or _PRESET_PATH.fullmatch(path)):
                 self.send_error(404)
                 return
             self.send_response(204)
@@ -115,9 +121,12 @@ def _handler(root: Path):
         def _file(self) -> Path | None:
             path = urllib.parse.urlsplit(self.path).path
             m = _PREVIEW_PATH.fullmatch(path)
-            if not m:
+            if m:
+                f = jobs / m.group(1) / m.group(2)
+            elif (m := _PRESET_PATH.fullmatch(path)):
+                f = presets / m.group(1)
+            else:
                 return None
-            f = jobs / m.group(1) / m.group(2)
             return f if f.is_file() else None
 
         def _host_ok(self) -> bool:
@@ -251,6 +260,14 @@ class Dialogs:
         res = self._bridge.window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True,
                                                      file_types=FILE_TYPES)
         return [str(p) for p in res] if res else None
+
+    def open_image(self) -> str | None:
+        import webview
+        res = self._bridge.window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False,
+                                                     file_types=("PNG 이미지 (*.png)",))
+        if not res:
+            return None
+        return str(res[0] if isinstance(res, (list, tuple)) else res)
 
     def choose_folder(self) -> str | None:
         import webview

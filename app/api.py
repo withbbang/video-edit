@@ -13,11 +13,14 @@ from __future__ import annotations
 import base64
 import contextlib
 import copy
+import hashlib
 import json
 import math
 import logging
 import os
+import secrets
 import shutil
+import struct
 import subprocess
 import threading
 import time
@@ -53,6 +56,7 @@ Push = Callable[[str, dict], None]
 class Dialogs(Protocol):
     def open_files(self) -> list[str] | None: ...
     def choose_folder(self) -> str | None: ...
+    def open_image(self) -> str | None: ...
 
 
 def _union(cuts: list[dict]) -> list[list[float]]:
@@ -195,6 +199,39 @@ def save_subs_edits(job: Job, lock=None) -> Path | None:
     return path
 
 
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
+OVERLAY_SPAN = 5.0       # 새 이미지가 나오는 기본 초
+OVERLAY_W = 0.25         # 새 이미지 너비 (영상 너비 대비)
+OVERLAY_MIN_W = 0.02
+PRESET_NAME_MAX = 40
+
+
+def png_size(path: Path) -> tuple[int, int] | None:
+    """PNG 머리(IHDR)의 (너비, 높이). PNG 가 아니거나 못 읽으면 None."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(24)
+    except OSError:
+        return None
+    if len(head) < 24 or head[:8] != PNG_SIG or head[12:16] != b"IHDR":
+        return None
+    w, h = struct.unpack(">II", head[16:24])
+    return (w, h) if w and h else None
+
+
+def store_png(src: Path, folder: Path) -> str:
+    """PNG 를 folder/<sha1 앞 16자>.png 로 복사(이미 있으면 그대로)하고 그 이름을 돌려준다."""
+    data = Path(src).read_bytes()
+    name = hashlib.sha1(data).hexdigest()[:16] + ".png"
+    folder.mkdir(parents=True, exist_ok=True)
+    dst = folder / name
+    if not dst.is_file():
+        tmp = dst.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, dst)
+    return name
+
+
 def save_overlays(job: Job, lock=None) -> Path | None:
     """저장용 이미지 목록 <이름>.overlays.json (파이프라인 --overlays). 이미지가 없으면 낡은 파일을 지우고 None.
     job 필드는 lock(queue.lock) 을 쥐고 복사한 뒤 락 밖에서 쓴다."""
@@ -292,6 +329,7 @@ class Api:
         self._update: dict | None = None            # 마지막으로 찾은 새 버전
         # 편집 되돌리기: 영상 id → (undo, redo) 편집 전 상태 묶음 목록 (메모리에만, 앱을 끄면 사라짐)
         self._history: dict[str, tuple[list, list]] = {}
+        self._presets_lock = threading.Lock()       # 저장한 이미지 목록(presets.json) 읽고 쓰기
         # 컷을 적용한 미리보기 소리 (cut_audio_run 은 테스트가 가짜를 넣는다)
         self._cut_audio = preview.CutAudio(cut_audio_run or self._run_cut_audio,
                                            lambda job_id: self._push("preview", {"id": job_id}))
@@ -533,6 +571,177 @@ class Api:
             job.range_ops = [o for i, o in enumerate(job.range_ops) if i != index]
             return True
         return self._change_ops(job_id, change)
+
+    # ---- 이미지 겹쳐 넣기 ------------------------------------------------------
+    # 항목 {id, img, name, aspect, x, y, w, start, end}: x·y·w 는 영상 화면 비율, start/end 는 원본 초.
+    # 이미지는 작업 폴더 overlays/ 에 복사해 두고, 저장한 이미지는 <data_root>/overlay_presets/ 에 둔다.
+
+    def _ov_views(self, job: Job) -> list[dict]:
+        return [{**o, "url": f"{self._preview_base}/{job.id}/overlays/{o['img']}"} for o in job.overlays]
+
+    def _change_overlays(self, job_id: str, change: Callable[[Job, float], bool]) -> dict | None:
+        """이미지 편집 공통: 확인 대기·저장됨에서만. change(job, 영상 길이) 가 False 면 거절. → {"overlays", "history"}."""
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None or job.status not in (Status.REVIEW, Status.SAVED):
+                return None
+            before = self._snap(job)
+            if not change(job, self._duration(job)):
+                return None
+            self._record(job, before)
+            if job.status == Status.SAVED:
+                job.status = Status.REVIEW
+            self._store.save()
+            view, out = job_view(job), self._ov_views(job)
+        self._push("job", view)
+        return {"overlays": out, "history": self._hist(job_id)}
+
+    def _job_overlay_dir(self, job_id: str) -> Path | None:
+        with self._queue.lock:
+            job = self._job(job_id)
+            return paths.job_dir(Path(job.src)) / "overlays" if job else None
+
+    def add_overlay(self, job_id: str, at: float, vid_aspect: float) -> dict | None:
+        """PNG 를 골라 재생 위치 at(원본 초)부터 넣는다. vid_aspect = 영상 너비/높이 (화면 가운데에 놓으려고).
+        취소·PNG 아님·편집할 수 없는 상태면 None."""
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in (at, vid_aspect)) \
+                or vid_aspect <= 0:
+            return None
+        folder = self._job_overlay_dir(job_id)
+        if folder is None:
+            return None
+        picked = self._dialogs.open_image()
+        size = png_size(Path(picked)) if picked else None
+        if size is None:
+            return None
+        try:
+            img = store_png(Path(picked), folder)
+        except OSError:
+            log.exception("이미지 복사 실패")
+            return None
+        aspect = size[0] / size[1]
+
+        def change(job: Job, d: float) -> bool:
+            start = min(max(float(at), 0.0), d)
+            end = min(start + OVERLAY_SPAN, d)
+            if end <= start:
+                return False
+            y = max(0.0, (1 - OVERLAY_W * vid_aspect / aspect) / 2)
+            job.overlays = [*job.overlays, {"id": secrets.token_hex(4), "img": img, "name": Path(picked).stem,
+                                            "aspect": aspect, "x": (1 - OVERLAY_W) / 2, "y": y, "w": OVERLAY_W,
+                                            "start": start, "end": end}]
+            return True
+        return self._change_overlays(job_id, change)
+
+    def update_overlay(self, job_id: str, oid: str, patch: dict) -> dict | None:
+        """x·y·w·start·end 만 바꾼다. 0 <= start < end <= 영상 길이, OVERLAY_MIN_W <= w <= 1."""
+        if not isinstance(patch, dict) or not patch or set(patch) - {"x", "y", "w", "start", "end"}:
+            return None
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in patch.values()):
+            return None
+
+        def change(job: Job, d: float) -> bool:
+            i = next((i for i, o in enumerate(job.overlays) if o["id"] == oid), None)
+            if i is None:
+                return False
+            o = {**job.overlays[i], **{k: float(v) for k, v in patch.items()}}
+            if not (0 <= o["start"] < o["end"] <= d + 1e-6 and OVERLAY_MIN_W <= o["w"] <= 1
+                    and -1 <= o["x"] <= 1 and -1 <= o["y"] <= 1):
+                return False
+            job.overlays = [*job.overlays[:i], o, *job.overlays[i + 1:]]
+            return True
+        return self._change_overlays(job_id, change)
+
+    def delete_overlay(self, job_id: str, oid: str) -> dict | None:
+        def change(job: Job, _d: float) -> bool:
+            kept = [o for o in job.overlays if o["id"] != oid]
+            if len(kept) == len(job.overlays):
+                return False
+            job.overlays = kept
+            return True
+        return self._change_overlays(job_id, change)
+
+    # 저장한 이미지 (로고): 이미지 + 자리·크기. 다른 영상에 누르면 처음부터 끝까지 들어간다
+
+    def _presets_dir(self) -> Path:
+        return self._data_root / "overlay_presets"
+
+    def _read_presets(self) -> list[dict]:
+        data = _read_json(self._presets_dir() / "presets.json")
+        return [p for p in data if isinstance(p, dict) and isinstance(p.get("id"), str)] if isinstance(data, list) else []
+
+    def _write_presets(self, items: list[dict]) -> None:
+        d = self._presets_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / "presets.json.tmp"
+        tmp.write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, d / "presets.json")
+
+    def _preset_views(self, items: list[dict]) -> list[dict]:
+        return [{**p, "url": f"{self._preview_base}/presets/{p['img']}"} for p in items]
+
+    def list_presets(self) -> list[dict]:
+        with self._presets_lock:
+            return self._preset_views(self._read_presets())
+
+    def save_preset(self, job_id: str, oid: str, name: str) -> list[dict] | None:
+        """고른 이미지를 이름 붙여 저장한다 (같은 이름이 있으면 덮어씀). → 저장한 이미지 목록, 안 되면 None."""
+        name = name.strip() if isinstance(name, str) else ""
+        if not 1 <= len(name) <= PRESET_NAME_MAX:
+            return None
+        with self._queue.lock:
+            job = self._job(job_id)
+            o = next((dict(o) for o in job.overlays if o["id"] == oid), None) if job else None
+            src = paths.job_dir(Path(job.src)) / "overlays" if job else None
+        if o is None:
+            return None
+        try:
+            img = store_png(src / o["img"], self._presets_dir())
+        except OSError:
+            log.exception("저장할 이미지 복사 실패")
+            return None
+        with self._presets_lock:
+            items = self._read_presets()
+            same = next((p for p in items if p.get("name") == name), None)   # 같은 이름은 덮어쓰되 id 는 그대로
+            items = [p for p in items if p is not same]
+            items.append({"id": same["id"] if same else secrets.token_hex(4), "name": name, "img": img,
+                          **{k: o[k] for k in ("aspect", "x", "y", "w")}})
+            self._write_presets(items)
+            return self._preset_views(items)
+
+    def delete_preset(self, pid: str) -> list[dict]:
+        """저장한 이미지를 지운다 (다른 항목이 같은 그림을 쓰지 않으면 그림 파일도)."""
+        with self._presets_lock:
+            items = self._read_presets()
+            gone = [p for p in items if p["id"] == pid]
+            items = [p for p in items if p["id"] != pid]
+            self._write_presets(items)
+            for p in gone:
+                if not any(q.get("img") == p.get("img") for q in items):
+                    (self._presets_dir() / str(p.get("img"))).unlink(missing_ok=True)
+            return self._preset_views(items)
+
+    def insert_preset(self, job_id: str, pid: str) -> dict | None:
+        """저장한 이미지를 그 자리·크기로 영상 처음부터 끝까지 넣는다."""
+        with self._presets_lock:
+            p = next((dict(p) for p in self._read_presets() if p["id"] == pid), None)
+        folder = self._job_overlay_dir(job_id)
+        if p is None or folder is None:
+            return None
+        try:
+            img = store_png(self._presets_dir() / p["img"], folder)
+        except OSError:
+            log.exception("저장한 이미지 복사 실패")
+            return None
+
+        def change(job: Job, d: float) -> bool:
+            if d <= 0:
+                return False
+            job.overlays = [*job.overlays, {"id": secrets.token_hex(4), "img": img, "name": p["name"],
+                                            **{k: float(p[k]) for k in ("aspect", "x", "y", "w")},
+                                            "start": 0.0, "end": d}]
+            return True
+        return self._change_overlays(job_id, change)
 
     # ---- 자막 고치기 ----------------------------------------------------------
 
@@ -828,9 +1037,11 @@ class Api:
         if summary is not None:
             # 슬라이더 설명의 "N초 이상" — 앱의 파이프라인이 쓰는 fillers.json 의 silence_min_sec
             summary = {**summary, "silence_min_sec": _silence_min_sec()}
+        ov_views = self._ov_views(snap)
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "cut_items": items,
                   "range_ops": ops, "history": self._hist(job_id),
-                  "duration": duration, "fps": float(subtitles._fps(cur or {}))}   # 화면의 프레임 단위 구간 다듬기
+                  "duration": duration, "fps": float(subtitles._fps(cur or {})),   # 화면의 프레임 단위 구간 다듬기
+                  "overlays": ov_views}
         result.update(self._preview(snap, status, effective, settings))
         if status in (Status.REVIEW, Status.SAVED):
             self._request_thumbs(snap, duration)
