@@ -387,7 +387,7 @@ function resultParts(j, r) {
 
 // 편집기처럼 창 아래 전체 폭 한 패널: 머리 줄(위치·구간·실행 취소·확대) → 전체 막대 → 시간 눈금·이미지 줄·화면 줄·소리 줄
 function tlPanel(r) {
-  return h('div', { class: 'tlp' },
+  return h('div', { class: 'tlp' }, ovl.grip,
     h('div', { class: 'tlp-head' }, zoomTl.now, rangeBar.acts, rangeBar.el, h('span', { class: 'tlp-right' }, histBar.el, zoomTl.zoom)),
     h('div', { class: 'tlp-over' }, timeline(r)),
     zoomTl.el);
@@ -791,6 +791,51 @@ const ovl = (() => {
   const names = h('div', { class: 'ov-names', hidden: true });
   const rows = h('div', { class: 'ov-rows', hidden: true });
   rows.addEventListener('scroll', () => { names.scrollTop = rows.scrollTop; });
+  // 이미지 줄 높이 손잡이 (타임라인 패널 위 테두리): 위로 끌면 줄이 늘고 영상이 준다. 고른 높이는 기억한다
+  const LANE = 20, LANE_STEP = 24, MIN_VID = 120, DEF_H = 3.5 * LANE_STEP - 4;   // MIN_VID = .pv 최소 높이, DEF_H = style.css 기본값
+  const grip = h('div', { class: 'tlp-grip', role: 'separator', 'aria-orientation': 'horizontal',
+    'aria-label': '이미지 줄 높이', tabindex: '0', hidden: true });
+  grip.title = '끌어서 이미지 줄 높이 조절 · 두 번 누르면 기본 높이';
+  let gdrag = null;          // {y0, h0, content, vid0}
+  function setLanesH(v, save) {
+    rows.style.maxHeight = names.style.maxHeight = `${v}px`;
+    names.scrollTop = rows.scrollTop;
+    if (save) try { localStorage.setItem('ovLanesH', String(Math.round(v))); } catch (err) { /* 기억 못 해도 된다 */ }
+  }
+  try { const v = Number(localStorage.getItem('ovLanesH')); if (v > 0) setLanesH(v); } catch (err) { /* 기본 높이 */ }
+  const vidH = () => { const pv = document.querySelector('.res-main > .pv'); return pv ? pv.clientHeight : MIN_VID; };
+  const lanesBy = (dy, content) => TL.lanesDrag(rows.clientHeight, dy, content, vidH(), MIN_VID, LANE);
+  // 이동·놓기는 창에서 받는다 (끄는 동안 패널을 다시 그려 손잡이가 옮겨져도 끊기지 않게)
+  const gripMove = (e) => {
+    if (gdrag) setLanesH(TL.lanesDrag(gdrag.h0, e.clientY - gdrag.y0, gdrag.content, gdrag.vid0, MIN_VID, LANE));
+  };
+  const gripUp = () => {
+    window.removeEventListener('pointermove', gripMove);
+    window.removeEventListener('pointerup', gripUp);
+    window.removeEventListener('pointercancel', gripUp);
+    if (!gdrag) return;
+    gdrag = null;
+    grip.classList.remove('on');
+    document.body.classList.remove('ns-drag');
+    setLanesH(rows.clientHeight, true);
+  };
+  grip.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    gdrag = { y0: e.clientY, h0: rows.clientHeight, content: rows.scrollHeight, vid0: vidH() };
+    grip.classList.add('on');
+    document.body.classList.add('ns-drag');
+    window.addEventListener('pointermove', gripMove);
+    window.addEventListener('pointerup', gripUp);
+    window.addEventListener('pointercancel', gripUp);
+  });
+  grip.addEventListener('dblclick', () => setLanesH(lanesBy(rows.clientHeight - DEF_H, Infinity), true));
+  grip.addEventListener('keydown', (e) => {   // ↑/↓ = 한 줄씩
+    const dy = e.key === 'ArrowUp' ? -LANE_STEP : e.key === 'ArrowDown' ? LANE_STEP : 0;
+    if (!dy) return;
+    e.preventDefault();
+    setLanesH(lanesBy(dy, rows.scrollHeight), true);
+  });
   const panel = h('div', { class: 'ov-panel' });   // 이미지 탭 내용 (잘린 곳·자막 목록 자리)
   const tabText = h('span', {}, '이미지');         // 이미지 탭 이름 (개수는 탭을 다시 그리지 않고 바꾼다)
   const nodes = new Map();   // id → 영상 위 요소
@@ -975,6 +1020,7 @@ const ovl = (() => {
     const all = hasPicture() ? list() : [];
     for (const id of lanes.keys()) if (!all.some((o) => o.id === id)) lanes.delete(id);
     names.hidden = rows.hidden = !g || !all.length;
+    grip.hidden = names.hidden || all.length < 2;   // 한 줄이면 바꿀 높이가 없다
     if (names.hidden) return;
     const Ls = all.map(lane);
     if (Ls.some((L, i) => rows.children[i] !== L.lane) || rows.children.length !== Ls.length) {
@@ -1174,7 +1220,7 @@ const ovl = (() => {
     else if (e.key === 'Escape') select(null);
   });
 
-  return { layer, names, rows, panel, tabText, layout, drawLayer, paintRows, renderTools, wheelScrolls, available: hasPicture,
+  return { layer, names, rows, grip, panel, tabText, layout, drawLayer, paintRows, renderTools, wheelScrolls, available: hasPicture,
     reset() { S.ovSel = null; naming = false; renaming = null; presets = null; drag = null; shownSel = null; } };
 })();
 

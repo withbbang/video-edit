@@ -130,7 +130,14 @@ function barDrag(kind, s, e, dt, d, fps) {
   return { start: s, end: clamp(snap(e + dt), s + one, d) };
 }
 
+// 이미지 줄 영역 높이 끌기: 시작 높이 h0(px)에서 dy(아래로 +)만큼 끌었을 때 새 높이.
+// 한 줄(lane)과 내용 높이(content) 사이, 영상(시작 때 vid0)이 minVid 보다 작아지게 키우지는 않는다
+function lanesDrag(h0, dy, content, vid0, minVid, lane) {
+  const top = Math.min(content, Math.max(lane, h0 + Math.max(0, vid0 - minVid)));
+  return clamp(h0 - dy, Math.min(lane, content), top);
+}
+
 const TL = { fitView, clampView, tToX, xToT, zoomAt, followT, playFollow, playSpc, cells, sheetCell, waveMax, spcToSlider, sliderToSpc,
-  ovRect, ovMove, ovResizeEdge, barDrag };
+  ovRect, ovMove, ovResizeEdge, barDrag, lanesDrag };
 if (typeof window !== 'undefined') window.TL = TL;
 if (typeof module !== 'undefined') module.exports = TL;

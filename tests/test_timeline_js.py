@@ -155,3 +155,17 @@ def test_bar_drag():
     assert run("out = T.barDrag('start', 1, 2, 0.51, 10, 30);") == pytest.approx({"start": 1.5, "end": 2})   # 프레임에 맞춤
     assert run("out = T.barDrag('start', 1, 2, 5, 10, 30);") == pytest.approx({"start": 2 - 1 / 30, "end": 2})
     assert run("out = T.barDrag('end', 1, 2, 50, 10, 30);") == pytest.approx({"start": 1, "end": 10})
+
+
+def test_lanes_drag():
+    # 위로 끌면(dy<0) 커지고 아래로 끌면 작아진다: 한 줄(20)보다 작게, 내용(140)보다 크게 안 됨
+    assert run("out = T.lanesDrag(80, -30, 140, 400, 120, 20);") == 110
+    assert run("out = T.lanesDrag(80, 200, 140, 400, 120, 20);") == 20
+    assert run("out = T.lanesDrag(80, -500, 140, 400, 120, 20);") == 140
+    # 영상이 120px 아래로 줄지 않게: 영상 150 이면 30 만큼만 더 커진다
+    assert run("out = T.lanesDrag(80, -100, 300, 150, 120, 20);") == 110
+    # 이미 영상이 최소 이하여도 줄이는 건 된다, 키우지는 않는다
+    assert run("out = T.lanesDrag(80, -10, 300, 100, 120, 20);") == 80
+    assert run("out = T.lanesDrag(80, 10, 300, 100, 120, 20);") == 70
+    # 내용이 한 줄보다 작으면 내용 높이
+    assert run("out = T.lanesDrag(16, 5, 16, 400, 120, 20);") == 16

@@ -415,6 +415,14 @@ video.grab { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity:
 .ov-names { overflow: hidden; }
 .ov-rows { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .ov-names > *, .ov-rows > * { flex-shrink: 0; }
+/* 이미지 줄 높이 손잡이: 타임라인 패널 위 테두리에 겹쳐(배치를 밀지 않게) 가운데 짧은 막대 */
+.tlp { position: relative; }
+.tlp-grip { position: absolute; left: 0; right: 0; top: -9px; height: 12px; z-index: 2; cursor: ns-resize; touch-action: none; }
+.tlp-grip::after { content: ""; position: absolute; left: 50%; top: 4px; width: 40px; height: 4px; margin-left: -20px;
+  border-radius: 2px; background: var(--muted); opacity: .35; }
+.tlp-grip:hover::after, .tlp-grip.on::after, .tlp-grip:focus-visible::after { background: var(--accent); opacity: 1; }
+.tlp-grip:focus-visible { outline: none; }
+body.ns-drag, body.ns-drag * { cursor: ns-resize !important; }   /* 끄는 동안 손잡이 밖에서도 같은 커서 */
 .zt-name.n-ov { height: 20px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; display: block; line-height: 20px; }
 .ov-lane { position: relative; height: 20px; background: var(--tl-lane); border-radius: 5px; overflow: hidden;
   cursor: pointer; touch-action: none; }
