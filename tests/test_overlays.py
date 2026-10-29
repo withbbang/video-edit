@@ -171,3 +171,10 @@ def test_presets_roundtrip(tmp_path):
     assert (paths.job_dir(Path(job.src)) / "overlays" / o["img"]).is_file()
     assert a.insert_preset(job.id, "없음") is None
     assert a.delete_preset(p["id"]) == [] and a.list_presets() == []
+
+
+def test_add_tall_png_fits_inside_video(tmp_path):
+    a, store, job = api_with_image(tmp_path, logo(tmp_path, "세로.png", 30, 100))
+    o = a.add_overlay(job.id, 0.0, 16 / 9)["overlays"][0]
+    h = o["w"] * (16 / 9) / o["aspect"]                 # 화면 높이 대비 이미지 높이
+    assert h <= 1 + 1e-9 and o["y"] + h <= 1 + 1e-9 and o["x"] + o["w"] <= 1

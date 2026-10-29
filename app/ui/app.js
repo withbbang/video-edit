@@ -910,7 +910,8 @@ const ovl = (() => {
     if (!L) {
       const name = h('span', { class: 'zt-name n-ov' });
       const bar = h('b', { class: 'ov-bar' });
-      const ln = h('div', { class: 'ov-lane' }, bar);
+      const cuts = h('canvas', { class: 'ov-cuts' });   // 잘린 곳 빗금 (다른 줄과 같게)
+      const ln = h('div', { class: 'ov-lane' }, cuts, bar);
       bar.addEventListener('pointerdown', (e) => {
         const g = zoomTl.geom();
         if (e.button !== 0 || !g || !S.view) return;
@@ -948,12 +949,13 @@ const ovl = (() => {
       bar.addEventListener('pointerup', up);
       bar.addEventListener('pointercancel', up);
       rangePointer(ln, (x, rect) => { const gg = zoomTl.geom(); return gg && S.view ? TL.xToT(S.view, x - rect.left, gg.cw) : 0; }, () => null);
-      L = { name, lane: ln, bar };
+      L = { name, lane: ln, bar, cuts };
       lanes.set(o.id, L);
     }
     return L;
   }
-  function paintRows(g) {
+  // paintBg(canvas, 높이): 줄 바탕에 잘린 곳·구간을 그린다 (zoomTl 이 화면·소리 줄과 같은 그리기로 넘겨준다)
+  function paintRows(g, paintBg) {
     const all = hasPicture() ? list() : [];
     for (const id of lanes.keys()) if (!all.some((o) => o.id === id)) lanes.delete(id);
     names.hidden = rows.hidden = !g || !all.length;
@@ -972,6 +974,7 @@ const ovl = (() => {
       L.bar.textContent = o.name;
       L.bar.classList.toggle('sel', o.id === S.ovSel);
       L.lane.classList.toggle('sel', o.id === S.ovSel);
+      if (paintBg) paintBg(L.cuts, L.lane.clientHeight || 20);
     });
   }
 
@@ -1041,6 +1044,10 @@ const ovl = (() => {
     tools.replaceChildren(...kids);
   }
 
+  // 이미지·이미지 막대·이미지 도구 밖을 누르면 고르기를 푼다 (Delete 가 다른 일을 하다 이미지를 지우지 않게)
+  document.addEventListener('pointerdown', (e) => {
+    if (S.ovSel && !(e.target.closest && e.target.closest('.ovlayer .ov, .ov-bar, .ov-tools'))) select(null);
+  }, true);
   document.addEventListener('keydown', (e) => {
     if (!S.ovSel || S.editing || typingIn(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); remove(); }
@@ -1257,7 +1264,11 @@ const zoomTl = (() => {
     const c = colors();
     const v = S.view;
     paintRuler(g, c);
-    ovl.paintRows(g);
+    ovl.paintRows(g, (cv, hh) => {
+      const ctx = fit(cv, g.w, hh);
+      ctx.clearRect(0, 0, g.w, hh);
+      overlays(ctx, g, hh, c);
+    });
     if (showFrames) {
       const ctx = fit(frames, g.w, ROW_H);
       ctx.clearRect(0, 0, g.w, ROW_H);

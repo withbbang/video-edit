@@ -626,9 +626,11 @@ class Api:
             end = min(start + OVERLAY_SPAN, d)
             if end <= start:
                 return False
-            y = max(0.0, (1 - OVERLAY_W * vid_aspect / aspect) / 2)
+            # 세로로 긴 그림은 화면 높이 안에 들어오게 줄인다
+            w = max(OVERLAY_MIN_W, min(OVERLAY_W, aspect / vid_aspect))
+            y = max(0.0, (1 - w * vid_aspect / aspect) / 2)
             job.overlays = [*job.overlays, {"id": secrets.token_hex(4), "img": img, "name": Path(picked).stem,
-                                            "aspect": aspect, "x": (1 - OVERLAY_W) / 2, "y": y, "w": OVERLAY_W,
+                                            "aspect": aspect, "x": (1 - w) / 2, "y": y, "w": w,
                                             "start": start, "end": end}]
             return True
         return self._change_overlays(job_id, change)
