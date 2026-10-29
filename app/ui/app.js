@@ -790,6 +790,7 @@ const ovl = (() => {
   const layer = h('div', { class: 'ovlayer' });
   const names = h('div', { class: 'ov-names', hidden: true });
   const rows = h('div', { class: 'ov-rows', hidden: true });
+  rows.addEventListener('scroll', () => { names.scrollTop = rows.scrollTop; });
   const panel = h('div', { class: 'ov-panel' });   // 이미지 탭 내용 (잘린 곳·자막 목록 자리)
   const tabText = h('span', {}, '이미지');         // 이미지 탭 이름 (개수는 탭을 다시 그리지 않고 바꾼다)
   const nodes = new Map();   // id → 영상 위 요소
@@ -798,6 +799,7 @@ const ovl = (() => {
   let drag = null;           // {id, kind, x0, y0, o, live, moved}
   let busy = false, naming = false, presets = null, loading = false;
   let renaming = null;       // 이름 바꾸는 중 {kind: 'ov' | 'preset', id, bad}
+  let shownSel = null;       // 줄 스크롤로 보이게 맞춘 고른 이미지
   let finishRename = null;   // 열린 이름 칸 마치기 (save) — 고르기가 풀려 칸이 사라지기 전에 반영한다
 
   const OV_EDGES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
@@ -990,6 +992,21 @@ const ovl = (() => {
       L.lane.classList.toggle('sel', o.id === S.ovSel);
       if (paintBg) paintBg(L.cuts, L.lane.clientHeight || 20);
     });
+    if (S.ovSel !== shownSel) {   // 새로 고른 이미지(목록에서 고르기·불러오기)의 줄이 스크롤 밖이면 보이게
+      shownSel = S.ovSel;
+      const L = S.ovSel && lanes.get(S.ovSel);
+      if (L) {
+        const r = L.lane.getBoundingClientRect(), b = rows.getBoundingClientRect();
+        if (r.top < b.top) rows.scrollTop -= b.top - r.top;
+        else if (r.bottom > b.bottom) rows.scrollTop += r.bottom - b.bottom;
+        names.scrollTop = rows.scrollTop;
+      }
+    }
+  }
+  // 이미지 줄이 넘칠 때 그 위의 세로 휠은 줄 스크롤 (좌우 이동·확대는 다른 줄에서)
+  function wheelScrolls(e) {
+    return !e.ctrlKey && !e.metaKey && !rows.hidden && rows.contains(e.target)
+      && rows.scrollHeight > rows.clientHeight && Math.abs(e.deltaY) > Math.abs(e.deltaX);
   }
 
   // ---- 이미지 탭 (잘린 곳·자막 옆): 왼쪽 사용 중·보관함 탭, 오른쪽 불러오기. 사용 중에서 고르면 보관·지우기 ----
@@ -1157,8 +1174,8 @@ const ovl = (() => {
     else if (e.key === 'Escape') select(null);
   });
 
-  return { layer, names, rows, panel, tabText, layout, drawLayer, paintRows, renderTools, available: hasPicture,
-    reset() { S.ovSel = null; naming = false; renaming = null; presets = null; drag = null; } };
+  return { layer, names, rows, panel, tabText, layout, drawLayer, paintRows, renderTools, wheelScrolls, available: hasPicture,
+    reset() { S.ovSel = null; naming = false; renaming = null; presets = null; drag = null; shownSel = null; } };
 })();
 
 const zoomTl = (() => {
@@ -1215,7 +1232,7 @@ const zoomTl = (() => {
   // ⌘/Ctrl+휠·트랙패드 벌리기 = 마우스 자리 기준 확대, 그냥 휠 = 좌우 이동
   rows.addEventListener('wheel', (e) => {
     const g = geom();
-    if (!g || !S.view) return;
+    if (!g || !S.view || ovl.wheelScrolls(e)) return;
     e.preventDefault();
     const x = e.clientX - rows.getBoundingClientRect().left;
     if (e.ctrlKey || e.metaKey) {

@@ -409,6 +409,12 @@ video.grab { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity:
 .ov .g-w { left: 0; top: 50%; cursor: ew-resize; }
 .ovlayer.edit .ov.sel .grip { display: block; }
 .ov-names, .ov-rows { display: flex; flex-direction: column; gap: 4px; }
+/* 이미지가 많아도 타임라인 패널이 커져 영상이 줄지 않게: 줄 3개 반 높이까지만, 넘치면 이미지 줄만 세로로 스크롤
+   (반 줄이 걸쳐 보여 더 있다는 걸 알린다). 이름 칸은 app.js 가 줄 스크롤을 따라 맞춘다 */
+.ov-names, .ov-rows { max-height: calc(3.5 * 24px - 4px); }
+.ov-names { overflow: hidden; }
+.ov-rows { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.ov-names > *, .ov-rows > * { flex-shrink: 0; }
 .zt-name.n-ov { height: 20px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; display: block; line-height: 20px; }
 .ov-lane { position: relative; height: 20px; background: var(--tl-lane); border-radius: 5px; overflow: hidden;
   cursor: pointer; touch-action: none; }
