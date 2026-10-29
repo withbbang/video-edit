@@ -98,3 +98,40 @@ def test_zoom_past_limit_keeps_anchor():
     x0, x1 = run("const v = {t0: 29.9, spc: 1/30}; const z = T.zoomAt(v, 3, 30, 120, 960, 96, 30);"
                  "out = [T.tToX(v, 30, 96), T.tToX(z, 30, 96)];")
     assert x0 == pytest.approx(x1)
+
+
+# ---- 이미지 겹쳐 넣기: 화면 자리·끌기 ---------------------------------------------
+BOX = "{x: 10, y: 20, w: 1600, h: 900}"
+O = "{x: 0.1, y: 0.2, w: 0.25, aspect: 2}"
+
+
+def test_ov_rect():
+    r = run(f"out = T.ovRect({O}, {BOX});")
+    assert r == pytest.approx({"x": 170, "y": 200, "w": 400, "h": 200})
+    r = run("out = T.ovRect({x: 0, y: 0, w: 0.5, aspect: 1}, {x: 0, y: 0, w: 900, h: 1600});")   # 세로 영상
+    assert r["h"] == pytest.approx(450)
+
+
+def test_ov_move_clamps_inside():
+    assert run(f"out = T.ovMove({O}, 160, 90, {BOX});") == pytest.approx({"x": 0.2, "y": 0.3})
+    m = run(f"out = T.ovMove({O}, 99999, 99999, {BOX});")        # 오른쪽 아래 끝까지만
+    assert m["x"] == pytest.approx(0.75) and m["y"] == pytest.approx(1 - 200 / 900)
+    assert run(f"out = T.ovMove({O}, -99999, -99999, {BOX});") == {"x": 0, "y": 0}
+
+
+def test_ov_resize_limits():
+    assert run(f"out = T.ovResize({O}, 160, {BOX}).w;") == pytest.approx(0.35)
+    assert run(f"out = T.ovResize({O}, -99999, {BOX}).w;") == pytest.approx(0.02)
+    # 오른쪽 끝(1 - 0.1 = 0.9)과 아래 끝(높이 0.8*900=720px → 너비 1440px = 0.9) 중 작은 쪽
+    assert run(f"out = T.ovResize({O}, 99999, {BOX}).w;") == pytest.approx(0.9)
+    assert run("out = T.ovResize({x: 0, y: 0.9, w: 0.25, aspect: 2}, 99999, {x: 0, y: 0, w: 1600, h: 900}).w;") \
+        == pytest.approx(0.1125)                                     # 아래 여백 90px → 너비 180px
+
+
+def test_bar_drag():
+    assert run("out = T.barDrag('end', 1, 2, -5, 10, 30);") == pytest.approx({"start": 1, "end": 1 + 1 / 30})
+    assert run("out = T.barDrag('move', 8, 9.5, 3, 10, 30);") == pytest.approx({"start": 8.5, "end": 10})
+    assert run("out = T.barDrag('move', 1, 2, -5, 10, 30);") == pytest.approx({"start": 0, "end": 1})
+    assert run("out = T.barDrag('start', 1, 2, 0.51, 10, 30);") == pytest.approx({"start": 1.5, "end": 2})   # 프레임에 맞춤
+    assert run("out = T.barDrag('start', 1, 2, 5, 10, 30);") == pytest.approx({"start": 2 - 1 / 30, "end": 2})
+    assert run("out = T.barDrag('end', 1, 2, 50, 10, 30);") == pytest.approx({"start": 1, "end": 10})

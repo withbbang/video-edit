@@ -84,6 +84,38 @@ function sliderToSpc(s, minSpc, maxSpc) {
   return maxSpc * Math.pow(minSpc / maxSpc, s / 1000);
 }
 
-const TL = { fitView, clampView, tToX, xToT, zoomAt, followT, playFollow, playSpc, cells, sheetCell, waveMax, spcToSlider, sliderToSpc };
+// ---- 이미지 겹쳐 넣기 ----
+// 이미지 o = {x, y, w, aspect}: x·y(왼쪽 위)·w 는 영상 화면 비율, aspect = 이미지 너비/높이. box = 화면에 그려진 영상 자리(px)
+const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+const OV_MIN_W = 0.02;
+
+function ovRect(o, box) {
+  const w = o.w * box.w;
+  return { x: box.x + o.x * box.w, y: box.y + o.y * box.h, w, h: w / o.aspect };
+}
+// px 만큼 옮긴 자리 (영상 밖으로 나가지 않게)
+function ovMove(o, dx, dy, box) {
+  const hr = (o.w * box.w) / o.aspect / box.h;
+  return { x: clamp(o.x + dx / box.w, 0, 1 - o.w), y: clamp(o.y + dy / box.h, 0, 1 - hr) };
+}
+// 오른쪽 아래 모서리를 가로로 dx px 끈 너비 (비율 유지, 오른쪽·아래 끝을 넘지 않게)
+function ovResize(o, dx, box) {
+  const maxW = Math.min(1 - o.x, ((1 - o.y) * box.h * o.aspect) / box.w);
+  return { w: clamp(o.w + dx / box.w, OV_MIN_W, maxW) };
+}
+// 타임라인 막대 끌기: kind 'move' | 'start' | 'end', dt 초. 프레임 격자, [0, d] 안, 최소 1프레임
+function barDrag(kind, s, e, dt, d, fps) {
+  const snap = (t) => Math.round(t * fps) / fps;
+  const one = 1 / fps;
+  if (kind === 'move') {
+    const start = clamp(snap(s + dt), 0, d - (e - s));
+    return { start, end: start + (e - s) };
+  }
+  if (kind === 'start') return { start: clamp(snap(s + dt), 0, e - one), end: e };
+  return { start: s, end: clamp(snap(e + dt), s + one, d) };
+}
+
+const TL = { fitView, clampView, tToX, xToT, zoomAt, followT, playFollow, playSpc, cells, sheetCell, waveMax, spcToSlider, sliderToSpc,
+  ovRect, ovMove, ovResize, barDrag };
 if (typeof window !== 'undefined') window.TL = TL;
 if (typeof module !== 'undefined') module.exports = TL;
