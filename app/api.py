@@ -24,10 +24,11 @@ import struct
 import subprocess
 import threading
 import time
+from fractions import Fraction
 from pathlib import Path
 from typing import Callable, Protocol
 
-from . import __version__, diff, models, paths, preview, runner, subtitles, thumbs, updates
+from . import __version__, diff, models, paths, preview, runner, sequence, subtitles, thumbs, updates
 from .jobqueue import ANALYZE, RENDER
 from .options import FAST_KEYS, LEVEL_KEYS, JobOptions, parse_level
 from .progress import ANALYZE_WEIGHTS, RENDER_WEIGHTS
@@ -57,6 +58,7 @@ class Dialogs(Protocol):
     def open_files(self) -> list[str] | None: ...
     def choose_folder(self) -> str | None: ...
     def open_image(self) -> str | None: ...
+    def open_video(self) -> str | None: ...
 
 
 def _union(cuts: list[dict]) -> list[list[float]]:
@@ -264,6 +266,79 @@ def save_sequence(job: Job, lock=None) -> Path | None:
     return path
 
 
+CLIP_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".webm"}   # 끼워 넣을 수 있는 영상
+STABLE_KEYS = ("word_edits", "line_times", "word_styles")   # 조각을 넣고 뺄 때 전사가 바뀌어 키를 옮기는 자막 수정
+EPS = 1e-6
+
+
+def probe_media(path: Path) -> tuple[float, bool] | None:
+    """ffprobe 로 (길이 초, 영상 스트림이 있는가). 앨범 아트(attached_pic)는 영상으로 치지 않는다. 못 읽으면 None."""
+    kw = {"creationflags": subprocess.CREATE_NO_WINDOW} if runner.IS_WIN else {}
+    try:
+        res = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                              "format=duration:stream=codec_type:stream_disposition=attached_pic", "-of", "json",
+                              str(path)], capture_output=True, text=True, env=runner.build_env(), timeout=30, **kw)
+        data = json.loads(res.stdout or "{}")
+        dur = float(data["format"]["duration"])
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return None
+    if not math.isfinite(dur) or dur <= 0:
+        return None
+    video = any(s.get("codec_type") == "video" and not (s.get("disposition") or {}).get("attached_pic")
+                for s in data.get("streams") or [])
+    return dur, video
+
+
+def store_clip(src: Path, folder: Path) -> Path:
+    """영상을 folder/<sha1 앞 16자><확장자 소문자> 로 복사(이미 있으면 그대로)하고 그 경로를 돌려준다.
+    sha1 은 조금씩 읽어 계산한다 (큰 영상도 메모리에 올리지 않게)."""
+    h = hashlib.sha1()
+    with open(src, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    folder.mkdir(parents=True, exist_ok=True)
+    dst = folder / (h.hexdigest()[:16] + Path(src).suffix.lower())
+    if not dst.is_file():   # 있으면 그대로 둔다 — 수정 시각(파일 키)이 바뀌지 않게
+        tmp = dst.with_name(dst.name + ".part")
+        try:
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dst)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return dst
+
+
+def _grid(t: float, fps: Fraction, down: bool = False) -> float:
+    """t 초를 fps 프레임 격자에 맞춘다 (down 이면 내림, 아니면 가장 가까운 프레임)."""
+    n = float(t) * fps
+    return float((math.floor(n + EPS) if down else round(n)) / fps)
+
+
+def _piece_key(pieces: list) -> list:
+    """다시 판정이 필요한 조각 목록의 모양 (이름은 빼고)."""
+    return [(p.get("id"), p.get("clip"), str(p.get("src")), float(p.get("in", 0)), float(p.get("out", 0))) for p in pieces]
+
+
+def _merge_pieces(pieces: list) -> list:
+    """이웃한 같은 영상·같은 파일 조각 중 in/out 이 이어진 것은 하나로 합친다 (앞 조각 id 를 남김)."""
+    out: list[dict] = []
+    for p in pieces:
+        q = out[-1] if out else None
+        if (q and q.get("clip") == p.get("clip") and str(q.get("src")) == str(p.get("src"))
+                and abs(float(q["out"]) - float(p["in"])) <= EPS):
+            out[-1] = {**q, "out": p["out"]}
+        else:
+            out.append(dict(p))
+    return out
+
+
+def _tr_matches_pieces(pieces: list, tr: dict | None) -> bool:
+    """디스크의 전사가 지금 조각 목록으로 만든 것인가 (조각이 없으면 이어 붙이지 않은 전사)."""
+    want = [p.get("id") for p in pieces if float(p["out"]) - float(p["in"]) > EPS]
+    have = [p.get("id") for p in (tr or {}).get("pieces") or []]
+    return want == have
+
+
 WAVE_HOP = 0.01      # 파형 한 값의 길이 (초)
 WAVE_FLOOR = -60.0   # 이보다 작은 소리는 0
 CUT_AUDIO_WAIT = 10.0   # 분석·저장 전에 그 영상의 미리보기 소리·썸네일 만들기가 멈추길 기다리는 최대 초
@@ -381,12 +456,12 @@ class Api:
     @staticmethod
     def _snap(job: Job) -> tuple:
         return copy.deepcopy((job.restored, job.range_ops, job.word_edits, job.line_times, job.word_styles, job.edits_sha1,
-                              job.overlays))
+                              job.overlays, job.pieces, job.stable_edits))
 
     @staticmethod
     def _put(job: Job, snap: tuple) -> None:
         (job.restored, job.range_ops, job.word_edits, job.line_times, job.word_styles, job.edits_sha1,
-         job.overlays) = copy.deepcopy(snap)
+         job.overlays, job.pieces, job.stable_edits) = copy.deepcopy(snap)
 
     def _record(self, job: Job, before: tuple) -> None:
         """편집 뒤에 부른다 (queue.lock 안). 실제로 바뀌었으면 편집 전 상태를 쌓고 다시 실행 목록을 비운다."""
@@ -419,12 +494,16 @@ class Api:
             if not src:
                 return None
             dst.append(self._snap(job))
+            shape = _piece_key(job.pieces)
             self._put(job, src.pop())
+            rejudge = _piece_key(job.pieces) != shape   # 영상을 넣거나 뺀 것을 되돌리면 이어 붙인 전사를 다시 만든다
             if job.status == Status.SAVED:
                 job.status = Status.REVIEW
             self._store.save()
             view, hist = job_view(job), self._hist(job_id)
         self._push("job", view)
+        if rejudge:
+            self._queue.rejudge(job_id)
         return {"history": hist}
 
     # ---- 목록 ----------------------------------------------------------------
@@ -790,11 +869,182 @@ class Api:
             return True
         return self._change_overlays(job_id, change)
 
+    # ---- 영상 끼워 넣기 --------------------------------------------------------
+    # 조각 {id, clip, src, name, in, out}: 이어 붙인 시간 = 앞 조각들의 (out-in) 합. A(맨 처음 영상)는 clip "main".
+    # 넣은 영상은 작업 폴더 clips/ 에 복사한다. 넣고 빼면 편집 시간을 바로 밀고/당기고, 자막 수정 키는
+    # stable_edits(전사가 바뀌어도 변하지 않는 키)로 두었다가 다시 판정이 끝나면 새 전사 키로 푼다 (_settle_stable).
+
+    def _clip_views(self, job: Job) -> list[dict]:
+        """넣은 영상마다 한 줄 {clip, name, start(첫 조각 시작), end(마지막 조각 끝), dur(조각 길이 합)}. A 는 뺀다."""
+        rows: dict[str, dict] = {}
+        pos = 0.0
+        for p in job.pieces:
+            d = float(p["out"]) - float(p["in"])
+            if p.get("clip") != "main":
+                r = rows.get(p["clip"])
+                if r is None:
+                    rows[p["clip"]] = {"clip": p["clip"], "name": p.get("name") or "", "start": pos, "end": pos + d, "dur": d}
+                else:
+                    r["end"], r["dur"] = pos + d, r["dur"] + d
+            pos += d
+        return list(rows.values())
+
+    def list_clips(self, job_id: str) -> list[dict]:
+        with self._queue.lock:
+            job = self._job(job_id)
+            return self._clip_views(job) if job else []
+
+    def _clip_inputs(self, job_id: str):
+        """(작업 폴더, cuts.json, 전사) — 락 밖에서 읽는다. 없으면 None."""
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None:
+                return None
+            src = Path(job.src)
+        out = paths.job_dir(src) / "out"
+        cur, tr = _read_json(out / f"{src.stem}.cuts.json"), _read_json(out / f"{src.stem}.transcript.json")
+        if cur is None or tr is None:
+            return None
+        return paths.job_dir(src), cur, tr
+
+    def _can_restructure(self, job: Job | None, tr: dict) -> bool:
+        """넣기·빼기를 해도 되는가 (queue.lock 안): 확인 대기·저장됨이고, 디스크의 전사가 지금 조각 목록 것이며,
+        지난 넣기·빼기의 자막 키를 다 풀었고, 자막 수정이 그 전사 기준일 때."""
+        if job is None or job.status not in (Status.REVIEW, Status.SAVED) or not _tr_matches_pieces(job.pieces, tr):
+            return False
+        self._settle_stable(job, tr)
+        if job.stable_edits is not None:
+            return False
+        return job.edits_sha1 is None or job.edits_sha1 == subtitles.transcript_sha1(tr)
+
+    def _restructure(self, job: Job, before: tuple, pieces: list, e: dict, tr: dict, default_fkey: str | None) -> dict:
+        """넣기·빼기 공통 마무리 (queue.lock 안): 밀거나 당긴 편집 e 와 새 조각 목록을 넣고, 자막 수정 키를
+        stable_edits 로 바꿔 두고, 실행 취소에 쌓는다. → {"clips", "history"}"""
+        job.stable_edits = {k: sequence.to_stable(e[k], tr, default_fkey) for k in STABLE_KEYS}
+        job.pieces = pieces
+        job.restored, job.range_ops, job.overlays, job.line_times = e["restored"], e["range_ops"], e["overlays"], e["line_times"]
+        self._record(job, before)
+        if job.status == Status.SAVED:
+            job.status = Status.REVIEW
+        self._store.save()
+        return {"clips": self._clip_views(job), "history": self._hist(job.id)}
+
+    def add_clip(self, job_id: str, at: float) -> dict | None:
+        """영상을 골라 이어 붙인 시간 at 에 끼워 넣는다. at 은 결과의 프레임 격자에 맞추고, 잘린 구간 안이면 그 구간 시작으로 당긴다.
+        넣은 영상 길이는 프레임 격자로 내린다. 넣은 뒤 다시 판정한다. → {"clips", "history"}.
+        취소·영상 아님·소리만 있는 파일(넣는 쪽이든 받는 쪽이든)·편집할 수 없는 상태면 None."""
+        if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at):
+            return None
+        inputs = self._clip_inputs(job_id)
+        if inputs is None:
+            return None
+        jd, cur, tr = inputs
+        with self._queue.lock:
+            job = self._job(job_id)
+            if not self._can_restructure(job, tr):
+                return None
+            src = Path(job.src)
+        a_probe = probe_media(src)
+        if a_probe is None or not a_probe[1]:
+            return None
+        picked = self._dialogs.open_video()
+        if not picked or Path(picked).suffix.lower() not in CLIP_EXTS:
+            return None
+        b_probe = probe_media(Path(picked))
+        if b_probe is None or not b_probe[1]:
+            return None
+        fps = subtitles._fps(cur)
+        d = _grid(b_probe[0], fps, down=True)
+        if d <= 0:
+            return None
+        try:
+            clip_path = store_clip(Path(picked), jd / "clips")
+            fkey = subtitles.pipeline_module().seq.file_key(src)
+        except OSError:
+            log.exception("영상 복사 실패")
+            return None
+        with self._queue.lock:
+            job = self._job(job_id)
+            if not self._can_restructure(job, tr):
+                return None
+            pieces = copy.deepcopy(job.pieces) or [{"id": secrets.token_hex(4), "clip": "main", "src": job.src,
+                                                    "name": src.stem, "in": 0.0, "out": _grid(self._duration(job), fps)}]
+            total = sum(float(p["out"]) - float(p["in"]) for p in pieces)
+            t = min(max(_grid(at, fps), 0.0), total)
+            for a, b in _union(diff.effective_cuts(cur, job.restored, job.range_ops, tr).get("cuts", [])):
+                if a + EPS < t < b - EPS:
+                    t = min(max(_grid(a, fps), 0.0), total)
+                    break
+            before = self._snap(job)
+            e = sequence.shift_for_insert({k: getattr(job, k) for k in sequence.EDIT_KEYS}, t, d)
+            new = {"id": secrets.token_hex(4), "clip": secrets.token_hex(4), "src": str(clip_path),
+                   "name": Path(picked).stem, "in": 0.0, "out": d}
+            result = self._restructure(job, before, sequence.split_piece(pieces, t, new), e, tr, fkey)
+        self._queue.rejudge(job_id)   # 상태 변화는 대기열이 알린다
+        return result
+
+    def remove_clip(self, job_id: str, clip: str) -> dict | None:
+        """넣은 영상(그 조각 모두)을 뺀다. 그 안의 편집은 사라지고 뒤쪽은 당긴다. A("main")는 뺄 수 없다.
+        뺀 자리에서 이어지게 된 같은 파일 조각은 하나로 합친다. 뺀 뒤 다시 판정한다."""
+        if not isinstance(clip, str) or clip == "main":
+            return None
+        inputs = self._clip_inputs(job_id)
+        if inputs is None:
+            return None
+        _, _, tr = inputs
+        with self._queue.lock:
+            job = self._job(job_id)
+            if not self._can_restructure(job, tr):
+                return None
+            spans = sequence.clip_spans(job.pieces, clip)
+            if not spans:
+                return None
+            before = self._snap(job)
+            e = sequence.shift_for_remove({k: getattr(job, k) for k in sequence.EDIT_KEYS}, [(a, b) for a, b, _ in spans])
+            pieces = _merge_pieces([p for p in job.pieces if p.get("clip") != clip])
+            result = self._restructure(job, before, pieces, e, tr, None)
+        self._queue.rejudge(job_id)
+        return result
+
+    def rename_clip(self, job_id: str, clip: str, name: str) -> dict | None:
+        """넣은 영상 이름을 바꾼다 (앞뒤 공백 제거, 1~PRESET_NAME_MAX 글자). 다시 판정하지 않는다."""
+        name = name.strip() if isinstance(name, str) else ""
+        if not 1 <= len(name) <= PRESET_NAME_MAX or clip == "main":
+            return None
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None or job.status not in (Status.REVIEW, Status.SAVED) \
+                    or not any(p.get("clip") == clip for p in job.pieces):
+                return None
+            before = self._snap(job)
+            job.pieces = [{**p, "name": name} if p.get("clip") == clip else p for p in job.pieces]
+            self._record(job, before)
+            self._store.save()
+            return {"clips": self._clip_views(job), "history": self._hist(job_id)}
+
     # ---- 자막 고치기 ----------------------------------------------------------
+
+    def _settle_stable(self, job: Job, tr: dict) -> bool:
+        """넣기·빼기 뒤 다시 판정이 끝났으면(처리 중이 아니고 디스크 전사가 지금 조각 목록 것) stable_edits 를
+        새 전사 키로 풀어 넣고 edits_sha1 을 새 지문(수정이 없으면 None)으로 바꾼다. 풀었으면 True. queue.lock 안에서."""
+        if job.stable_edits is None or job.status == Status.PROCESSING or not _tr_matches_pieces(job.pieces, tr):
+            return False
+        st = job.stable_edits
+        job.word_edits, job.line_times, job.word_styles = (sequence.from_stable(st.get(k) or {}, tr) for k in STABLE_KEYS)
+        job.stable_edits = None
+        has = job.word_edits or job.line_times or job.word_styles
+        job.edits_sha1 = subtitles.transcript_sha1(tr) if has else None
+        self._store.save()
+        return True
 
     def _drop_stale_edits(self, job: Job, tr: dict) -> bool:
         """고친 자막을 만들 때의 받아쓰기 지문이 지금과 다르면 어절·줄 시간 수정·글자 꾸밈을 버린다 (구간 작업은 시간 기준이라 남김).
-        버렸으면 True. queue.lock 을 쥔 채 부른다."""
+        버렸으면 True. queue.lock 을 쥔 채 부른다. 넣기·빼기로 바뀐 전사면 버리지 않고 키를 옮긴다 (_settle_stable, 역사도 남김).
+        처리 중이거나 디스크의 전사가 아직 지금 조각 목록 것이 아니면(실행 취소 직후 등) 아무것도 하지 않는다."""
+        if job.status == Status.PROCESSING or not _tr_matches_pieces(job.pieces, tr):
+            return False
+        if self._settle_stable(job, tr):
+            return False
         if job.edits_sha1 is None or job.edits_sha1 == subtitles.transcript_sha1(tr):
             return False
         job.word_edits, job.line_times, job.word_styles, job.edits_sha1 = {}, {}, {}, None

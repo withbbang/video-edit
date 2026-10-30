@@ -276,6 +276,9 @@ def test_dialogs_use_window(monkeypatch):
     assert d.choose_folder() == "/save/here"
     assert calls[0][0] == webview.OPEN_DIALOG and calls[0][1]["allow_multiple"] is True
     assert calls[1][0] == webview.FOLDER_DIALOG
+    assert d.open_video() == "/save/here"
+    assert calls[2][0] == webview.OPEN_DIALOG and calls[2][1]["allow_multiple"] is False
+    assert all(e in calls[2][1]["file_types"][0] for e in ("*.mp4", "*.mov", "*.m4v", "*.mkv", "*.webm"))
 
 
 def test_build_wires_api(tmp_path):

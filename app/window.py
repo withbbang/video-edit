@@ -28,6 +28,7 @@ MIN_SIZE = (900, 600)
 SHUTDOWN_WAIT = 3.0
 FILE_TYPES = ("영상과 오디오 (" + ";".join(f"*{e}" for e in sorted(api_mod.MEDIA_EXTS)) + ")",
               "모든 파일 (*.*)")
+CLIP_TYPES = "영상 (" + ";".join(f"*{e}" for e in sorted(api_mod.CLIP_EXTS)) + ")"
 
 # ---------------------------------------------------------------------------
 # 미리보기 사본 서버: <data_root>/jobs/<id>/ 의 preview.mp4(예전 방식)와 preview/ 폴더의 정해진 파일만 내보낸다
@@ -265,6 +266,15 @@ class Dialogs:
         import webview
         res = self._bridge.window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False,
                                                      file_types=("PNG 이미지 (*.png)",))
+        if not res:
+            return None
+        return str(res[0] if isinstance(res, (list, tuple)) else res)
+
+    def open_video(self) -> str | None:
+        """끼워 넣을 영상 하나 (mp4/mov/m4v/mkv/webm)."""
+        import webview
+        res = self._bridge.window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False,
+                                                     file_types=(CLIP_TYPES,))
         if not res:
             return None
         return str(res[0] if isinstance(res, (list, tuple)) else res)
