@@ -2348,10 +2348,14 @@ def analyze_sequence(args: argparse.Namespace, src: Path, stem: str, out_dir: Pa
     return SequenceAnalysis(spans_, analyses, tr, clean_wav, audio_key, asr_wav, rms, hop, total)
 
 
-def judge_sequence(sq: SequenceAnalysis, args: argparse.Namespace, fps: Fraction) -> tuple[list[Cut], list[dict], int]:
-    """조각마다 judge_cuts. 조각 경계는 영상 맨 앞/뒤처럼 다룬다 (조각의 전사·에너지만 넘기므로 무음 잇기가 경계를 넘지 않고
-    경계에 붙은 무음은 여유 없이 컷). 설정·자동 무음 기준은 그 조각 파일의 것. 소리 없는 조각은 판정하지 않는다."""
-    raw, skipped, n = [], [], 0
+def judge_sequence(sq: SequenceAnalysis, args: argparse.Namespace,
+                   fps: Fraction) -> tuple[list[Cut], list[Cut], list[dict], int]:
+    """조각마다 judge_cuts → refine_cuts. 조각 경계는 영상 맨 앞/뒤처럼 다룬다 (조각의 전사·에너지만 넘기므로 무음 잇기·
+    필러 경계 넓히기·컷 합치기가 경계를 넘지 않고, 경계에 붙은 무음은 여유 없이 컷). 설정·자동 무음 기준은 그 조각 파일의 것.
+    소리 없는 조각은 판정하지 않는다. → (다듬기 전 컷, 다듬은 컷, 건너뜀, 필러 컷 수). 시간은 이어 붙인 시간.
+    조각 사이에선 컷을 합치지 않는다 (경계에서 맞닿은 컷은 keep_segments 가 그대로 이어 준다)."""
+    raw, cuts, skipped, n = [], [], [], 0
+    f = float(fps)
     for sp, p in zip(sq.spans, sq.tr["pieces"]):
         fa = sq.analyses[sp.piece.fkey]
         if fa.asr_wav is None:
@@ -2363,15 +2367,21 @@ def judge_sequence(sq: SequenceAnalysis, args: argparse.Namespace, fps: Fraction
         # --silence-level 의 자동 무음 기준은 파일 전체로 잰다 (단독 모드와 같은 값 — 짧은 조각으로 재면 달라진다)
         stats = (auto_silence_stats(fa.tr, fa.rms, fa.hop) if args.silence_level and fa.sil_base.get("silence_auto")
                  else None)
-        c, sk, nf = judge_cuts(ptr, sq.rms[round(t0 / sq.hop):round(p["end"] / sq.hop)], sq.hop, p["end"] - t0,
-                               fa.cfg, fa.sil_base, args, stats)
+        prms = sq.rms[round(t0 / sq.hop):round(p["end"] / sq.hop)]
+        c, sk, nf = judge_cuts(ptr, prms, sq.hop, p["end"] - t0, fa.cfg, fa.sil_base, args, stats)
+        # 다듬기(조용한 곳까지 넓히기·프레임 격자·합치기)도 조각 안에서: 조각 프레임 0 = 이어 붙인 프레임 start_f
+        for x in refine_cuts(c, prms, sq.hop, fps, sp.f_out - sp.f_in, fa.cfg):
+            x.start_frame += sp.start_f
+            x.end_frame += sp.start_f
+            x.start, x.end = x.start_frame / f, x.end_frame / f
+            cuts.append(x)
         for x in c:
             x.start += t0
             x.end += t0
         raw += c
         skipped += [{**x, "start": x["start"] + t0, "end": x["end"] + t0} for x in sk]
         n += nf
-    return raw, skipped, n
+    return raw, cuts, skipped, n
 
 
 def sequence_render_audio(args: argparse.Namespace, sq: SequenceAnalysis, work: Path,
@@ -2487,9 +2497,9 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
                  "silence": args.silence if level is None else f"level:{level}"}
         if sq is None:
             raw_cuts, skipped, n_fillers = judge_cuts(tr, rms, hop, info["duration"], cfg, sil_base, args, "auto")
+            cuts = refine_cuts(raw_cuts, rms, hop, fps, total_frames, cfg)
         else:
-            raw_cuts, skipped, n_fillers = judge_sequence(sq, args, fps)
-        cuts = refine_cuts(raw_cuts, rms, hop, fps, total_frames, cfg)
+            raw_cuts, cuts, skipped, n_fillers = judge_sequence(sq, args, fps)
         cuts_path.write_text(json.dumps(
             {"source": str(src), "fps": f"{fps.numerator}/{fps.denominator}", **modes,
              "transcript_sha1": transcript_sha1(tr),

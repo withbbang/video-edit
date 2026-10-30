@@ -219,3 +219,27 @@ def test_sequence_render_not_yet(seq_env):
     with pytest.raises(SystemExit) as e:
         pipeline.main()
     assert "--sequence 렌더" in str(e.value.code) and seq_env.calls == []   # 임시: 렌더는 다음 단계에서
+
+
+@needs_ffmpeg
+def test_filler_edge_does_not_cross_piece_boundary(seq_env):
+    """A 의 필러 "음"(1.0~1.3) 끝에서 0.07초 뒤에 B 를 넣는다. B 는 작은 소리로 시작해 (A 의 소리보다 조용)
+    이어 붙인 에너지로 경계를 넓히면 B 쪽으로 넘어간다 — 조각마다 다듬어야 넘지 않는다."""
+    b = seq_env.tmp / "b2.mov"
+    _media(b, 2, r"0.07*between(t\,0\,0.1)+between(t\,0.1\,1.5)")
+    split = 41   # 1.3667초 (프레임)
+    seq_env.sq.write_text(json.dumps([
+        {"id": "a1", "clip": "A", "src": str(seq_env.a), "in": 0, "out": split / FPS},
+        {"id": "b1", "clip": "B", "src": str(b), "in": 0, "out": 2},
+        {"id": "a2", "clip": "A", "src": str(seq_env.a), "in": split / FPS, "out": 5}]), encoding="utf-8")
+    old = list(B_WORDS)
+    B_WORDS[:] = [("비디오", 0.0, 1.5)]
+    try:
+        data = seq_env.run(seq_env.a, seq_env.tmp / "out", "--sequence", seq_env.sq)
+    finally:
+        B_WORDS[:] = old
+    edges = (split, split + 2 * FPS)
+    assert any("filler" in c["reason"] for c in data["cuts"])
+    for c in data["cuts"]:
+        for f in edges:
+            assert not (c["start_frame"] < f < c["end_frame"]), c   # 어떤 컷도 조각 경계를 가로지르지 않는다
