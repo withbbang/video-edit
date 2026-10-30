@@ -1724,37 +1724,123 @@ def overlay_filter(ovs: list[dict], keeps: list[tuple[int, int]], fps: Fraction,
     return ";".join(parts)[:-len(prev)] + "[vo]", inputs
 
 
+def is_hdr(info: dict) -> bool:
+    """10비트이거나 bt2020/HLG/PQ 표시가 붙은 영상 (이어 붙일 때 색을 A 쪽으로 바꿀지 가린다)"""
+    c = info.get("color") or {}
+    return bool(info.get("high_bit") or c.get("color_primaries") == "bt2020"
+                or c.get("color_transfer") in ("arib-std-b67", "smpte2084"))
+
+
+# zscale 에 그대로 넘겨도 되는 ffprobe 색 이름 (그 밖의 값·빈 값은 SDR/HDR 기본값으로)
+_ZSCALE_NAMES = {"p": {"bt709", "bt2020", "smpte170m", "bt470bg"},
+                 "t": {"bt709", "arib-std-b67", "smpte2084", "smpte170m", "bt2020-10"},
+                 "m": {"bt709", "bt2020nc", "smpte170m", "bt470bg"}}
+
+
+def color_convert(src_info: dict, dst_info: dict) -> str:
+    """조각(src)의 색을 결과(dst, A) 쪽으로 바꾸는 필터 (뒤에 쉼표, 같은 쪽이면 "").
+    zscale 이 있으면 zscale, 없으면 colorspace. 톤 매핑은 하지 않는다 — 색이 조금 어긋나는 건 받아들인다 (스펙 3.2)."""
+    hdr_in, hdr_out = is_hdr(src_info), is_hdr(dst_info)
+    if hdr_in == hdr_out:
+        return ""
+    if ffmpeg_has("filters", "zscale"):
+        def pick(info, hdr):
+            c = info.get("color") or {}
+            dflt = {"p": "bt2020", "t": "arib-std-b67", "m": "bt2020nc"} if hdr else {"p": "bt709", "t": "bt709",
+                                                                                      "m": "bt709"}
+            vals = {"p": c.get("color_primaries"), "t": c.get("color_transfer"), "m": c.get("color_space")}
+            return {k: vals[k] if vals[k] in _ZSCALE_NAMES[k] else dflt[k] for k in dflt}
+        i, o = pick(src_info, hdr_in), pick(dst_info, hdr_out)
+        return (f"zscale=pin={i['p']}:tin={i['t']}:min={i['m']}:p={o['p']}:t={o['t']}:m={o['m']}"
+                f":r=tv,")
+    # colorspace 는 p010 같은 형식을 못 받아 먼저 평면 4:2:0 으로. HLG/PQ 전달 특성은 모르므로 입력 값을 덮어쓴다
+    if hdr_out:
+        return "format=yuv420p,colorspace=all=bt2020:iall=bt709:format=yuv420p10,"
+    return "format=yuv420p10le,colorspace=all=bt709:iall=bt2020:format=yuv420p,"
+
+
+def sequence_video_filter(spans: list, infos: dict[str, dict], out_info: dict, first_input: int,
+                          W: int, H: int) -> tuple[str, list[str], int]:
+    """--sequence 의 영상: 조각마다 A 의 프레임 격자(fps)로 바꿔 [f_in, f_out) 프레임만 남기고 W×H 에 비율을 지켜
+    줄여 검은 여백을 채운 뒤 이어 붙인 [seq]. (필터 조각, ffmpeg 입력 인자, 다음 입력 번호).
+    같은 파일은 입력 하나를 split 해서 쓴다. 영상 없는 파일의 조각은 검은 화면.
+    영상이 조각보다 짧으면 마지막 프레임을 늘려(tpad) 프레임 수가 이어 붙인 소리와 꼭 맞게 한다."""
+    fps = out_info["fps"]
+    rate = f"{fps.numerator}/{fps.denominator}"
+    pix = out_info.get("pix_fmt") or "yuv420p"
+    order: list[str] = []
+    for sp in spans:
+        k = sp.piece.fkey
+        if infos[k].get("has_video", True) and k not in order:
+            order.append(k)
+    idx = {k: first_input + i for i, k in enumerate(order)}
+    uses = {k: sum(1 for sp in spans if sp.piece.fkey == k) for k in order}
+    src = {}
+    parts = []
+    for k in order:
+        n = idx[k]
+        if uses[k] > 1:
+            labels = [f"[s{n}_{j}]" for j in range(uses[k])]
+            parts.append(f"[{n}:v]split={uses[k]}{''.join(labels)}")
+            src[k] = labels
+        else:
+            src[k] = [f"[{n}:v]"]
+    tail = f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format={pix}"
+    labels = []
+    for i, sp in enumerate(spans):
+        k, nf = sp.piece.fkey, sp.f_out - sp.f_in
+        if not infos[k].get("has_video", True):
+            parts.append(f"color=c=black:s={W}x{H}:r={rate},trim=end_frame={nf},setsar=1,format={pix}[pk{i}]")
+        else:
+            parts.append(f"{src[k].pop(0)}setpts=PTS-STARTPTS,fps={rate},tpad=stop_mode=clone:stop={nf},"
+                         f"trim=start_frame={sp.f_in}:end_frame={sp.f_out},setpts=PTS-STARTPTS,"
+                         f"{color_convert(infos[k], out_info)}{tail}[pk{i}]")
+        labels.append(f"[pk{i}]")
+    # concat 은 시간 기준을 마이크로초로 바꾼다 → 다시 A 의 격자로 (뒤의 select·setpts=N/FRAME_RATE 가 쓰는 값)
+    parts.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0,fps={rate}[seq]")
+    inputs = [x for k in order for x in ("-i", str(next(sp.piece.src for sp in spans if sp.piece.fkey == k)))]
+    return ";".join(parts), inputs, first_input + len(order)
+
+
 def render_video(src: Path, cut_wav: Path, srt: Path | None, out_mp4: Path,
                  keeps: list[tuple[int, int]], info: dict, work: Path, enc_args: list,
-                 burn: tuple[Path, Path | None] | None = None, overlays: list[dict] | None = None) -> None:
+                 burn: tuple[Path, Path | None] | None = None, overlays: list[dict] | None = None,
+                 seq: tuple[str, list[str]] | None = None) -> None:
     """burn = (ASS 파일, 글꼴 폴더): 컷을 적용한 뒤(결과 시간) 자막을 화면에 새긴다.
-    overlays = load_overlays 결과: 컷 뒤 화면에 이미지를 겹친다 (자막 아래)."""
+    overlays = load_overlays 결과: 컷 뒤 화면에 이미지를 겹친다 (자막 아래).
+    seq = sequence_video_filter(…, first_input=0) 의 (필터 조각, 입력 인자): 원본 대신 이어 붙인 [seq] 를 자른다.
+    소리·자막·이미지 입력 번호는 조각 입력 수만큼 뒤로 밀린다."""
     fps = info["fps"]
     f = float(fps)
     terms = [f"between(t,{(sf-0.5)/f:.6f},{(ef-0.5)/f:.6f})" for sf, ef in keeps]
-    # 홀수 해상도는 4:2:0 인코더가 거부(libx264)하거나 조용히 잘라낸다(VideoToolbox) → 짝수로 1px 크롭
-    crop = ",crop=trunc(iw/2)*2:trunc(ih/2)*2" if info["width"] % 2 or info["height"] % 2 else ""
     sub = ""
     if burn:
         sub = f",ass=filename={ffmpeg_filter_path(burn[0])}"
         if burn[1]:
             sub += f":fontsdir={ffmpeg_filter_path(burn[1])}"
-    base = (f"[0:v]setpts=PTS-STARTPTS,fps={fps.numerator}/{fps.denominator},"
-            f"select='{sum_tree(terms)}',setpts=N/FRAME_RATE/TB{crop}")
-    ov_frag, ov_inputs = overlay_filter(overlays or [], keeps, fps, *output_size(info), 3 if srt else 2)
+    if seq:   # 조각은 이미 짝수 크기 W×H 로 맞춰져 있다
+        n_in, v_inputs = len(seq[1]) // 2, seq[1]
+        base = f"{seq[0]};[seq]select='{sum_tree(terms)}',setpts=N/FRAME_RATE/TB"
+    else:
+        n_in, v_inputs = 1, ["-i", src]
+        # 홀수 해상도는 4:2:0 인코더가 거부(libx264)하거나 조용히 잘라낸다(VideoToolbox) → 짝수로 1px 크롭
+        crop = ",crop=trunc(iw/2)*2:trunc(ih/2)*2" if info["width"] % 2 or info["height"] % 2 else ""
+        base = (f"[0:v]setpts=PTS-STARTPTS,fps={fps.numerator}/{fps.denominator},"
+                f"select='{sum_tree(terms)}',setpts=N/FRAME_RATE/TB{crop}")
+    ov_frag, ov_inputs = overlay_filter(overlays or [], keeps, fps, *output_size(info), n_in + (2 if srt else 1))
     script = work / "video_filter.txt"
     script.write_text(f"{base}[vb];{ov_frag};[vo]{sub[1:] or 'null'}[v]" if ov_frag else f"{base}{sub}[v]",
                       encoding="utf-8")
     # ffmpeg 7 부터 파일에서 옵션 값을 읽는 문법이 -/옵션 이고, 9.0 에서 -filter_complex_script 가 제거됐다
     fc = ["-/filter_complex", script] if ffmpeg_major() >= 7 else ["-filter_complex_script", script]
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y",
-           "-i", src, "-i", cut_wav]
+           *v_inputs, "-i", cut_wav]
     if srt:
         cmd += ["-i", srt]
-    cmd += [*ov_inputs, *fc, "-map", "[v]", "-map", "1:a"]
+    cmd += [*ov_inputs, *fc, "-map", "[v]", "-map", f"{n_in}:a"]
     if srt:
         # 끄고 켤 수 있는 자막 트랙(번인 아님). 렌더하면서 같이 넣어 파일을 한 번 더 쓰지 않는다
-        cmd += ["-map", "2:s", "-c:s", "mov_text", "-metadata:s:s:0", "language=kor"]
+        cmd += ["-map", f"{n_in + 1}:s", "-c:s", "mov_text", "-metadata:s:s:0", "language=kor"]
     # 원본 챕터는 컷 전 시간이라 맞지 않는다
     cmd += ["-map_chapters", "-1", *enc_args]
     # -shortest 는 마지막 프레임을 떨어뜨리므로 쓰지 않는다 (오디오/영상 길이는 이미 프레임 격자로 맞춤)
@@ -1850,18 +1936,19 @@ PREVIEW_AUDIO_ARGS = ["-c:a", "aac", "-aac_coder", "fast", "-b:a", "128k", "-map
 
 
 def make_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out_dir: Path, work: Path,
-                 hw: bool, force: bool) -> None:
+                 hw: bool, force: bool, seq: tuple[str, list[str]] | None = None) -> None:
     """앱 플레이어용 미리보기 폴더. 컷을 적용하지 않은 원본 타임라인 그대로라 앱이 컷 구간을 직접 건너뛴다.
     video.mp4(소리 없음, 모든 프레임이 기준 프레임인 조각 영상) + audio_full.m4a(전체 소리) 와 각 index.json·meta.json.
     clean_wav 는 미리보기에 넣을 소리 (기본 clean.wav, --denoise-level 이면 그 세기의 렌더 오디오).
     영상과 소리는 따로 캐시한다 → 배경 잡음 세기만 바꾸면 영상을 다시 인코딩하지 않는다.
-    쓰는 순서: *.part.* → 완성본 → index → meta (meta 가 있으면 한 벌이 다 만들어진 것)."""
+    쓰는 순서: *.part.* → 완성본 → index → meta (meta 가 있으면 한 벌이 다 만들어진 것).
+    seq: 이어 붙이기 모드의 영상 (make_preview_video 참고). 이때 info["duration"] 은 이어 붙인 길이."""
     # 예전 버전이 작업 폴더에 캐시하던 미리보기 (이제 안 쓰는 큰 파일)
     for n in ("preview_video.mp4", "preview_video.part.mp4", "preview_video.meta.json", "preview.meta.json"):
         (work / n).unlink(missing_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     if info["has_video"]:
-        make_preview_video(src, info, out_dir, force)
+        make_preview_video(src, info, out_dir, force, seq)
     else:
         for n in ("video.mp4", "video.index.json", "video.meta.json"):
             (out_dir / n).unlink(missing_ok=True)
@@ -1886,11 +1973,16 @@ def make_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out_di
     meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
 
 
-def make_preview_video(src: Path, info: dict, out_dir: Path, force: bool) -> Path:
+def make_preview_video(src: Path, info: dict, out_dir: Path, force: bool,
+                       seq: tuple[str, list[str]] | None = None) -> Path:
     """미리보기용 소리 없는 영상 (긴 변 960 이하, H.264, 모든 프레임이 기준 프레임인 fMP4). 원본 서명으로 캐시.
-    기준 프레임뿐이라 아무 프레임에서나 디코딩을 시작할 수 있다 (하드웨어 인코더는 -g 1 에서 오히려 느려 쓰지 않음)."""
+    기준 프레임뿐이라 아무 프레임에서나 디코딩을 시작할 수 있다 (하드웨어 인코더는 -g 1 에서 오히려 느려 쓰지 않음).
+    seq = sequence_video_filter(…, first_input=0) 의 (필터 조각, 입력 인자): 이어 붙인 [seq] 를 같은 방식으로 줄인다.
+    조각 필터와 조각 파일 서명을 캐시 키에 넣어 조각이 바뀌면 다시 만든다."""
     video, meta = out_dir / "video.mp4", out_dir / "video.meta.json"
     key = {"v": PREVIEW_VERSION, "src": source_sig(src)}
+    if seq:
+        key["sequence"] = {"filter": seq[0], "files": [source_sig(Path(p)) for p in seq[1][1::2]]}
     if cached_meta(meta, key, [video, video.with_suffix(".index.json")], force):
         log("미리보기 영상 재사용 (소리만 바꿔 끼움)")
         progress("preview", 0.9)
@@ -1900,7 +1992,9 @@ def make_preview_video(src: Path, info: dict, out_dir: Path, force: bool) -> Pat
     # 긴 변 960 이하, 짝수 크기. 회전 메타데이터는 ffmpeg 가 먼저 적용하므로 식으로 계산한다
     vf = ("setpts=PTS-STARTPTS,"
           "scale=w='if(gte(iw,ih),trunc(min(960,iw)/2)*2,-2)':h='if(gte(iw,ih),-2,trunc(min(960,ih)/2)*2)'")
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-map", "0:v:0", "-an", "-vf", vf,
+    v_args = (["-i", src, "-map", "0:v:0", "-vf", vf] if not seq else
+              [*seq[1], "-filter_complex", f"{seq[0]};[seq]{vf}[pv]", "-map", "[pv]"])
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *v_args, "-an",
            "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-g", "1", "-bf", "0", "-pix_fmt", "yuv420p",
            "-map_chapters", "-1", *PREVIEW_MOVFLAGS, tmp]
     try:
@@ -1956,11 +2050,11 @@ def make_cut_preview_audio(p_wav: Path, keeps: list[tuple[int, int]], fps: Fract
 
 
 def try_preview(src: Path, clean_wav: Path, audio_key: dict, info: dict, out_dir: Path, work: Path,
-                hw: bool, force: bool) -> bool:
+                hw: bool, force: bool, seq: tuple[str, list[str]] | None = None) -> bool:
     """--preview 용. 미리보기는 앱 재생기용 덤이라, 못 만들어도 컷 리스트·전사는 쓸 수 있으니 분석을 실패로
     만들지 않는다. 실패하면 (옛 것과 섞이지 않게) 미완성 파일과 결과 파일을 지우고 False."""
     try:
-        make_preview(src, clean_wav, audio_key, info, out_dir, work, hw, force)
+        make_preview(src, clean_wav, audio_key, info, out_dir, work, hw, force, seq)
         return True
     except (subprocess.CalledProcessError, OSError) as e:
         log(f"미리보기를 만들지 못했습니다 (분석 결과는 그대로 씀): {e}")
@@ -2010,7 +2104,8 @@ def render_audio_args(args: argparse.Namespace) -> tuple[str, bool, int | None]:
 
 def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: list[dict],
                  final_dur: float, modes: dict, args: argparse.Namespace, encoder: str,
-                 elapsed: float) -> None:
+                 elapsed: float, pieces: list[dict] | None = None) -> None:
+    """pieces (이어 붙이기 모드): [{name, duration(원래 파일 길이), in, out, start(이어 붙인 시작)}] → "조각" 표"""
     from collections import Counter
     by_word = Counter(normalize(w) for c in cuts for w in c.word.split(" + ") if w not in ("(무음)", UNHEARD))
     removed = sum(c.end - c.start for c in cuts)
@@ -2032,6 +2127,11 @@ def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: li
         out.insert(3, f"- 가변 프레임 원본 → {float(info['fps']):.3f}fps 고정으로 출력")
     for w, n in by_word.most_common():
         out.append(f"- {w}: {n}")
+    if pieces:
+        out += ["", "## 조각", "", "| # | 파일 | 원래 길이 | 쓴 구간 | 이어 붙인 시작 |", "|---|---|---|---|---|"]
+        for i, p in enumerate(pieces, 1):
+            out.append(f"| {i} | {p['name']} | {fmt_clock(p['duration'])} | {fmt_clock(p['in'])}~{fmt_clock(p['out'])} "
+                       f"| {fmt_clock(p['start'])} |")
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
@@ -2385,9 +2485,10 @@ def judge_sequence(sq: SequenceAnalysis, args: argparse.Namespace,
 
 
 def sequence_render_audio(args: argparse.Namespace, sq: SequenceAnalysis, work: Path,
-                          fps: Fraction) -> tuple[Path, dict]:
+                          fps: Fraction, force: bool | None = None) -> tuple[Path, dict]:
     """결과·미리보기 소리 (이어 붙이기 모드의 preview_audio_source). 파일마다 render_audio_for (그 파일 폴더의 render.wav)
-    → 조각 순서대로 이어 work/render.wav. 설정이 분석 오디오와 같으면 이어 붙인 정리 오디오(work/clean.wav)를 그대로 쓴다."""
+    → 조각 순서대로 이어 work/render.wav. 설정이 분석 오디오와 같으면 이어 붙인 정리 오디오(work/clean.wav)를 그대로 쓴다.
+    force: 파일별 렌더 오디오를 다시 만들지 (None 이면 args.force — 렌더는 --preview 가 방금 만든 것을 재사용)."""
     r_denoise, r_loud, r_level = render_audio_args(args)
     if r_level is None and (r_denoise, r_loud) == (args.denoise, not args.no_loudnorm):
         return sq.clean_wav, sq.audio_key
@@ -2401,7 +2502,8 @@ def sequence_render_audio(args: argparse.Namespace, sq: SequenceAnalysis, work: 
             wavs[k], keys[k] = None, fa.audio_key
             continue
         wavs[k], keys[k] = render_audio_for(sp.piece.src, file_work(work, k), fa.info, r_denoise, r_loud,
-                                            args.force, r_level, analysis=(fa.clean_wav, fa.audio_key))
+                                            args.force if force is None else force, r_level,
+                                            analysis=(fa.clean_wav, fa.audio_key))
     out, meta = work / "render.wav", work / "render.meta.json"
     key = json.loads(json.dumps({"sequence": [[s.piece.fkey, s.f_in, s.f_out] for s in sq.spans], "files": keys},
                                 ensure_ascii=False))
@@ -2469,8 +2571,6 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     cut_only = bool(args.preview_cut_audio)   # 잘린 미리보기 소리만: 전사·분석 오디오는 캐시만 쓴다
     sq = None
     if args.sequence:   # 조각 이어 붙이기 (앱의 영상 끼워 넣기): 파일마다 분석해 이어 붙인 시간으로
-        if not (args.review or args.preview_cut_audio):
-            sys.exit("오류: --sequence 렌더는 아직 지원하지 않습니다 (--review 또는 --preview-cut-audio 와 함께 쓰세요)")
         sq = analyze_sequence(args, src, stem, out_dir, work, cfg, fps, cut_only)
         fa = sq.analyses[sq.spans[0].piece.fkey]
         clean_wav, asr_wav, audio_key = sq.clean_wav, sq.asr_wav, sq.audio_key
@@ -2521,11 +2621,13 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         log(f"미리보기 소리: {args.preview_cut_audio.name} ({len(keeps)}구간, {idx['duration']:.1f}초)")
         progress("preview", 1.0)
         return
-    if args.preview and sq:
-        log("--sequence: 미리보기는 아직 만들지 않습니다")   # 이어 붙인 미리보기 영상은 다음 단계
-    elif args.preview:
-        p_wav, p_key = preview_audio_source(args, src, work, info, clean_wav, audio_key)
-        try_preview(src, p_wav, p_key, info, args.preview.resolve(), work, args.hw == "on", args.force)
+    # 이어 붙이기 모드의 영상 (조각마다 A 에 맞춰 trim·scale·pad·fps → concat). 입력 번호 0 부터
+    seq_v = (sequence_video_filter(sq.spans, {k: a.info for k, a in sq.analyses.items()}, info, 0,
+                                   *output_size(info))[:2] if sq and info["has_video"] else None)
+    if args.preview:
+        p_wav, p_key = (sequence_render_audio(args, sq, work, fps) if sq else
+                        preview_audio_source(args, src, work, info, clean_wav, audio_key))
+        try_preview(src, p_wav, p_key, info, args.preview.resolve(), work, args.hw == "on", args.force, seq_v)
     if args.review:
         log(f"--review: 검토표 {out_dir / (stem + '.review.md')} 를 확인한 뒤 "
             f"--apply-cuts {cuts_path} 로 렌더하세요")
@@ -2567,7 +2669,9 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     # 5) 렌더
     render_wav = clean_wav
     r_denoise, r_loud, r_level = render_audio_args(args)
-    if r_level is not None:
+    if sq:   # 파일마다 렌더 설정으로 정리해 이어 붙인 소리 (설정이 분석과 같으면 이어 붙인 clean.wav)
+        render_wav, _ = sequence_render_audio(args, sq, work, fps, force=args.force and not args.preview)
+    elif r_level is not None:
         # --preview 가 이번 실행에서 같은 설정으로 이미 (--force 면 새로) 만들었으면 그대로 쓴다
         render_wav, _ = render_audio_for(src, work, info, r_denoise, r_loud, args.force and not args.preview,
                                          r_level, analysis=(clean_wav, audio_key))
@@ -2583,14 +2687,14 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         encoder, enc_args = video_encoder_args(info, args.hw == "on", encoders, args.crf,
                                                args.vbitrate, args.preset, args.vbitrate_scale)
         try:
-            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args, burn, ovs)
+            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args, burn, ovs, seq_v)
         except subprocess.CalledProcessError:
             if "videotoolbox" not in encoder:
                 raise
             log(f"{encoder} 인코딩 실패 → 소프트웨어 인코더로 다시 렌더합니다")
             encoder, enc_args = video_encoder_args(info, False, encoders, args.crf,
                                                    args.vbitrate, args.preset, args.vbitrate_scale)
-            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args, burn, ovs)
+            render_video(src, cut_wav, embed, out_media, keeps, info, work, enc_args, burn, ovs, seq_v)
         if embed:
             log("자막 트랙을 영상에 넣음 (번인 아님, 플레이어에서 켜고 끄기)")
         if burn:
@@ -2605,8 +2709,11 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         else:
             run(cmd)
 
+    pieces = ([{"name": sp.piece.src.name, "duration": sq.analyses[sp.piece.fkey].info["duration"],
+                "in": float(sp.f_in / fps), "out": float(sp.f_out / fps), "start": p["start"]}
+               for sp, p in zip(sq.spans, sq.tr["pieces"])] if sq else None)
     write_report(out_dir / f"{stem}.report.md", src, info, cuts, skipped, final_dur, modes, args,
-                 encoder, time.time() - t_start)
+                 encoder, time.time() - t_start, pieces)
     log("완료")
     log(f"  영상: {out_media}")
     log(f"  자막: {srt_path}")

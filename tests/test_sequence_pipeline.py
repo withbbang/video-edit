@@ -213,15 +213,6 @@ def test_silent_b_is_not_judged(seq_env):
 
 
 @needs_ffmpeg
-def test_sequence_render_not_yet(seq_env):
-    seq_env.mp.setattr(sys, "argv", ["pipeline.py", str(seq_env.a), "--denoise", "none", "--out", str(seq_env.tmp / "o"),
-                                     "--work-root", str(seq_env.tmp / "work"), "--sequence", str(seq_env.sq)])
-    with pytest.raises(SystemExit) as e:
-        pipeline.main()
-    assert "--sequence 렌더" in str(e.value.code) and seq_env.calls == []   # 임시: 렌더는 다음 단계에서
-
-
-@needs_ffmpeg
 def test_filler_edge_does_not_cross_piece_boundary(seq_env):
     """A 의 필러 "음"(1.0~1.3) 끝에서 0.07초 뒤에 B 를 넣는다. B 는 작은 소리로 시작해 (A 의 소리보다 조용)
     이어 붙인 에너지로 경계를 넓히면 B 쪽으로 넘어간다 — 조각마다 다듬어야 넘지 않는다."""
