@@ -99,7 +99,7 @@ def test_extract_place_roundtrip():
     assert s["range_ops"] == [{"op": "cut", "start": 5, "end": 5.5}, {"op": "cut", "start": 5.2, "end": 5.4},
                               {"op": "restore", "start": 6.5, "end": 7}]
     assert s["restored"] == [[5.5, 6], [6, 7]]
-    assert [(o["start"], o["end"]) for o in s["overlays"]] == [(5.5, 6), (6, 6.5)]
+    assert [(o["start"], o["end"]) for o in s["overlays"]] == [(5.5, 6.5)]
     assert s["word_edits"] == {"B|3|1": "x"} and s["word_styles"] == {"B|3|1": [None]}
     assert s["line_times"] == {"B|3|0": [5.1, 5.9]}
     p = S.place_clip(s, [(10, 11, 5), (12, 13, 6)])
@@ -109,3 +109,27 @@ def test_extract_place_roundtrip():
     assert p["word_edits"] == {"B|3|1": "x"}
     # 겹치는 두 조각에 걸친 이미지는 둘로 나뉨
     assert [(o["start"], o["end"]) for o in p["overlays"]] == [(10.5, 11), (12, 12.5)]
+    assert p["overlays"][0]["id"] == "o" and p["overlays"][1]["id"] not in ("o", None)
+    # 같은 id 로 이어지는 조각은 extract 에서 하나로 합쳐진다
+    again = S.extract_clip(E(overlays=[{**p["overlays"][0]}, {**p["overlays"][1], "id": "o"}]),
+                           {}, [(10, 11, 5), (12, 13, 6)], "B")
+    assert [(o["start"], o["end"]) for o in again["overlays"]] == [(5.5, 6.5)]
+
+
+def test_insert_line_crossing_is_clamped():
+    r = S.shift_for_insert(E(line_times={"3:0": [2, 5]}), 3, 2)
+    assert r["line_times"] == {"3:0": [2, 3]}
+
+
+def test_to_stable_default_fkey_roundtrip():
+    plain = {"segments": [{"id": 0, "words": [{}, {}]}, {"id": 1, "words": [{}]}]}
+    keys = {"0:1": "x", "1:0": "y"}
+    assert S.to_stable(keys, plain) == {}
+    st = S.to_stable(keys, plain, "A")
+    assert st == {"A|0|1": "x", "A|1|0": "y"}
+    comb = {"segments": [
+        {"id": 0, "src": {"fkey": "A", "sid": 0, "w0": 0}, "words": [{}, {}]},
+        {"id": 1, "src": {"fkey": "B", "sid": 0, "w0": 0}, "words": [{}]},
+        {"id": 2, "src": {"fkey": "A", "sid": 1, "w0": 0}, "words": [{}]},
+    ]}
+    assert S.from_stable(st, comb) == {"0:1": "x", "2:0": "y"}

@@ -81,8 +81,8 @@ def shift_for_insert(e: dict, at: float, d: float) -> dict:
     for k, (s, t) in list(r["line_times"].items()):
         if s >= at - EPS:
             r["line_times"][k] = [s + d, t + d]
-        elif t > at + EPS:
-            r["line_times"][k] = [s, t + d]
+        elif t > at + EPS:  # 줄은 조각 경계를 넘지 않는다: 가운데 넣으면 키가 가리키는 앞 절반만 남긴다
+            r["line_times"][k] = [float(s), float(at)]
     return r
 
 
@@ -140,15 +140,24 @@ def shift_for_remove(e: dict, spans: list) -> dict:
 
 # ---- 자막 키 ----------------------------------------------------------------
 
-def to_stable(keys: dict, tr: dict) -> dict:
-    """"seg:i" → "fkey|sid|w0+i" (전사가 바뀌어도 변하지 않는 키). 전사에 없는 키는 버린다."""
+def to_stable(keys: dict, tr: dict, default_fkey: str = None) -> dict:
+    """"seg:i" → "fkey|sid|w0+i" (전사가 바뀌어도 변하지 않는 키). 전사에 없는 키는 버린다.
+
+    src 가 없는 세그먼트(첫 끼워 넣기 전의 한 파일 전사)는 default_fkey 가 있으면 "default_fkey|세그먼트 id|i" 로 옮긴다
+    (sid = 세그먼트 id, w0 = 0). default_fkey 가 None 이면 버린다.
+    """
     segs = {str(s["id"]): s for s in tr.get("segments", [])}
     out = {}
     for k, v in keys.items():
         seg_id, _, i = str(k).partition(":")
         s = segs.get(seg_id)
-        src = (s or {}).get("src")
-        if not src or not i.isdigit():
+        if s is None or not i.isdigit():
+            continue
+        src = s.get("src")
+        if not src:
+            if default_fkey is None:
+                continue
+            out[f"{default_fkey}|{s['id']}|{int(i)}"] = copy.deepcopy(v)
             continue
         out[f"{src['fkey']}|{src['sid']}|{int(src['w0']) + int(i)}"] = copy.deepcopy(v)
     return out
@@ -210,10 +219,21 @@ def extract_clip(e: dict, stable: dict, clip_spans: list, fkey: str) -> dict:
 
     stable: {word_edits, line_times, word_styles} — 키는 to_stable 을 거친 것. fkey 가 그 파일의 키.
     clip_spans: [(이어 붙인 시작, 끝, 파일 in)].
+    같은 id 로 파일 초에서 이어지는 이미지 조각은 하나로 합친다.
     """
     r = _convert(e, [(cs, ce, fin) for cs, ce, fin in clip_spans])
     # 자막 줄 시간은 stable 키로 바꾼 쪽의 값을 쓴다 (e 의 "seg:i" 키는 전사 없이 못 바꿈)
     lt = _convert({"line_times": stable.get("line_times") or {}}, [(cs, ce, fin) for cs, ce, fin in clip_spans])["line_times"]
+    # 이어 붙인 쪽에서 갈렸던 같은 id 이미지 조각 중 파일 초에서 이어지는 것은 하나로 합친다
+    merged = []
+    for o in sorted(r["overlays"], key=lambda o: o["start"]):
+        for m in merged:
+            if m.get("id") == o.get("id") and abs(m["end"] - o["start"]) <= EPS:
+                m["end"] = o["end"]
+                break
+        else:
+            merged.append(o)
+    r["overlays"] = merged
     pre = f"{fkey}|"
     r["line_times"] = {k: v for k, v in lt.items() if k.startswith(pre)}
     for name in ("word_edits", "word_styles"):
@@ -222,8 +242,16 @@ def extract_clip(e: dict, stable: dict, clip_spans: list, fkey: str) -> dict:
 
 
 def place_clip(saved: dict, clip_spans: list) -> dict:
-    """extract_clip 의 거꾸로: 파일 안 초를 조각마다 이어 붙인 초로. 자막 키는 stable 키 그대로(API 가 from_stable)."""
+    """extract_clip 의 거꾸로: 파일 안 초를 조각마다 이어 붙인 초로. 자막 키는 stable 키 그대로(API 가 from_stable).
+
+    여러 조각에 걸쳐 갈린 이미지는 첫 부분만 원래 id 를 갖고 나머지는 새 id(token_hex(4)).
+    """
     r = _convert(saved, [(fin, fin + (ce - cs), cs) for cs, ce, fin in clip_spans])
+    seen = set()
+    for o in r["overlays"]:
+        if o.get("id") in seen:
+            o["id"] = secrets.token_hex(4)
+        seen.add(o.get("id"))
     for name in ("word_edits", "word_styles"):
         r[name] = copy.deepcopy(saved.get(name) or {})
     return r
