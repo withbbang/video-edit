@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import copy
 import hashlib
 import importlib.util
 import json
@@ -2137,32 +2138,66 @@ def main() -> None:
         process(args, src, stem, out_dir, work, t_start)
 
 
-def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work: Path,
-            t_start: float) -> None:
-    cfg = load_fillers(args.fillers)
-    info = ffprobe(src)
-    fps = info["fps"]
-    log(f"입력: {src.name}  {fmt_clock(info['duration'])}  {info['width']}x{info['height']}  "
-        f"{float(fps):.3f}fps{' (가변)' if info['vfr'] else ''}  "
-        f"{info['sample_rate']}Hz/{info['channels']}ch  {info['pix_fmt']}")
+@dataclass
+class FileAnalysis:
+    """파일 하나의 분석 결과 (오디오 정리 · 전사 · 에너지 · 그 파일의 설정)"""
+    info: dict
+    clean_wav: Path
+    asr_wav: Path
+    audio_key: dict
+    tr: dict
+    rms: list
+    hop: float
+    cfg: dict        # auto_silence 를 적용한 이 파일의 설정 (파일끼리 공유하지 않는다)
+    sil_base: dict   # auto_silence 적용 전 설정 (--silence-level 용)
+    stats: tuple | None  # auto_silence_stats 결과 (자동 무음을 안 썼으면 None)
 
+
+def file_work(work: Path, fkey: str) -> Path:
+    """이어 붙이기 모드에서 원본 파일별 캐시 폴더"""
+    return work / "files" / fkey
+
+
+def adopt_single_cache(work: Path, out_dir: Path, stem: str, fw: Path) -> None:
+    """단독 모드로 만든 캐시(work/audio.meta.json, 키에 "sequence" 없음)를 파일별 폴더 fw 로 복사한다.
+    fw 에 이미 audio.meta.json 이 있으면 손대지 않는다 (처음 끼워 넣을 때 A 를 다시 전사하지 않으려고)"""
+    meta = work / "audio.meta.json"
+    if (fw / "audio.meta.json").exists() or not meta.exists():
+        return
+    try:
+        if "sequence" in json.loads(meta.read_text(encoding="utf-8")):
+            return
+    except (OSError, ValueError, TypeError):
+        return
+    fw.mkdir(parents=True, exist_ok=True)
+    for srcp, name in ((work / "clean.wav", "clean.wav"), (work / "asr.wav", "asr.wav"),
+                       (out_dir / f"{stem}.transcript.json", "transcript.json"), (meta, "audio.meta.json")):
+        if srcp.exists():
+            shutil.copy2(srcp, fw / name)  # audio.meta.json 은 마지막: 있으면 다 복사된 것
+
+
+def analyze_file(src: Path, work: Path, tr_path: Path, args: argparse.Namespace, cfg: dict,
+                 cut_only: bool, info: dict | None = None) -> FileAnalysis:
+    """원본 파일 하나를 분석한다: 오디오 정리 → 전사 → 에너지 → 자동 무음 기준 → 필러 시간 보정.
+    cfg 는 복사해서 쓰고, 자동 무음을 적용한 그 파일의 설정을 돌려준다."""
+    cfg = copy.deepcopy(cfg)
+    if info is None:
+        info = ffprobe(src)
     # 1) 오디오
-    cut_only = bool(args.preview_cut_audio)   # 잘린 미리보기 소리만: 전사·분석 오디오는 캐시만 쓴다
     clean_wav, asr_wav, audio_key = prepare_audio(src, work, info, args.denoise,
                                                   not args.no_loudnorm, args.force, cut_only)
     if info["duration"] <= 0:  # 길이 정보가 없는 컨테이너(일부 webm 등)
         info["duration"] = wav_duration(clean_wav)
-    total_frames = int(round(info["duration"] * float(fps)))
 
     # 2) 전사
-    tr_path = out_dir / f"{stem}.transcript.json"
     tr = transcribe(asr_wav, tr_path, audio_key, args.model, args.device, args.compute_type,
                     cfg.get("prompt", ""), args.force, args.work_root / ".whisper_probe.json", cut_only)
     rms, hop = load_rms(asr_wav)
+    stats = auto_silence_stats(tr, rms, hop) if cfg.get("silence_auto") and not args.apply_cuts else None
     sil_base = dict(cfg)  # --silence-level 은 자동 무음 기준 전 설정에서 무음 판정만 따로 한다 (정렬·필러 판정은 그대로)
     if not args.apply_cuts:
         base_db = float(cfg.get("silence_threshold_db", -40))
-        cfg.update(auto_silence(tr, rms, hop, cfg))
+        cfg.update(auto_silence(tr, rms, hop, cfg, stats if stats is not None else "auto"))
         if cfg["silence_threshold_db"] != base_db:
             log(f"무음 기준: 배경 소리 {cfg['silence_noise_floor_db']:.1f}dB → {cfg['silence_threshold_db']:.1f}dB "
                 f"(기본 {base_db:.0f}dB)")
@@ -2181,6 +2216,26 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         tr["align"], tr["align_failed"] = align_key, align_failed
         tr_path.write_text(json.dumps(tr, ensure_ascii=False, indent=1), encoding="utf-8")
     progress("align", 1.0)
+    return FileAnalysis(info, clean_wav, asr_wav, audio_key, tr, rms, hop, cfg, sil_base, stats)
+
+
+def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work: Path,
+            t_start: float) -> None:
+    cfg = load_fillers(args.fillers)
+    info = ffprobe(src)
+    fps = info["fps"]
+    log(f"입력: {src.name}  {fmt_clock(info['duration'])}  {info['width']}x{info['height']}  "
+        f"{float(fps):.3f}fps{' (가변)' if info['vfr'] else ''}  "
+        f"{info['sample_rate']}Hz/{info['channels']}ch  {info['pix_fmt']}")
+
+    # 1) 오디오 · 2) 전사 · 필러 시간 보정 (파일 하나 분석)
+    cut_only = bool(args.preview_cut_audio)   # 잘린 미리보기 소리만: 전사·분석 오디오는 캐시만 쓴다
+    tr_path = out_dir / f"{stem}.transcript.json"
+    fa = analyze_file(src, work, tr_path, args, cfg, cut_only, info)
+    clean_wav, asr_wav, audio_key = fa.clean_wav, fa.asr_wav, fa.audio_key
+    tr, rms, hop = fa.tr, fa.rms, fa.hop
+    cfg, sil_base = fa.cfg, fa.sil_base
+    total_frames = int(round(info["duration"] * float(fps)))
 
     # 3) 컷 리스트
     cuts_path = out_dir / f"{stem}.cuts.json"
