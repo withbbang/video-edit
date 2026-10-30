@@ -63,6 +63,7 @@ datas = [
     (str(ROOT / "fillers.json"), "."),
     (str(ROOT / "models" / "sh.rnnn"), "models"),
     (str(ROOT / "scripts" / "pipeline.py"), "scripts"),
+    (str(ROOT / "scripts" / "sequence.py"), "scripts"),  # pipeline 이 같은 폴더에서 import 한다
     (str(ROOT / "LICENSE"), "."),
     (str(ROOT / "packaging" / "THIRD_PARTY.txt"), "."),
 ]
