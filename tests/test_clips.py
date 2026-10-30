@@ -47,7 +47,7 @@ def setup(tmp_path, monkeypatch, b_dur=2.0, b_video=True, cuts=None):
         p = str(path)
         if p in probes:
             return probes[p]
-        return (b_dur, b_video) if Path(p).read_bytes() == b"bbbb" else None
+        return (b_dur, b_video) if Path(p).read_bytes() in (b"bbbb", b"cccc") else None
     monkeypatch.setattr(api_mod, "probe_media", probe)
     return a, store, q, job, dialogs
 
@@ -220,3 +220,51 @@ def test_probe_media_and_store_clip(tmp_path):
     assert dst.read_bytes() == v.read_bytes() and len(dst.stem) == 16
     mtime = dst.stat().st_mtime_ns
     assert api_mod.store_clip(v, tmp_path / "clips") == dst and dst.stat().st_mtime_ns == mtime
+
+
+def test_same_file_twice_edits_independent(tmp_path, monkeypatch):
+    """같은 파일을 두 번 넣고 두 사본의 어절을 따로 고친 뒤 다른 영상을 또 넣어도 두 수정이 따로 남는다."""
+    a, store, q, job, dialogs = setup(tmp_path, monkeypatch)
+    a.add_clip(job.id, 4.0)                            # A1 B A2
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    a.get_captions(job.id)
+    assert a.set_word(job.id, "1:0", "첫째") is not None   # 세그먼트 1 = 첫 B 사본
+    a.add_clip(job.id, 1.0)                            # A1a B' A1b B A2 (같은 파일)
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    a.get_captions(job.id)
+    assert job.word_edits == {"3:0": "첫째"}           # 세그먼트: 0 A1a, 1 B', 2 A1b, 3 B, 4 A2
+    assert a.set_word(job.id, "1:0", "둘째") is not None
+    c = tmp_path / "c.mp4"
+    c.write_bytes(b"cccc")
+    dialogs.video = str(c)
+    a.add_clip(job.id, 0.0)                            # 맨 앞에 C (전사 없음)
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch)
+    caps = a.get_captions(job.id)["captions"]
+    texts = [w["text"] for cap in caps for w in cap["words"]]
+    assert texts.count("첫째") == 1 and texts.count("둘째") == 1 and "삽입" not in texts
+    assert job.word_edits == {"1:0": "둘째", "3:0": "첫째"}
+
+
+def test_failed_rejudge_can_undo_and_remove(tmp_path, monkeypatch):
+    """넣은 뒤 다시 판정이 실패(FAILED)해도 실행 취소와 빼기는 된다."""
+    a, store, q, job, _ = setup(tmp_path, monkeypatch)
+    a.set_word(job.id, "1:0", "나쁜")
+    a.add_clip(job.id, 4.0)
+    job.status, job.error = Status.FAILED, "B 분석 실패"   # 대기열의 다시 판정이 실패한 상태 (전사는 그대로)
+    assert a.add_clip(job.id, 1.0) is None              # 실패 상태에서 또 넣기는 안 된다
+    q.calls.clear()
+    assert a.undo(job.id) is not None
+    assert job.pieces == [] and job.status == Status.REVIEW and ("rejudge", job.id) in q.calls
+    assert job.word_edits == {"1:0": "나쁜"} and job.stable_edits is None
+
+    a.redo(job.id)
+    job.status = Status.FAILED
+    clip = job.pieces[1]["clip"]
+    q.calls.clear()
+    r = a.remove_clip(job.id, clip)
+    assert r is not None and r["clips"] == [] and ("rejudge", job.id) in q.calls
+    assert job.status == Status.REVIEW and job.error == ""
+    assert [(p["clip"], p["in"], p["out"]) for p in job.pieces] == [("main", 0.0, 10.0)]
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch)
+    a.get_captions(job.id)
+    assert job.word_edits == {"1:0": "나쁜"}

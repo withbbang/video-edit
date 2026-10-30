@@ -234,3 +234,19 @@ def test_filler_edge_does_not_cross_piece_boundary(seq_env):
     for c in data["cuts"]:
         for f in edges:
             assert not (c["start_frame"] < f < c["end_frame"]), c   # 어떤 컷도 조각 경계를 가로지르지 않는다
+
+
+@needs_ffmpeg
+def test_undo_insert_reuses_file_cache(seq_env):
+    """끼워 넣기를 되돌려 단독으로 다시 돌리면 work/files/ 캐시를 되돌려 써 A 를 다시 전사하지 않고 지문도 처음과 같다."""
+    out = seq_env.tmp / "out"
+    first = seq_env.run(seq_env.a, out)
+    sha = pipeline.transcript_sha1(json.loads((out / "a.transcript.json").read_text(encoding="utf-8")))
+    seq_env.run(seq_env.a, out, "--sequence", seq_env.sq)
+    assert seq_env.calls == [5.0, 2.0]
+    again = seq_env.run(seq_env.a, out)
+    assert seq_env.calls == [5.0, 2.0]   # 세 번째엔 전사 없음
+    tr = json.loads((out / "a.transcript.json").read_text(encoding="utf-8"))
+    assert "cache_key" in tr and "sequence_key" not in tr
+    assert pipeline.transcript_sha1(tr) == sha == again["transcript_sha1"]
+    assert _frames(again["cuts"]) == _frames(first["cuts"])

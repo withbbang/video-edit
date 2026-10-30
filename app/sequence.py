@@ -140,38 +140,46 @@ def shift_for_remove(e: dict, spans: list) -> dict:
 
 # ---- 자막 키 ----------------------------------------------------------------
 
-def to_stable(keys: dict, tr: dict, default_fkey: str = None) -> dict:
-    """"seg:i" → "fkey|sid|w0+i" (전사가 바뀌어도 변하지 않는 키). 전사에 없는 키는 버린다.
+def _seg_clips(tr: dict) -> dict:
+    """세그먼트 id → (clip, 파일 세그먼트 id, 첫 어절 번호). 이어 붙인 전사는 tr["pieces"] 의 seg_from/seg_to 로
+    세그먼트가 든 조각의 clip 을 찾는다 (조각 범위 밖 세그먼트는 뺀다). pieces 가 없는 한 파일 전사는 모두 "main"."""
+    segs = tr.get("segments", [])
+    pcs = tr.get("pieces")
+    out = {}
+    if pcs is None:
+        for s in segs:
+            src = s.get("src")
+            out[str(s["id"])] = ("main", src["sid"], int(src["w0"])) if src else ("main", s["id"], 0)
+        return out
+    for p in pcs:
+        for s in segs[int(p["seg_from"]):int(p["seg_to"])]:
+            src = s.get("src") or {"sid": s["id"], "w0": 0}
+            out[str(s["id"])] = (p["clip"], src["sid"], int(src["w0"]))
+    return out
 
-    src 가 없는 세그먼트(첫 끼워 넣기 전의 한 파일 전사)는 default_fkey 가 있으면 "default_fkey|세그먼트 id|i" 로 옮긴다
-    (sid = 세그먼트 id, w0 = 0). default_fkey 가 None 이면 버린다.
-    """
-    segs = {str(s["id"]): s for s in tr.get("segments", [])}
+
+def to_stable(keys: dict, tr: dict) -> dict:
+    """"seg:i" → "clip|sid|w0+i" (전사가 바뀌어도 변하지 않는 키). clip 은 그 세그먼트가 든 조각의 영상 id —
+    같은 파일을 두 번 넣어도 키가 겹치지 않는다. 한 파일 전사(첫 끼워 넣기 전)는 clip "main", sid = 세그먼트 id, w0 = 0.
+    전사에 없는 키는 버린다."""
+    segs = _seg_clips(tr)
     out = {}
     for k, v in keys.items():
         seg_id, _, i = str(k).partition(":")
         s = segs.get(seg_id)
         if s is None or not i.isdigit():
             continue
-        src = s.get("src")
-        if not src:
-            if default_fkey is None:
-                continue
-            out[f"{default_fkey}|{s['id']}|{int(i)}"] = copy.deepcopy(v)
-            continue
-        out[f"{src['fkey']}|{src['sid']}|{int(src['w0']) + int(i)}"] = copy.deepcopy(v)
+        out[f"{s[0]}|{s[1]}|{s[2] + int(i)}"] = copy.deepcopy(v)
     return out
 
 
 def from_stable(keys: dict, tr: dict) -> dict:
     """to_stable 의 거꾸로. 새 전사에 없는 키는 버린다."""
     rev = {}
-    for s in tr.get("segments", []):
-        src = s.get("src")
-        if not src:
-            continue
-        for i in range(len(s.get("words", []))):
-            rev[f"{src['fkey']}|{src['sid']}|{int(src['w0']) + i}"] = f"{s['id']}:{i}"
+    words = {str(s["id"]): len(s.get("words", [])) for s in tr.get("segments", [])}
+    for seg_id, (clip, sid, w0) in _seg_clips(tr).items():
+        for i in range(words.get(seg_id, 0)):
+            rev[f"{clip}|{sid}|{w0 + i}"] = f"{seg_id}:{i}"
     return {rev[k]: copy.deepcopy(v) for k, v in keys.items() if k in rev}
 
 
@@ -214,10 +222,11 @@ def _convert(e: dict, windows: list) -> dict:
     return r
 
 
-def extract_clip(e: dict, stable: dict, clip_spans: list, fkey: str) -> dict:
+def extract_clip(e: dict, stable: dict, clip_spans: list, clip: str) -> dict:
     """보관용: 그 영상 조각들 안의 편집을 파일 안 초로 뽑는다.
 
-    stable: {word_edits, line_times, word_styles} — 키는 to_stable 을 거친 것. fkey 가 그 파일의 키.
+    stable: {word_edits, line_times, word_styles} — 키는 to_stable 을 거친 것. clip 이 그 영상 id 이고,
+    자막 키는 "clip|" 을 떼어 "sid|w" (그 파일 단독 전사 기준)로 저장한다.
     clip_spans: [(이어 붙인 시작, 끝, 파일 in)].
     같은 id 로 파일 초에서 이어지는 이미지 조각은 하나로 합친다.
     """
@@ -234,15 +243,16 @@ def extract_clip(e: dict, stable: dict, clip_spans: list, fkey: str) -> dict:
         else:
             merged.append(o)
     r["overlays"] = merged
-    pre = f"{fkey}|"
-    r["line_times"] = {k: v for k, v in lt.items() if k.startswith(pre)}
+    pre = f"{clip}|"
+    r["line_times"] = {k[len(pre):]: v for k, v in lt.items() if k.startswith(pre)}
     for name in ("word_edits", "word_styles"):
-        r[name] = {k: copy.deepcopy(v) for k, v in (stable.get(name) or {}).items() if k.startswith(pre)}
+        r[name] = {k[len(pre):]: copy.deepcopy(v) for k, v in (stable.get(name) or {}).items() if k.startswith(pre)}
     return r
 
 
-def place_clip(saved: dict, clip_spans: list) -> dict:
-    """extract_clip 의 거꾸로: 파일 안 초를 조각마다 이어 붙인 초로. 자막 키는 stable 키 그대로(API 가 from_stable).
+def place_clip(saved: dict, clip_spans: list, clip: str) -> dict:
+    """extract_clip 의 거꾸로: 파일 안 초를 조각마다 이어 붙인 초로. 자막 키("sid|w")엔 새 영상 id 를 붙여
+    stable 키("clip|sid|w")로 돌려준다 (API 가 from_stable).
 
     여러 조각에 걸쳐 갈린 이미지는 첫 부분만 원래 id 를 갖고 나머지는 새 id(token_hex(4)).
     """
@@ -252,6 +262,7 @@ def place_clip(saved: dict, clip_spans: list) -> dict:
         if o.get("id") in seen:
             o["id"] = secrets.token_hex(4)
         seen.add(o.get("id"))
+    r["line_times"] = {f"{clip}|{k}": v for k, v in r["line_times"].items()}
     for name in ("word_edits", "word_styles"):
-        r[name] = copy.deepcopy(saved.get(name) or {})
+        r[name] = {f"{clip}|{k}": copy.deepcopy(v) for k, v in (saved.get(name) or {}).items()}
     return r

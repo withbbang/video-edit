@@ -70,21 +70,34 @@ TR = {"segments": [
     {"id": 1, "src": {"fkey": "B", "sid": 3, "w0": 0}, "words": [{}, {}]},
     {"id": 2, "src": {"fkey": "B", "sid": 3, "w0": 2}, "words": [{}, {}, {}]},  # C 때문에 갈린 둘째 조각
     {"id": 3, "src": {"fkey": "A", "sid": 1, "w0": 2}, "words": [{}]},
-]}
+], "pieces": [{"id": "a1", "clip": "main", "seg_from": 0, "seg_to": 1}, {"id": "b1", "clip": "cb", "seg_from": 1, "seg_to": 2},
+              {"id": "c1", "clip": "cc", "seg_from": 2, "seg_to": 2}, {"id": "b2", "clip": "cb", "seg_from": 2, "seg_to": 3},
+              {"id": "a2", "clip": "main", "seg_from": 3, "seg_to": 4}]}
 
 
 def test_stable_roundtrip_across_split():
     keys = {"1:1": "x", "2:0": "y", "0:1": "z", "9:0": "none"}
     st = S.to_stable(keys, TR)
-    assert st == {"B|3|1": "x", "B|3|2": "y", "A|0|1": "z"}
+    assert st == {"cb|3|1": "x", "cb|3|2": "y", "main|0|1": "z"}
     new = {"segments": [
         {"id": 0, "src": {"fkey": "B", "sid": 3, "w0": 0}, "words": [{}, {}, {}]},
         {"id": 1, "src": {"fkey": "C", "sid": 0, "w0": 0}, "words": [{}]},
         {"id": 2, "src": {"fkey": "B", "sid": 3, "w0": 3}, "words": [{}, {}]},
-    ]}
-    # 새 전사: B|3|2 는 0번 세그먼트 어절 2, A 키는 사라짐
+    ], "pieces": [{"id": "b1", "clip": "cb", "seg_from": 0, "seg_to": 1}, {"id": "c1", "clip": "cc", "seg_from": 1, "seg_to": 2},
+                  {"id": "b2", "clip": "cb", "seg_from": 2, "seg_to": 3}]}
+    # 새 전사: cb|3|2 는 0번 세그먼트 어절 2, main 키는 사라짐
     assert S.from_stable(st, new) == {"0:1": "x", "0:2": "y"}
     assert S.from_stable(st, TR) == {"1:1": "x", "2:0": "y", "0:1": "z"}
+
+
+def test_stable_same_file_two_clips():
+    """같은 파일을 두 번 넣어도(같은 fkey) 영상 id 가 달라 키가 겹치지 않는다."""
+    tr = {"segments": [{"id": 0, "src": {"fkey": "B", "sid": 0, "w0": 0}, "words": [{}]},
+                       {"id": 1, "src": {"fkey": "B", "sid": 0, "w0": 0}, "words": [{}]}],
+          "pieces": [{"id": "p", "clip": "b1", "seg_from": 0, "seg_to": 1}, {"id": "q", "clip": "b2", "seg_from": 1, "seg_to": 2}]}
+    st = S.to_stable({"0:0": "x", "1:0": "y"}, tr)
+    assert st == {"b1|0|0": "x", "b2|0|0": "y"}
+    assert S.from_stable(st, tr) == {"0:0": "x", "1:0": "y"}
 
 
 def test_extract_place_roundtrip():
@@ -93,26 +106,26 @@ def test_extract_place_roundtrip():
                      {"op": "restore", "start": 4.5, "end": 8}],
           restored=[[2.5, 6]], overlays=[{"id": "o", "start": 2.5, "end": 4.5, "name": "n"}],
           line_times={"1:0": [2.1, 2.9], "0:0": [0.5, 1]})
-    stable = {"word_edits": {"B|3|1": "x", "A|0|1": "z"}, "line_times": {"B|3|0": [2.1, 2.9], "A|0|0": [0.5, 1]},
-              "word_styles": {"B|3|1": [None]}}
-    s = S.extract_clip(e, stable, spans, "B")
+    stable = {"word_edits": {"cb|3|1": "x", "main|0|1": "z"}, "line_times": {"cb|3|0": [2.1, 2.9], "main|0|0": [0.5, 1]},
+              "word_styles": {"cb|3|1": [None]}}
+    s = S.extract_clip(e, stable, spans, "cb")
     assert s["range_ops"] == [{"op": "cut", "start": 5, "end": 5.5}, {"op": "cut", "start": 5.2, "end": 5.4},
                               {"op": "restore", "start": 6.5, "end": 7}]
     assert s["restored"] == [[5.5, 6], [6, 7]]
     assert [(o["start"], o["end"]) for o in s["overlays"]] == [(5.5, 6.5)]
-    assert s["word_edits"] == {"B|3|1": "x"} and s["word_styles"] == {"B|3|1": [None]}
-    assert s["line_times"] == {"B|3|0": [5.1, 5.9]}
-    p = S.place_clip(s, [(10, 11, 5), (12, 13, 6)])
+    assert s["word_edits"] == {"3|1": "x"} and s["word_styles"] == {"3|1": [None]}
+    assert s["line_times"] == {"3|0": [5.1, 5.9]}
+    p = S.place_clip(s, [(10, 11, 5), (12, 13, 6)], "nb")
     assert p["range_ops"][0] == {"op": "cut", "start": 10, "end": 10.5}
     assert p["range_ops"][2] == {"op": "restore", "start": 12.5, "end": 13}
-    assert p["line_times"] == {"B|3|0": [10.1, 10.9]}
-    assert p["word_edits"] == {"B|3|1": "x"}
+    assert p["line_times"] == {"nb|3|0": [10.1, 10.9]}
+    assert p["word_edits"] == {"nb|3|1": "x"} and p["word_styles"] == {"nb|3|1": [None]}
     # 겹치는 두 조각에 걸친 이미지는 둘로 나뉨
     assert [(o["start"], o["end"]) for o in p["overlays"]] == [(10.5, 11), (12, 12.5)]
     assert p["overlays"][0]["id"] == "o" and p["overlays"][1]["id"] not in ("o", None)
     # 같은 id 로 이어지는 조각은 extract 에서 하나로 합쳐진다
     again = S.extract_clip(E(overlays=[{**p["overlays"][0]}, {**p["overlays"][1], "id": "o"}]),
-                           {}, [(10, 11, 5), (12, 13, 6)], "B")
+                           {}, [(10, 11, 5), (12, 13, 6)], "nb")
     assert [(o["start"], o["end"]) for o in again["overlays"]] == [(5.5, 6.5)]
 
 
@@ -121,15 +134,15 @@ def test_insert_line_crossing_is_clamped():
     assert r["line_times"] == {"3:0": [2, 3]}
 
 
-def test_to_stable_default_fkey_roundtrip():
+def test_to_stable_plain_is_main_roundtrip():
     plain = {"segments": [{"id": 0, "words": [{}, {}]}, {"id": 1, "words": [{}]}]}
     keys = {"0:1": "x", "1:0": "y"}
-    assert S.to_stable(keys, plain) == {}
-    st = S.to_stable(keys, plain, "A")
-    assert st == {"A|0|1": "x", "A|1|0": "y"}
+    st = S.to_stable(keys, plain)
+    assert st == {"main|0|1": "x", "main|1|0": "y"}
     comb = {"segments": [
         {"id": 0, "src": {"fkey": "A", "sid": 0, "w0": 0}, "words": [{}, {}]},
         {"id": 1, "src": {"fkey": "B", "sid": 0, "w0": 0}, "words": [{}]},
         {"id": 2, "src": {"fkey": "A", "sid": 1, "w0": 0}, "words": [{}]},
-    ]}
+    ], "pieces": [{"id": "a1", "clip": "main", "seg_from": 0, "seg_to": 1}, {"id": "b", "clip": "cb", "seg_from": 1, "seg_to": 2},
+                  {"id": "a2", "clip": "main", "seg_from": 2, "seg_to": 3}]}
     assert S.from_stable(st, comb) == {"0:1": "x", "2:0": "y"}

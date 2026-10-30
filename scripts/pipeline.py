@@ -360,6 +360,16 @@ def cached_meta(meta: Path, key: dict, outputs: list[Path], force: bool) -> bool
         return False
 
 
+def audio_cache_key(src: Path, info: dict, denoise: str, loudnorm: bool) -> dict:
+    """분석 오디오(clean.wav·asr.wav) 캐시 키. 필터 체인 문자열 자체를 넣어 처리 방식이 바뀌면 캐시도 자동으로 무효가 되게 한다"""
+    af, ac = audio_settings(info, denoise, loudnorm)
+    return {"v": CACHE_VERSION, "src": source_sig(src), "filter": af, "ac": ac}
+
+
+def transcribe_cache_key(audio_key: dict, model_name: str, compute_type: str, prompt: str) -> dict:
+    return {"audio": audio_key, "model": model_name, "compute_type": compute_type, "hotwords": prompt}
+
+
 def prepare_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: bool,
                   force: bool, cached_only: bool = False) -> tuple[Path, Path, dict]:
     """cached_only 면 (--preview-cut-audio) 캐시만 쓴다 — 없거나 맞지 않으면 만들지 않고 멈춘다 (force 무시)."""
@@ -368,8 +378,7 @@ def prepare_audio(src: Path, work: Path, info: dict, denoise: str, loudnorm: boo
     meta = work / "audio.meta.json"
     af, ac = audio_settings(info, denoise, loudnorm)
     offset = info["audio_offset"] if info["has_video"] else 0.0
-    # 필터 체인 문자열 자체를 키에 넣어 처리 방식이 바뀌면 캐시도 자동으로 무효가 되게 한다
-    key = {"v": CACHE_VERSION, "src": source_sig(src), "filter": af, "ac": ac}
+    key = audio_cache_key(src, info, denoise, loudnorm)
 
     if cached_meta(meta, key, [clean, asr], force and not cached_only):
         log("오디오 정리 결과 재사용 (work/ 에 이미 있음)")
@@ -516,7 +525,7 @@ def transcribe(asr_wav: Path, out_json: Path, audio_key: dict, model_name: str, 
                cached_only: bool = False) -> dict:
     """cached_only 면 (--preview-cut-audio) 캐시만 쓴다 — 없거나 키가 다르면 Whisper 를 불러오기 전에 멈추고
     transcript.json 은 건드리지 않는다 (force 무시)."""
-    key = {"audio": audio_key, "model": model_name, "compute_type": compute_type, "hotwords": prompt}
+    key = transcribe_cache_key(audio_key, model_name, compute_type, prompt)
     if out_json.exists() and (cached_only or not force):
         try:
             cached = json.loads(out_json.read_text(encoding="utf-8"))
@@ -2300,6 +2309,42 @@ def adopt_single_cache(work: Path, out_dir: Path, stem: str, fw: Path) -> None:
             shutil.copy2(srcp, fw / name)  # audio.meta.json 은 마지막: 있으면 다 복사된 것
 
 
+def restore_single_cache(src: Path, work: Path, tr_path: Path, info: dict, args: argparse.Namespace,
+                         cfg: dict) -> None:
+    """adopt_single_cache 의 거꾸로: 단독 모드인데 work/·out/ 캐시가 이번 설정과 맞지 않으면(끼워 넣기를 되돌려
+    이어 붙인 결과로 덮여 있을 때) 파일별 폴더 work/files/<fkey>/ 의 캐시가 맞는지 보고 되돌려 쓴다.
+    전사는 필러 시간 보정까지 된 것이라 처음 단독 전사와 지문이 같다."""
+    if args.force or not info.get("has_audio", True):
+        return
+    try:
+        fw = file_work(work, seq.file_key(src))
+    except OSError:
+        return
+    if not (fw / "audio.meta.json").exists():
+        return
+    akey = json.loads(json.dumps(audio_cache_key(src, info, args.denoise, not args.no_loudnorm)))
+    wavs = ("clean.wav", "asr.wav")
+    if (not cached_meta(work / "audio.meta.json", akey, [work / n for n in wavs], False)
+            and cached_meta(fw / "audio.meta.json", akey, [fw / n for n in wavs], False)):
+        log("분석 오디오를 파일별 캐시에서 되돌려 씀 (work/files/)")
+        work.mkdir(parents=True, exist_ok=True)
+        (work / "audio.meta.json").unlink(missing_ok=True)
+        for n in wavs:
+            shutil.copy2(fw / n, work / n)
+        shutil.copy2(fw / "audio.meta.json", work / "audio.meta.json")  # 마지막: 있으면 다 복사된 것
+    tkey = json.loads(json.dumps(transcribe_cache_key(akey, args.model, args.compute_type, cfg.get("prompt", ""))))
+
+    def key_of(p: Path):
+        try:
+            return json.loads(p.read_text(encoding="utf-8")).get("cache_key")
+        except (OSError, ValueError, AttributeError):
+            return None
+    if key_of(tr_path) != tkey and key_of(fw / "transcript.json") == tkey:
+        log("전사를 파일별 캐시에서 되돌려 씀 (work/files/)")
+        tr_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fw / "transcript.json", tr_path)
+
+
 def analyze_file(src: Path, work: Path, tr_path: Path, args: argparse.Namespace, cfg: dict,
                  cut_only: bool, info: dict | None = None) -> FileAnalysis:
     """원본 파일 하나를 분석한다: 오디오 정리 → 전사 → 에너지 → 자동 무음 기준 → 필러 시간 보정.
@@ -2581,6 +2626,7 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         info = {**info, "duration": float(Fraction(total_frames) / fps)}
     else:
         tr_path = out_dir / f"{stem}.transcript.json"
+        restore_single_cache(src, work, tr_path, info, args, cfg)   # 끼워 넣기를 되돌렸으면 다시 전사하지 않게
         fa = analyze_file(src, work, tr_path, args, cfg, cut_only, info)
         clean_wav, asr_wav, audio_key = fa.clean_wav, fa.asr_wav, fa.audio_key
         tr, rms, hop = fa.tr, fa.rms, fa.hop

@@ -485,9 +485,12 @@ class Api:
         return self._step(job_id, forward=True)
 
     def _step(self, job_id: str, forward: bool) -> dict | None:
+        """확인 대기·저장됨에서, 그리고 영상을 넣은 뒤 다시 판정이 실패한 상태(조각이 있는 FAILED)에서도 — 실패한
+        넣기를 되돌릴 수 있게. 실패 상태에서 되돌리면 확인 대기로 돌리고 다시 판정한다."""
         with self._queue.lock:
             job = self._job(job_id)
-            if job is None or job.status not in (Status.REVIEW, Status.SAVED):
+            failed = job is not None and job.status == Status.FAILED and bool(job.pieces)
+            if job is None or (job.status not in (Status.REVIEW, Status.SAVED) and not failed):
                 return None
             undo, redo = self._history.get(job_id, ([], []))
             src, dst = (redo, undo) if forward else (undo, redo)
@@ -496,9 +499,10 @@ class Api:
             dst.append(self._snap(job))
             shape = _piece_key(job.pieces)
             self._put(job, src.pop())
-            rejudge = _piece_key(job.pieces) != shape   # 영상을 넣거나 뺀 것을 되돌리면 이어 붙인 전사를 다시 만든다
-            if job.status == Status.SAVED:
-                job.status = Status.REVIEW
+            # 영상을 넣거나 뺀 것을 되돌리면(또는 실패 상태면) 이어 붙인 전사를 다시 만든다
+            rejudge = failed or _piece_key(job.pieces) != shape
+            if job.status in (Status.SAVED, Status.FAILED):
+                job.status, job.error = Status.REVIEW, ""
             self._store.save()
             view, hist = job_view(job), self._hist(job_id)
         self._push("job", view)
@@ -917,15 +921,15 @@ class Api:
             return False
         return job.edits_sha1 is None or job.edits_sha1 == subtitles.transcript_sha1(tr)
 
-    def _restructure(self, job: Job, before: tuple, pieces: list, e: dict, tr: dict, default_fkey: str | None) -> dict:
-        """넣기·빼기 공통 마무리 (queue.lock 안): 밀거나 당긴 편집 e 와 새 조각 목록을 넣고, 자막 수정 키를
-        stable_edits 로 바꿔 두고, 실행 취소에 쌓는다. → {"clips", "history"}"""
-        job.stable_edits = {k: sequence.to_stable(e[k], tr, default_fkey) for k in STABLE_KEYS}
+    def _restructure(self, job: Job, before: tuple, pieces: list, e: dict, stable: dict) -> dict:
+        """넣기·빼기 공통 마무리 (queue.lock 안): 밀거나 당긴 편집 e 와 새 조각 목록, 자막 수정의 stable 키를 넣고
+        실행 취소에 쌓는다. 실패 상태였으면 확인 대기로 돌린다 (다시 판정하려고). → {"clips", "history"}"""
+        job.stable_edits = stable
         job.pieces = pieces
         job.restored, job.range_ops, job.overlays, job.line_times = e["restored"], e["range_ops"], e["overlays"], e["line_times"]
         self._record(job, before)
-        if job.status == Status.SAVED:
-            job.status = Status.REVIEW
+        if job.status in (Status.SAVED, Status.FAILED):
+            job.status, job.error = Status.REVIEW, ""
         self._store.save()
         return {"clips": self._clip_views(job), "history": self._hist(job.id)}
 
@@ -959,7 +963,6 @@ class Api:
             return None
         try:
             clip_path = store_clip(Path(picked), jd / "clips")
-            fkey = subtitles.pipeline_module().seq.file_key(src)
         except OSError:
             log.exception("영상 복사 실패")
             return None
@@ -979,13 +982,16 @@ class Api:
             e = sequence.shift_for_insert({k: getattr(job, k) for k in sequence.EDIT_KEYS}, t, d)
             new = {"id": secrets.token_hex(4), "clip": secrets.token_hex(4), "src": str(clip_path),
                    "name": Path(picked).stem, "in": 0.0, "out": d}
-            result = self._restructure(job, before, sequence.split_piece(pieces, t, new), e, tr, fkey)
+            stable = {k: sequence.to_stable(e[k], tr) for k in STABLE_KEYS}
+            result = self._restructure(job, before, sequence.split_piece(pieces, t, new), e, stable)
         self._queue.rejudge(job_id)   # 상태 변화는 대기열이 알린다
         return result
 
     def remove_clip(self, job_id: str, clip: str) -> dict | None:
         """넣은 영상(그 조각 모두)을 뺀다. 그 안의 편집은 사라지고 뒤쪽은 당긴다. A("main")는 뺄 수 없다.
-        뺀 자리에서 이어지게 된 같은 파일 조각은 하나로 합친다. 뺀 뒤 다시 판정한다."""
+        뺀 자리에서 이어지게 된 같은 파일 조각은 하나로 합친다. 뺀 뒤 다시 판정한다.
+        넣은 뒤 다시 판정이 실패한 상태(조각이 있는 FAILED)에서도 뺄 수 있다 — 그땐 디스크 전사가 조각 목록과 맞지 않으므로
+        아직 풀지 않은 stable_edits 를 그대로 이어 쓴다 (줄 시간만 당김)."""
         if not isinstance(clip, str) or clip == "main":
             return None
         inputs = self._clip_inputs(job_id)
@@ -994,15 +1000,24 @@ class Api:
         _, _, tr = inputs
         with self._queue.lock:
             job = self._job(job_id)
-            if not self._can_restructure(job, tr):
+            failed = job is not None and job.status == Status.FAILED and bool(job.pieces)
+            if not failed and not self._can_restructure(job, tr):
                 return None
             spans = sequence.clip_spans(job.pieces, clip)
             if not spans:
                 return None
             before = self._snap(job)
-            e = sequence.shift_for_remove({k: getattr(job, k) for k in sequence.EDIT_KEYS}, [(a, b) for a, b, _ in spans])
+            cut = [(a, b) for a, b, _ in spans]
+            e = sequence.shift_for_remove({k: getattr(job, k) for k in sequence.EDIT_KEYS}, cut)
+            if job.stable_edits is not None:   # 실패 상태: 지난 넣기·빼기의 stable 키를 그대로, 줄 시간만 당긴다
+                st = job.stable_edits
+                stable = {"word_edits": copy.deepcopy(st.get("word_edits") or {}),
+                          "word_styles": copy.deepcopy(st.get("word_styles") or {}),
+                          "line_times": sequence.shift_for_remove({"line_times": st.get("line_times") or {}}, cut)["line_times"]}
+            else:
+                stable = {k: sequence.to_stable(e[k], tr) for k in STABLE_KEYS}
             pieces = _merge_pieces([p for p in job.pieces if p.get("clip") != clip])
-            result = self._restructure(job, before, pieces, e, tr, None)
+            result = self._restructure(job, before, pieces, e, stable)
         self._queue.rejudge(job_id)
         return result
 
