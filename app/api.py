@@ -937,24 +937,38 @@ class Api:
         """영상을 골라 이어 붙인 시간 at 에 끼워 넣는다. at 은 결과의 프레임 격자에 맞추고, 잘린 구간 안이면 그 구간 시작으로 당긴다.
         넣은 영상 길이는 프레임 격자로 내린다. 넣은 뒤 다시 판정한다. → {"clips", "history"}.
         취소·영상 아님·소리만 있는 파일(넣는 쪽이든 받는 쪽이든)·편집할 수 없는 상태면 None."""
+        inputs = self._insert_inputs(job_id, at)
+        if inputs is None:
+            return None
+        picked = self._dialogs.open_video()
+        if not picked or Path(picked).suffix.lower() not in CLIP_EXTS:
+            return None
+        return self._insert_file(job_id, at, inputs, Path(picked), Path(picked).stem)
+
+    def _insert_inputs(self, job_id: str, at):
+        """넣기 전 확인: at 이 수이고, 넣을 수 있는 상태이며, 받는 쪽이 영상일 때 (작업 폴더, cuts.json, 전사). 아니면 None."""
         if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at):
             return None
         inputs = self._clip_inputs(job_id)
         if inputs is None:
             return None
-        jd, cur, tr = inputs
         with self._queue.lock:
             job = self._job(job_id)
-            if not self._can_restructure(job, tr):
+            if not self._can_restructure(job, inputs[2]):
                 return None
             src = Path(job.src)
         a_probe = probe_media(src)
         if a_probe is None or not a_probe[1]:
             return None
-        picked = self._dialogs.open_video()
-        if not picked or Path(picked).suffix.lower() not in CLIP_EXTS:
-            return None
-        b_probe = probe_media(Path(picked))
+        return inputs
+
+    def _insert_file(self, job_id: str, at: float, inputs, picked: Path, name: str,
+                     preset: dict | None = None) -> dict | None:
+        """add_clip·insert_clip_preset 공통: picked 를 작업 폴더 clips/ 로 복사해 at 에 끼워 넣고 다시 판정한다.
+        preset = {"dir": 보관함 항목 폴더, "stem": A 이름, "edits": 보관한 편집} 이면 분석 캐시를 그 복사본 서명으로 옮겨 오고
+        (전사를 다시 하지 않게) 보관한 편집을 넣은 자리에 합친다 (이미지 파일도 작업 폴더 overlays/ 로)."""
+        jd, cur, tr = inputs
+        b_probe = probe_media(picked)
         if b_probe is None or not b_probe[1]:
             return None
         fps = subtitles._fps(cur)
@@ -962,16 +976,26 @@ class Api:
         if d <= 0:
             return None
         try:
-            clip_path = store_clip(Path(picked), jd / "clips")
+            clip_path = store_clip(picked, jd / "clips")
         except OSError:
             log.exception("영상 복사 실패")
             return None
+        saved = None
+        if preset is not None:
+            saved = copy.deepcopy(preset.get("edits") or {})
+            try:
+                self._adopt_preset_cache(preset["dir"], jd / "work" / preset["stem"], clip_path)
+                for o in saved.get("overlays") or []:
+                    o["img"] = store_png(preset["dir"] / o["img"], jd / "overlays")
+            except (OSError, KeyError, TypeError):
+                log.exception("보관한 영상의 캐시·이미지 복사 실패")
+                saved["overlays"] = []
         with self._queue.lock:
             job = self._job(job_id)
             if not self._can_restructure(job, tr):
                 return None
             pieces = copy.deepcopy(job.pieces) or [{"id": secrets.token_hex(4), "clip": "main", "src": job.src,
-                                                    "name": src.stem, "in": 0.0, "out": _grid(self._duration(job), fps)}]
+                                                    "name": Path(job.src).stem, "in": 0.0, "out": _grid(self._duration(job), fps)}]
             total = sum(float(p["out"]) - float(p["in"]) for p in pieces)
             t = min(max(_grid(at, fps), 0.0), total)
             for a, b in _union(diff.effective_cuts(cur, job.restored, job.range_ops, tr).get("cuts", [])):
@@ -981,11 +1005,165 @@ class Api:
             before = self._snap(job)
             e = sequence.shift_for_insert({k: getattr(job, k) for k in sequence.EDIT_KEYS}, t, d)
             new = {"id": secrets.token_hex(4), "clip": secrets.token_hex(4), "src": str(clip_path),
-                   "name": Path(picked).stem, "in": 0.0, "out": d}
+                   "name": name, "in": 0.0, "out": d}
             stable = {k: sequence.to_stable(e[k], tr) for k in STABLE_KEYS}
-            result = self._restructure(job, before, sequence.split_piece(pieces, t, new), e, stable)
+            pieces = sequence.split_piece(pieces, t, new)
+            if saved:
+                placed = sequence.place_clip(saved, sequence.clip_spans(pieces, new["clip"]), new["clip"])
+                for o in placed["overlays"]:          # 같은 보관 영상을 두 번 넣어도 이미지 id 가 겹치지 않게
+                    o["id"] = secrets.token_hex(4)
+                for k in ("restored", "range_ops", "overlays"):
+                    e[k] = [*e[k], *placed[k]]
+                for k in STABLE_KEYS:                 # 자막 수정은 stable 키로 — 다시 판정 뒤 새 전사 키로 푼다
+                    stable[k].update(placed[k])
+            result = self._restructure(job, before, pieces, e, stable)
         self._queue.rejudge(job_id)   # 상태 변화는 대기열이 알린다
         return result
+
+    # ---- 영상 보관함 ----------------------------------------------------------
+    # <data_root>/clip_presets/presets.json: [{id, name, file, dur, edits}]. 영상은 <id>/<sha16><ext>,
+    # 분석 캐시는 <id>/files/<fkey>/ (보관함 복사본 서명으로 옮긴 것), edits 는 sequence.extract_clip 결과(파일 안 초),
+    # edits 의 이미지 파일도 <id>/ 에 둔다.
+
+    def _clip_presets_dir(self) -> Path:
+        return self._data_root / "clip_presets"
+
+    def _read_clip_presets(self) -> list[dict]:
+        data = _read_json(self._clip_presets_dir() / "presets.json")
+        return [p for p in data if isinstance(p, dict) and isinstance(p.get("id"), str)
+                and isinstance(p.get("file"), str)] if isinstance(data, list) else []
+
+    def _write_clip_presets(self, items: list[dict]) -> None:
+        d = self._clip_presets_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / "presets.json.tmp"
+        tmp.write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, d / "presets.json")
+
+    @staticmethod
+    def _adopt_preset_cache(pdir: Path, work: Path, clip_path: Path) -> bool:
+        """보관함 항목의 분석 캐시를 작업의 파일별 캐시(work/files/<fkey>/, work = 작업 폴더 work/<A 이름>)로 옮긴다
+        (키는 작업 복사본 서명으로). 작업 쪽에 이미 캐시가 있으면 그대로 둔다 (같은 영상을 또 넣을 때)."""
+        pl = subtitles.pipeline_module()
+        pfile = pdir / clip_path.name
+        if not pfile.is_file():
+            return False
+        dst = pl.file_work(work, pl.seq.file_key(clip_path))
+        if (dst / "audio.meta.json").exists():
+            return False
+        return pl.rebase_file_cache(pdir / "files" / pl.seq.file_key(pfile), dst, clip_path)
+
+    def list_clip_presets(self) -> list[dict]:
+        with self._presets_lock:
+            return self._read_clip_presets()
+
+    def save_clip_preset(self, job_id: str, clip: str, name: str) -> list[dict] | None:
+        """넣은 영상을 그 안의 편집(자막 수정·직접 자르기·되살리기·그 안의 이미지)과 함께 보관함에 저장한다.
+        같은 파일이 이미 보관함에 있으면 그 항목의 편집·이름을 바꾼다. 다른 항목과 같은 이름은 안 된다.
+        분석 캐시가 있으면 보관함 복사본 서명으로 옮겨 같이 둔다. 편집할 수 있는 상태(다시 판정이 끝나고 자막 키를 다 푼 뒤)에서만.
+        → 보관함 목록, 안 되면 None."""
+        name = name.strip() if isinstance(name, str) else ""
+        if not 1 <= len(name) <= PRESET_NAME_MAX or not isinstance(clip, str) or clip == "main":
+            return None
+        inputs = self._clip_inputs(job_id)
+        if inputs is None:
+            return None
+        jd, cur, tr = inputs
+        with self._queue.lock:
+            job = self._job(job_id)
+            if not self._can_restructure(job, tr):
+                return None
+            spans = sequence.clip_spans(job.pieces, clip)
+            if not spans:
+                return None
+            src = Path(next(p["src"] for p in job.pieces if p.get("clip") == clip))
+            e = {k: copy.deepcopy(getattr(job, k)) for k in sequence.EDIT_KEYS}
+            stable = {k: sequence.to_stable(getattr(job, k), tr) for k in STABLE_KEYS}
+            work = jd / "work" / Path(job.src).stem
+        saved = sequence.extract_clip(e, stable, spans, clip)
+        probe = probe_media(src)
+        if probe is None:
+            return None
+        dur = _grid(probe[0], subtitles._fps(cur), down=True)
+        pl = subtitles.pipeline_module()
+        with self._presets_lock:
+            items = self._read_clip_presets()
+            same = next((p for p in items if p["file"] == src.name), None)
+            if any(p is not same and p.get("name") == name for p in items):
+                return None
+            pid = same["id"] if same else secrets.token_hex(4)
+            pdir = self._clip_presets_dir() / pid
+            pfile = pdir / src.name
+            try:
+                if not pfile.is_file():
+                    pdir.mkdir(parents=True, exist_ok=True)
+                    tmp = pdir / (src.name + ".part")
+                    shutil.copy2(src, tmp)   # 수정 시각을 남긴다 (보관함 쪽 파일 키가 바뀌지 않게)
+                    os.replace(tmp, pfile)
+                pl.rebase_file_cache(pl.file_work(work, pl.seq.file_key(src)),
+                                     pdir / "files" / pl.seq.file_key(pfile), pfile)
+            except OSError:
+                log.exception("보관할 영상 복사 실패")
+                return None
+            ovs = []
+            for o in saved["overlays"]:
+                try:
+                    ovs.append({**o, "img": store_png(jd / "overlays" / o["img"], pdir)})
+                except (OSError, KeyError):
+                    log.exception("보관할 영상의 이미지 복사 실패")
+            saved["overlays"] = ovs
+            entry = {"id": pid, "name": name, "file": src.name, "dur": dur, "edits": saved}
+            items = [entry if p is same else p for p in items] if same else [*items, entry]
+            self._write_clip_presets(items)
+            return items
+
+    def rename_clip_preset(self, pid: str, name: str) -> list[dict] | None:
+        """보관한 영상 이름을 바꾼다. 다른 항목과 같은 이름은 안 된다. → 목록, 안 되면 None."""
+        name = name.strip() if isinstance(name, str) else ""
+        if not 1 <= len(name) <= PRESET_NAME_MAX:
+            return None
+        with self._presets_lock:
+            items = self._read_clip_presets()
+            if not any(p["id"] == pid for p in items) or any(p["id"] != pid and p.get("name") == name for p in items):
+                return None
+            items = [{**p, "name": name} if p["id"] == pid else p for p in items]
+            self._write_clip_presets(items)
+            return items
+
+    def delete_clip_preset(self, pid: str) -> list[dict]:
+        """보관한 영상을 지운다 (영상·분석 캐시·이미지가 든 그 항목 폴더째)."""
+        with self._presets_lock:
+            items = self._read_clip_presets()
+            gone = [p for p in items if p["id"] == pid]
+            items = [p for p in items if p["id"] != pid]
+            self._write_clip_presets(items)
+            for p in gone:
+                d = self._clip_presets_dir() / p["id"]
+                if d.parent == self._clip_presets_dir():   # id 가 경로를 벗어나지 않게
+                    shutil.rmtree(d, ignore_errors=True)
+            return items
+
+    def insert_clip_preset(self, job_id: str, pid: str, at: float) -> dict | None:
+        """보관한 영상을 이어 붙인 시간 at 에 끼워 넣는다 (add_clip 과 같은 흐름). 분석 캐시를 작업 폴더로 옮겨 오므로
+        다시 판정 때 전사를 다시 하지 않고, 보관한 편집이 넣은 자리에 따라온다. → {"clips", "history"}, 안 되면 None."""
+        inputs = self._insert_inputs(job_id, at)
+        if inputs is None:
+            return None
+        with self._presets_lock:
+            p = next((copy.deepcopy(p) for p in self._read_clip_presets() if p["id"] == pid), None)
+        if p is None:
+            return None
+        pdir = self._clip_presets_dir() / p["id"]
+        pfile = pdir / p["file"]
+        if pdir.parent != self._clip_presets_dir() or not pfile.is_file():
+            return None
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None:
+                return None
+            stem = Path(job.src).stem
+        return self._insert_file(job_id, at, inputs, pfile, str(p.get("name") or pfile.stem),
+                                 {"dir": pdir, "stem": stem, "edits": p.get("edits")})
 
     def remove_clip(self, job_id: str, clip: str) -> dict | None:
         """넣은 영상(그 조각 모두)을 뺀다. 그 안의 편집은 사라지고 뒤쪽은 당긴다. A("main")는 뺄 수 없다.

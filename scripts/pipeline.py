@@ -2291,6 +2291,40 @@ def file_work(work: Path, fkey: str) -> Path:
     return work / "files" / fkey
 
 
+def rebase_file_cache(src_dir: Path, dst_dir: Path, new_src: Path) -> bool:
+    """파일별 분석 캐시(clean.wav·asr.wav·transcript.json·audio.meta.json)를 dst_dir 로 복사하면서 키에 든 원본 서명
+    ("src": 경로·크기·수정 시각)을 new_src 의 것으로 바꾼다 — 같은 내용의 복사본(영상 보관함)이 캐시를 그대로 쓰게.
+    audio.meta.json 은 마지막에 쓴다 (있으면 다 복사된 것). src_dir 에 오디오 캐시가 없으면 아무것도 안 하고 False."""
+    meta = src_dir / "audio.meta.json"
+    if not all((src_dir / n).is_file() for n in ("clean.wav", "asr.wav", "audio.meta.json")):
+        return False
+    try:
+        key = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(key, dict):
+        return False
+    sig = source_sig(new_src)
+    key["src"] = sig
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    (dst_dir / "audio.meta.json").unlink(missing_ok=True)
+    for n in ("clean.wav", "asr.wav"):
+        shutil.copy2(src_dir / n, dst_dir / n)
+    tr_src, tr_dst = src_dir / "transcript.json", dst_dir / "transcript.json"
+    tr_dst.unlink(missing_ok=True)
+    if tr_src.is_file():
+        try:
+            tr = json.loads(tr_src.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            tr = None
+        ck = tr.get("cache_key") if isinstance(tr, dict) else None
+        if isinstance(ck, dict) and isinstance(ck.get("audio"), dict):
+            ck["audio"]["src"] = sig
+            tr_dst.write_text(json.dumps(tr, ensure_ascii=False, indent=1), encoding="utf-8")
+    (dst_dir / "audio.meta.json").write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
+    return True
+
+
 def adopt_single_cache(work: Path, out_dir: Path, stem: str, fw: Path) -> None:
     """단독 모드로 만든 캐시(work/audio.meta.json, 키에 "sequence" 없음)를 파일별 폴더 fw 로 복사한다.
     fw 에 이미 audio.meta.json 이 있으면 손대지 않는다 (처음 끼워 넣을 때 A 를 다시 전사하지 않으려고)"""

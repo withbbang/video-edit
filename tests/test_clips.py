@@ -268,3 +268,134 @@ def test_failed_rejudge_can_undo_and_remove(tmp_path, monkeypatch):
     run_fake_analyze(job, store, a, q, tmp_path, monkeypatch)
     a.get_captions(job.id)
     assert job.word_edits == {"1:0": "나쁜"}
+
+
+# ---- 영상 보관함 -------------------------------------------------------------
+
+def _second_job(tmp_path, a, store, monkeypatch, name="z.mp4"):
+    """같은 Api 에 다른 영상 작업 하나 더 (10초, 영상 있음)."""
+    job = add_job(tmp_path, a, store, name=name, status=Status.REVIEW)
+    job.summary = {"orig_sec": 10.0}
+    stem = Path(name).stem
+    write_out(job, f"{stem}.cuts.json", {"fps": "30/1", "cuts": []})
+    write_out(job, f"{stem}.transcript.json", TR_A)
+    Path(job.src + ".fake_tr.json").write_text(__import__("json").dumps(TR_A), encoding="utf-8")
+    old = api_mod.probe_media
+    monkeypatch.setattr(api_mod, "probe_media", lambda p: (10.0, True) if str(p) == job.src else old(p))
+    return job
+
+
+def test_preset_insert_brings_edits(tmp_path, monkeypatch):
+    a, store, q, job, _ = setup(tmp_path, monkeypatch)
+    a.add_clip(job.id, 4.0)                            # A1 B(4~6) A2
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    a.get_captions(job.id)
+    assert a.set_word(job.id, "1:0", "인사") is not None   # 세그먼트 1 = B
+    assert a.add_range_op(job.id, "cut", 4.2, 4.5) is not None
+    png = paths.job_dir(Path(job.src)) / "overlays" / "0123456789abcdef.png"
+    png.parent.mkdir(parents=True, exist_ok=True)
+    png.write_bytes(api_mod.PNG_SIG + b"logo")
+    job.overlays = [{"id": "o1", "img": png.name, "name": "로고", "start": 3.0, "end": 5.0, "x": 0, "y": 0, "w": 0.2}]
+    clip = job.pieces[1]["clip"]
+    items = a.save_clip_preset(job.id, clip, "  인트로 ")
+    assert items is not None and len(items) == 1
+    p = items[0]
+    assert p["name"] == "인트로" and p["dur"] == 2.0 and p["file"].endswith(".mov")
+    pdir = tmp_path / "data" / "clip_presets" / p["id"]
+    assert (pdir / p["file"]).read_bytes() == b"bbbb"
+    ed = p["edits"]
+    assert ed["word_edits"] == {"0|0": "인사"}
+    assert [(o["op"], o["start"], o["end"]) for o in ed["range_ops"]] == [("cut", pytest.approx(0.2), pytest.approx(0.5))]
+    assert [(o["start"], o["end"]) for o in ed["overlays"]] == [(0.0, 1.0)]     # B 안쪽 부분만
+    assert (pdir / ed["overlays"][0]["img"]).read_bytes() == api_mod.PNG_SIG + b"logo"
+    assert a.list_clip_presets() == items
+
+    # 같은 파일을 다시 보관하면 그 항목을 고친다
+    a.add_range_op(job.id, "cut", 5.0, 5.5)
+    again = a.save_clip_preset(job.id, clip, "인사말")
+    assert len(again) == 1 and again[0]["id"] == p["id"] and again[0]["name"] == "인사말"
+    assert len(again[0]["edits"]["range_ops"]) == 2
+
+    # 다른 영상에 넣으면 편집이 따라온다 (이미지 파일도 그 작업 폴더로)
+    job2 = _second_job(tmp_path, a, store, monkeypatch)
+    r = a.insert_clip_preset(job2.id, p["id"], 6.0)
+    assert r is not None and ("rejudge", job2.id) in q.calls
+    assert r["clips"] == [{"clip": job2.pieces[1]["clip"], "name": "인사말", "start": 6.0, "end": 8.0, "dur": 2.0}]
+    b = job2.pieces[1]
+    assert Path(b["src"]).parent == paths.job_dir(Path(job2.src)) / "clips" and Path(b["src"]).read_bytes() == b"bbbb"
+    assert [(o["op"], o["start"], o["end"]) for o in job2.range_ops] == [
+        ("cut", pytest.approx(6.2), pytest.approx(6.5)), ("cut", pytest.approx(7.0), pytest.approx(7.5))]
+    assert [(o["start"], o["end"]) for o in job2.overlays] == [(6.0, 7.0)]
+    assert (paths.job_dir(Path(job2.src)) / "overlays" / job2.overlays[0]["img"]).is_file()
+    run_fake_analyze(job2, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    caps = a.get_captions(job2.id)
+    assert job2.word_edits == {"2:0": "인사"}          # 세그먼트: 0·1 A1, 2 B
+    assert "인사" in {w["text"] for c in caps["captions"] for w in c["words"]}
+    a.undo(job2.id)                                    # 넣기 한 번에 되돌린다
+    assert job2.pieces == [] and job2.range_ops == [] and job2.overlays == []
+
+
+def test_preset_insert_skips_transcribe(tmp_path, monkeypatch):
+    """보관함의 분석 캐시는 넣는 작업의 복사본 서명으로 옮겨져 파이프라인이 전사를 다시 하지 않는다."""
+    import json
+    pl = api_mod.subtitles.pipeline_module()
+    a, store, q, job, _ = setup(tmp_path, monkeypatch)
+    a.add_clip(job.id, 4.0)
+    bsrc = Path(job.pieces[1]["src"])
+    fw = pl.file_work(paths.job_dir(Path(job.src)) / "work" / "a", pl.seq.file_key(bsrc))
+    fw.mkdir(parents=True)
+    akey = {"v": pl.CACHE_VERSION, "src": pl.source_sig(bsrc), "filter": "anull", "ac": []}
+    (fw / "clean.wav").write_bytes(b"c")
+    (fw / "asr.wav").write_bytes(b"a")
+    (fw / "audio.meta.json").write_text(json.dumps(akey), encoding="utf-8")
+    tkey = pl.transcribe_cache_key(akey, "m", "int8", "")
+    (fw / "transcript.json").write_text(json.dumps({**TR_B, "cache_key": tkey}), encoding="utf-8")
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    a.get_captions(job.id)
+    p = a.save_clip_preset(job.id, job.pieces[1]["clip"], "인트로")[0]
+    pfile = tmp_path / "data" / "clip_presets" / p["id"] / p["file"]
+    pfw = pfile.parent / "files" / pl.seq.file_key(pfile)
+    assert json.loads((pfw / "audio.meta.json").read_text(encoding="utf-8"))["src"] == pl.source_sig(pfile)
+
+    job2 = _second_job(tmp_path, a, store, monkeypatch)
+    assert a.insert_clip_preset(job2.id, p["id"], 4.0) is not None
+    copy_ = Path(job2.pieces[1]["src"])
+    fw2 = pl.file_work(paths.job_dir(Path(job2.src)) / "work" / "z", pl.seq.file_key(copy_))
+    want = {**akey, "src": pl.source_sig(copy_)}
+    assert pl.cached_meta(fw2 / "audio.meta.json", want, [fw2 / "clean.wav", fw2 / "asr.wav"], False)
+
+    def no_model(*a_, **k):
+        raise AssertionError("전사를 다시 했다")
+    monkeypatch.setattr(pl, "load_whisper", no_model, raising=False)
+    tr = pl.transcribe(fw2 / "asr.wav", fw2 / "transcript.json", want, "m", "cpu", "int8", "", False,
+                       tmp_path / "probe.json")
+    assert tr["segments"] == TR_B["segments"]
+
+
+def test_preset_rename_duplicate(tmp_path, monkeypatch):
+    a, store, q, job, dialogs = setup(tmp_path, monkeypatch)
+    a.add_clip(job.id, 4.0)
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    a.get_captions(job.id)
+    c = tmp_path / "c.mp4"
+    c.write_bytes(b"cccc")
+    dialogs.video = str(c)
+    a.add_clip(job.id, 0.0)
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch)
+    a.get_captions(job.id)
+    cb, cc = job.pieces[2]["clip"], job.pieces[0]["clip"]
+    a.save_clip_preset(job.id, cb, "인트로")
+    items = a.save_clip_preset(job.id, cc, "아웃트로")
+    assert [i["name"] for i in items] == ["인트로", "아웃트로"]
+    pid = items[1]["id"]
+    assert a.rename_clip_preset(pid, "인트로") is None              # 같은 이름은 안 된다
+    assert a.rename_clip_preset(pid, "가" * 41) is None
+    assert a.rename_clip_preset(pid, "  ") is None
+    assert a.rename_clip_preset("nope", "새 이름") is None
+    assert [i["name"] for i in a.rename_clip_preset(pid, "끝인사")] == ["인트로", "끝인사"]
+    assert a.save_clip_preset(job.id, cb, "끝인사") is None          # 다른 항목과 같은 이름으로 보관도 안 된다
+    assert a.save_clip_preset(job.id, "main", "본편") is None
+    assert a.insert_clip_preset(job.id, "nope", 1.0) is None
+    left = a.delete_clip_preset(pid)
+    assert [i["name"] for i in left] == ["인트로"]
+    assert not (tmp_path / "data" / "clip_presets" / pid).exists()
