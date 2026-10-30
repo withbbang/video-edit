@@ -148,7 +148,12 @@ function clipBands(pieces, v, w, cw) {
   return out;
 }
 
+// 썸네일·소리 줄을 다시 읽을 키: 작업이 같아도 길이나 조각 자리(get_result 의 layout)가 바뀌면 asr.wav·미리보기 영상이 바뀐다
+function tlDataKey(id, r) {
+  return JSON.stringify([id, (r && r.duration) || 0, (r && r.layout) || []]);
+}
+
 const TL = { fitView, clampView, tToX, xToT, zoomAt, followT, playFollow, playSpc, cells, sheetCell, waveMax, spcToSlider, sliderToSpc,
-  ovRect, ovMove, ovResizeEdge, barDrag, lanesDrag, clipBands };
+  ovRect, ovMove, ovResizeEdge, barDrag, lanesDrag, clipBands, tlDataKey };
 if (typeof window !== 'undefined') window.TL = TL;
 if (typeof module !== 'undefined') module.exports = TL;

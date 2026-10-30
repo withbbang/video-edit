@@ -148,6 +148,9 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
         media = media_dir(job)
         shutil.rmtree(media, ignore_errors=True)   # 지난번에 멈춘 저장의 찌꺼기
         media.mkdir(parents=True, exist_ok=True)
+        tr = _read_json(jd / "out" / f"{Path(job.src).stem}.transcript.json")
+        with lock or contextlib.nullcontext():
+            settle_stable(job, tr, store)   # 화면이 아직 자막을 안 읽었어도 옛 전사 키 수정을 쓰지 않게
         cmd, weights = runner.render_command(job, model, device, media, save_cuts(job, lock), save_subs_edits(job, lock),
                                          save_overlays(job, lock), save_sequence(job, lock)), RENDER_WEIGHTS
     else:
@@ -162,6 +165,21 @@ def _silence_min_sec() -> float:
         return v if v > 0 else 0.3
     except Exception:
         return 0.3
+
+
+def settle_stable(job: Job, tr: dict | None, store: Store) -> bool:
+    """넣기·빼기 뒤 다시 판정이 끝났으면(처리 중이 아니고 디스크 전사가 지금 조각 목록 것) stable_edits 를
+    새 전사 키로 풀어 넣고 edits_sha1 을 새 지문(수정이 없으면 None)으로 바꾼다. 풀었으면 True. queue.lock 안에서."""
+    if (job.stable_edits is None or tr is None or job.status == Status.PROCESSING
+            or not _tr_matches_pieces(job.pieces, tr)):
+        return False
+    st = job.stable_edits
+    job.word_edits, job.line_times, job.word_styles = (sequence.from_stable(st.get(k) or {}, tr) for k in STABLE_KEYS)
+    job.stable_edits = None
+    has = job.word_edits or job.line_times or job.word_styles
+    job.edits_sha1 = subtitles.transcript_sha1(tr) if has else None
+    store.save()
+    return True
 
 
 def save_cuts(job: Job, lock=None) -> Path | None:
@@ -317,6 +335,18 @@ def _grid(t: float, fps: Fraction, down: bool = False) -> float:
 def _piece_key(pieces: list) -> list:
     """다시 판정이 필요한 조각 목록의 모양 (이름은 빼고)."""
     return [(p.get("id"), p.get("clip"), str(p.get("src")), float(p.get("in", 0)), float(p.get("out", 0))) for p in pieces]
+
+
+def _layout(tr: dict | None) -> list:
+    """전사가 만들어진 조각 자리 [[id, 시작, 끝], ...] (이어 붙이지 않은 전사면 []). 화면은 이것과 길이가 바뀌면
+    소리 줄·썸네일을 다시 읽는다 (넣기·빼기·실행 취소 뒤 asr.wav 가 바뀐다)."""
+    out = []
+    for p in (tr or {}).get("pieces") or []:
+        try:
+            out.append([p.get("id"), round(float(p["start"]), 6), round(float(p["end"]), 6)])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    return out
 
 
 def _merge_pieces(pieces: list) -> list:
@@ -1048,7 +1078,8 @@ class Api:
         """보관함 항목의 분석 캐시를 작업의 파일별 캐시(work/files/<fkey>/, work = 작업 폴더 work/<A 이름>)로 옮긴다
         (키는 작업 복사본 서명으로). 작업 쪽에 이미 캐시가 있으면 그대로 둔다 (같은 영상을 또 넣을 때)."""
         pl = subtitles.pipeline_module()
-        pfile = pdir / clip_path.name
+        pfile = (pdir / clip_path.name).resolve()   # 파일 키는 파이프라인(load_sequence)처럼 resolve 한 경로로
+        clip_path = clip_path.resolve()
         if not pfile.is_file():
             return False
         dst = pl.file_work(work, pl.seq.file_key(clip_path))
@@ -1103,8 +1134,9 @@ class Api:
                     tmp = pdir / (src.name + ".part")
                     shutil.copy2(src, tmp)   # 수정 시각을 남긴다 (보관함 쪽 파일 키가 바뀌지 않게)
                     os.replace(tmp, pfile)
-                pl.rebase_file_cache(pl.file_work(work, pl.seq.file_key(src)),
-                                     pdir / "files" / pl.seq.file_key(pfile), pfile)
+                rsrc, rpfile = src.resolve(), pfile.resolve()   # 파이프라인(load_sequence)과 같은 파일 키
+                pl.rebase_file_cache(pl.file_work(work, pl.seq.file_key(rsrc)),
+                                     pdir / "files" / pl.seq.file_key(rpfile), rpfile)
             except OSError:
                 log.exception("보관할 영상 복사 실패")
                 return None
@@ -1221,17 +1253,7 @@ class Api:
     # ---- 자막 고치기 ----------------------------------------------------------
 
     def _settle_stable(self, job: Job, tr: dict) -> bool:
-        """넣기·빼기 뒤 다시 판정이 끝났으면(처리 중이 아니고 디스크 전사가 지금 조각 목록 것) stable_edits 를
-        새 전사 키로 풀어 넣고 edits_sha1 을 새 지문(수정이 없으면 None)으로 바꾼다. 풀었으면 True. queue.lock 안에서."""
-        if job.stable_edits is None or job.status == Status.PROCESSING or not _tr_matches_pieces(job.pieces, tr):
-            return False
-        st = job.stable_edits
-        job.word_edits, job.line_times, job.word_styles = (sequence.from_stable(st.get(k) or {}, tr) for k in STABLE_KEYS)
-        job.stable_edits = None
-        has = job.word_edits or job.line_times or job.word_styles
-        job.edits_sha1 = subtitles.transcript_sha1(tr) if has else None
-        self._store.save()
-        return True
+        return settle_stable(job, tr, self._store)
 
     def _drop_stale_edits(self, job: Job, tr: dict) -> bool:
         """고친 자막을 만들 때의 받아쓰기 지문이 지금과 다르면 어절·줄 시간 수정·글자 꾸밈을 버린다 (구간 작업은 시간 기준이라 남김).
@@ -1534,7 +1556,7 @@ class Api:
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "cut_items": items,
                   "range_ops": ops, "history": self._hist(job_id),
                   "duration": duration, "fps": float(subtitles._fps(cur or {})),   # 화면의 프레임 단위 구간 다듬기
-                  "overlays": ov_views}
+                  "overlays": ov_views, "layout": _layout(transcript)}
         result.update(self._preview(snap, status, effective, settings))
         if status in (Status.REVIEW, Status.SAVED):
             self._request_thumbs(snap, duration)
@@ -1562,7 +1584,7 @@ class Api:
         cut_audio = cut_index = None
         pending = False
         if cuts is not None:
-            key = preview.cut_key(cuts.get("cuts", []), job.options)
+            key = preview.cut_key(cuts.get("cuts", []), job.options, _piece_key(job.pieces) if job.pieces else None)
             target = pdir / f"audio_cut.{key}.m4a"
             if status in (Status.REVIEW, Status.SAVED):
                 stem = Path(job.src).stem

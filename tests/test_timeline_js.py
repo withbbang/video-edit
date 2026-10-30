@@ -181,3 +181,15 @@ def test_clip_bands():
     assert out == [{"clip": "b", "x0": 200, "x1": 350}, {"clip": "c", "x0": 800, "x1": 1000},
                    {"clip": "e", "x0": 0, "x1": 100}]
     assert run(f"out = T.clipBands([], {v}, 1000, 100);") == []
+
+
+def test_tl_data_key():
+    """썸네일·소리 줄을 다시 읽을지: 같은 작업이라도 길이나 조각 자리(넣기·빼기·실행 취소)가 바뀌면 키가 달라진다."""
+    base = '{duration: 10, layout: []}'
+    k = run(f'out = [T.tlDataKey("j", {base}), T.tlDataKey("j", {base}), T.tlDataKey("k", {base}),'
+            ' T.tlDataKey("j", {duration: 12, layout: []}),'
+            ' T.tlDataKey("j", {duration: 12, layout: [["a1", 0, 4], ["b1", 4, 6], ["a2", 6, 12]]}),'
+            ' T.tlDataKey("j", {duration: 12, layout: [["a1", 0, 8], ["b1", 8, 10], ["a2", 10, 12]]}),'
+            ' T.tlDataKey("j", {duration: 10})];')
+    assert k[0] == k[1] == k[6]
+    assert len({k[0], k[2], k[3], k[4], k[5]}) == 5

@@ -164,7 +164,8 @@ async function loadResult(id) {
   noteHist(id, r);
   clp.load(id);                                     // 넣기·빼기 뒤 다시 판정이 끝나면 조각 자리도 바뀐다
   render();
-  if (S.tlDataFor !== id) { S.tlDataFor = id; loadThumbs(id); loadWave(id); }
+  const tlKey = TL.tlDataKey(id, r);                // 넣기·빼기·실행 취소로 길이·조각 자리가 바뀌면 소리 줄·썸네일도 다시
+  if (S.tlDataFor !== tlKey) { S.tlDataFor = tlKey; loadThumbs(id); loadWave(id); }
 }
 
 let capsSeq = 0;

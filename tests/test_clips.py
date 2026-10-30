@@ -152,6 +152,23 @@ def test_insert_keeps_word_edits(tmp_path, monkeypatch):
     assert job.word_edits == {"1:0": "나쁜"} and job.line_times == {"1:0": [4.8, pytest.approx(6.2)]}
 
 
+def test_render_settles_stable_edits(tmp_path, monkeypatch):
+    """다시 판정 뒤 화면이 자막을 읽기 전에 저장해도 렌더는 새 전사 키로 푼 자막 수정을 쓴다 (옛 키로 쓰지 않는다)."""
+    import json
+    from app.jobqueue import RENDER
+    a, store, q, job, _ = setup(tmp_path, monkeypatch)
+    a.set_word(job.id, "1:0", "나쁜")
+    a.add_clip(job.id, 4.0)
+    assert job.stable_edits
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    job.status = Status.SAVING
+    pipeline_command(job, RENDER, store, MANIFEST, tmp_path / "data", lock=q.lock)
+    tr = api_mod._read_json(paths.job_dir(Path(job.src)) / "out" / "a.transcript.json")
+    data = json.loads((paths.job_dir(Path(job.src)) / "out" / "a.subs_edits.json").read_text(encoding="utf-8"))
+    assert data["transcript_sha1"] == api_mod.subtitles.transcript_sha1(tr)
+    assert data["words"] == {"2:0": "나쁜"} and job.stable_edits is None
+
+
 def test_remove_main_refused(tmp_path, monkeypatch):
     a, store, q, job, _ = setup(tmp_path, monkeypatch)
     a.add_clip(job.id, 4.0)
@@ -186,6 +203,16 @@ def test_undo_insert_rejudges(tmp_path, monkeypatch):
     a.add_range_op(job.id, "cut", 1.0, 1.5)
     a.undo(job.id)                                     # 조각이 그대로면 다시 판정하지 않는다
     assert not q.calls
+
+
+def test_result_layout_follows_transcript_pieces(tmp_path, monkeypatch):
+    """get_result 의 layout(전사가 만들어진 조각 자리) — 화면이 소리 줄·썸네일을 다시 읽을지 이것으로 정한다."""
+    a, store, q, job, _ = setup(tmp_path, monkeypatch)
+    assert a.get_result(job.id)["layout"] == []
+    a.add_clip(job.id, 4.0)
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    ids = [p["id"] for p in job.pieces]
+    assert a.get_result(job.id)["layout"] == [[ids[0], 0.0, 4.0], [ids[1], 4.0, 6.0], [ids[2], 6.0, 12.0]]
 
 
 def test_edit_blocked_while_processing(tmp_path, monkeypatch):
@@ -386,6 +413,40 @@ def test_preset_insert_skips_transcribe(tmp_path, monkeypatch):
     tr = pl.transcribe(fw2 / "asr.wav", fw2 / "transcript.json", want, "m", "cpu", "int8", "", False,
                        tmp_path / "probe.json")
     assert tr["segments"] == TR_B["segments"]
+
+
+def test_preset_cache_keys_use_resolved_path(tmp_path, monkeypatch):
+    """작업 폴더를 심볼릭 링크로 거쳐 가도(맥 링크 폴더·윈도우 subst) 앱의 파일별 캐시 위치·키는 파이프라인(load_sequence 가
+    경로를 resolve)과 같다 — 보관할 때 캐시를 찾고, 넣을 때 옮긴 캐시를 파이프라인이 그대로 쓴다."""
+    import json
+    import os
+    real = tmp_path / "real-data"
+    real.mkdir()
+    os.symlink(real, tmp_path / "link-data", target_is_directory=True)
+    monkeypatch.setenv("YTEDIT_DATA_DIR", str(tmp_path / "link-data"))
+    pl = api_mod.subtitles.pipeline_module()
+    a, store, q, job, _ = setup(tmp_path, monkeypatch)
+    a.add_clip(job.id, 4.0)
+    bsrc = Path(job.pieces[1]["src"]).resolve()     # 파이프라인이 보는 경로
+    assert bsrc != Path(job.pieces[1]["src"])
+    fw = pl.file_work(paths.job_dir(Path(job.src)) / "work" / "a", pl.seq.file_key(bsrc))
+    fw.mkdir(parents=True)
+    akey = {"v": pl.CACHE_VERSION, "src": pl.source_sig(bsrc), "filter": "anull", "ac": []}
+    (fw / "clean.wav").write_bytes(b"c")
+    (fw / "asr.wav").write_bytes(b"a")
+    (fw / "audio.meta.json").write_text(json.dumps(akey), encoding="utf-8")
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    a.get_captions(job.id)
+    p = a.save_clip_preset(job.id, job.pieces[1]["clip"], "인트로")[0]
+    pfile = (tmp_path / "data" / "clip_presets" / p["id"] / p["file"]).resolve()
+    assert (pfile.parent / "files" / pl.seq.file_key(pfile) / "audio.meta.json").is_file()   # 보관 때 캐시를 찾았다
+
+    job2 = _second_job(tmp_path, a, store, monkeypatch)
+    assert a.insert_clip_preset(job2.id, p["id"], 4.0) is not None
+    copy_ = Path(job2.pieces[1]["src"]).resolve()
+    fw2 = pl.file_work(paths.job_dir(Path(job2.src)) / "work" / "z", pl.seq.file_key(copy_))
+    want = {**akey, "src": pl.source_sig(copy_)}
+    assert pl.cached_meta(fw2 / "audio.meta.json", want, [fw2 / "clean.wav", fw2 / "asr.wav"], False)
 
 
 def test_preset_rename_duplicate(tmp_path, monkeypatch):

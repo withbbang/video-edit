@@ -59,6 +59,7 @@ def test_adopt_without_cache_or_missing_files(tmp_path):
 
 # --- --sequence 분석: 조각별 컷 판정 (합성 영상, 전사는 가짜 모델) ---------------------------------------
 
+import os
 import shutil
 import subprocess
 import sys
@@ -250,3 +251,35 @@ def test_undo_insert_reuses_file_cache(seq_env):
     assert "cache_key" in tr and "sequence_key" not in tr
     assert pipeline.transcript_sha1(tr) == sha == again["transcript_sha1"]
     assert _frames(again["cuts"]) == _frames(first["cuts"])
+
+
+@needs_ffmpeg
+def test_symlinked_folder_shares_file_cache(seq_env):
+    """입력 폴더를 심볼릭 링크로 가리켜도(맥 별칭 폴더·윈도우 subst 드라이브) 단독·이어 붙이기·되돌리기가 같은 캐시를 쓴다."""
+    lnk = seq_env.tmp / "lnk"
+    os.symlink(seq_env.tmp, lnk, target_is_directory=True)
+    sq = seq_env.tmp / "seq_link.json"
+    sq.write_text(json.dumps([
+        {"id": "a1", "clip": "A", "src": str(lnk / "a.mov"), "in": 0, "out": 2},
+        {"id": "b1", "clip": "B", "src": str(lnk / "b.mov"), "in": 0, "out": 2},
+        {"id": "a2", "clip": "A", "src": str(lnk / "a.mov"), "in": 2, "out": 5}]), encoding="utf-8")
+    out = seq_env.tmp / "out"
+    seq_env.run(lnk / "a.mov", out)
+    assert seq_env.calls == [5.0]
+    seq_env.run(lnk / "a.mov", out, "--sequence", sq)
+    assert seq_env.calls == [5.0, 2.0]   # A 는 다시 전사하지 않는다
+    seq_env.run(lnk / "a.mov", out)
+    assert seq_env.calls == [5.0, 2.0]   # 되돌려도 파일별 캐시에서 다시 쓴다
+
+
+def test_load_sequence_resolves_src(tmp_path):
+    sseq = pipeline.seq
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "a.mov").write_bytes(b"x")
+    os.symlink(tmp_path / "real", tmp_path / "lnk", target_is_directory=True)
+    sq = tmp_path / "s.json"
+    sq.write_text(json.dumps([{"id": "a", "clip": "main", "src": str(tmp_path / "lnk" / "a.mov"),
+                               "in": 0, "out": 1}]), encoding="utf-8")
+    p = sseq.load_sequence(sq)[0]
+    real = (tmp_path / "real" / "a.mov").resolve()
+    assert p.src == real and p.fkey == sseq.file_key(real)

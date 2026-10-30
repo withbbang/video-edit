@@ -43,7 +43,7 @@ def load_sequence(path: Path) -> list[Piece]:
     items = json.loads(Path(path).read_text(encoding="utf-8"))
     out = []
     for it in items:
-        src = Path(it["src"])
+        src = Path(it["src"]).resolve()   # 단독 모드(args.input.resolve())와 같은 경로로 — 링크·subst 드라이브여도 캐시 키가 같게
         out.append(Piece(id=it["id"], clip=it["clip"], src=src, fkey=file_key(src),
                          t_in=float(it["in"]), t_out=float(it["out"])))
     return out
