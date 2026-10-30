@@ -139,7 +139,7 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
     if kind == ANALYZE:
         (jd / "out").mkdir(parents=True, exist_ok=True)
         (jd / "work").mkdir(parents=True, exist_ok=True)
-        cmd, weights = runner.analyze_command(job, model, device), ANALYZE_WEIGHTS
+        cmd, weights = runner.analyze_command(job, model, device, save_sequence(job, lock)), ANALYZE_WEIGHTS
     elif kind == RENDER:
         save_dir = Path(save_dir or store.settings["save_dir"])
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -147,7 +147,7 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
         shutil.rmtree(media, ignore_errors=True)   # 지난번에 멈춘 저장의 찌꺼기
         media.mkdir(parents=True, exist_ok=True)
         cmd, weights = runner.render_command(job, model, device, media, save_cuts(job, lock), save_subs_edits(job, lock),
-                                         save_overlays(job, lock)), RENDER_WEIGHTS
+                                         save_overlays(job, lock), save_sequence(job, lock)), RENDER_WEIGHTS
     else:
         raise ValueError(f"알 수 없는 작업 종류: {kind}")
     return cmd, weights, models.pipeline_env(manifest, data_root, store.settings)
@@ -245,6 +245,21 @@ def save_overlays(job: Job, lock=None) -> Path | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = [{"path": str(jd / "overlays" / o["img"]), **{k: o[k] for k in ("x", "y", "w", "h", "start", "end") if k in o}}
             for o in ovs]
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
+
+
+def save_sequence(job: Job, lock=None) -> Path | None:
+    """이어 붙인 조각 목록 <이름>.sequence.json (파이프라인 --sequence). 조각이 없으면 낡은 파일을 지우고 None.
+    [{id, clip, src(절대 경로), in, out}] — name 은 파이프라인에 필요 없어 뺀다."""
+    with lock or contextlib.nullcontext():
+        src, pieces = Path(job.src), copy.deepcopy(job.pieces)
+    path = paths.job_dir(src) / "out" / f"{src.stem}.sequence.json"
+    if not pieces:
+        path.unlink(missing_ok=True)
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = [{"id": p["id"], "clip": p["clip"], "src": str(p["src"]), "in": p["in"], "out": p["out"]} for p in pieces]
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
 
@@ -1107,7 +1122,8 @@ class Api:
                 stem = Path(job.src).stem
                 cuts_path = jd / "out" / f"{stem}.preview.cuts.json"
                 cmd = runner.preview_audio_command(job, models.paths(self._manifest, self._data_root),
-                                                   models.device(settings, self._manifest), cuts_path, target)
+                                                   models.device(settings, self._manifest), cuts_path, target,
+                                                   save_sequence(job))
 
                 def prepare() -> None:   # 만들 때만 쓴다 (작업 스레드에서 실행 바로 전에)
                     cuts_path.parent.mkdir(parents=True, exist_ok=True)

@@ -42,17 +42,18 @@ def _tail(model: ModelPaths, device: str) -> list[str]:
     return args
 
 
-def analyze_command(job: Job, model: ModelPaths, device: str) -> list[str]:
+def analyze_command(job: Job, model: ModelPaths, device: str, sequence_path: Path | None = None) -> list[str]:
     jd = paths.job_dir(Path(job.src))
     return (pipeline_cmd() + [job.src, "--review", "--progress-json",
                               "--out", str(jd / "out"), "--work-root", str(jd / "work"),
                               "--preview", str(jd / "preview")]
+            + (["--sequence", str(sequence_path)] if sequence_path else [])
             + _tail(model, device) + analysis_args(job.options))
 
 
 def render_command(job: Job, model: ModelPaths, device: str, media_dir: Path,
                    cuts_path: Path | None = None, edits_path: Path | None = None,
-                   overlays_path: Path | None = None) -> list[str]:
+                   overlays_path: Path | None = None, sequence_path: Path | None = None) -> list[str]:
     """media_dir 은 결과 영상·SRT 를 쓸 임시 폴더 (성공하면 api 가 저장 폴더로 옮긴다).
     cuts_path 는 되살린 곳을 뺀 컷 목록 (없으면 판정 결과 그대로)."""
     src = Path(job.src)
@@ -60,18 +61,21 @@ def render_command(job: Job, model: ModelPaths, device: str, media_dir: Path,
     cuts_path = cuts_path or jd / "out" / f"{src.stem}.cuts.json"
     extra = ["--subs-edits", str(edits_path)] if edits_path else []
     extra += ["--overlays", str(overlays_path)] if overlays_path else []
+    extra += ["--sequence", str(sequence_path)] if sequence_path else []
     return (pipeline_cmd() + [job.src, "--apply-cuts", str(cuts_path),
                               "--progress-json", "--out", str(jd / "out"),
                               "--work-root", str(jd / "work"), "--media-out", str(media_dir)]
             + extra + _tail(model, device) + render_args(job.options, paths.fonts_dir()))
 
 
-def preview_audio_command(job: Job, model: ModelPaths, device: str, cuts_path: Path, out: Path) -> list[str]:
+def preview_audio_command(job: Job, model: ModelPaths, device: str, cuts_path: Path, out: Path,
+                          sequence_path: Path | None = None) -> list[str]:
     """컷을 적용한 미리보기 소리(out + index.json)만 만드는 명령. 잡음·음량은 저장과 같게."""
     jd = paths.job_dir(Path(job.src))
     o = job.options
     return (pipeline_cmd() + [job.src, "--apply-cuts", str(cuts_path), "--preview-cut-audio", str(out),
                               "--progress-json", "--out", str(jd / "out"), "--work-root", str(jd / "work")]
+            + (["--sequence", str(sequence_path)] if sequence_path else [])
             + _tail(model, device)
             + ["--denoise-level", str(o.denoise), "--render-loudnorm", "on" if o.loudnorm == "match" else "off"])
 

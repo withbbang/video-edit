@@ -141,3 +141,29 @@ def test_runner_low_priority_without_preexec_fn(monkeypatch):
     assert len(nice) == 1 and nice[0][0] == runner.os.PRIO_PROCESS and nice[0][2] == 10
     nice.clear()
     assert runner.run([sys.executable, "-c", "print(1)"], {"x": 1.0}, lambda p: None).ok and nice == []
+
+
+def test_commands_pass_sequence(tmp_path):
+    job = Job(id="j", src=str(tmp_path / "a.mp4"))
+    m = ModelPaths("/m/w", "/m/c")
+    seq = tmp_path / "s.json"
+    assert "--sequence" not in runner.analyze_command(job, m, "cpu")
+    assert "--sequence" not in runner.render_command(job, m, "cpu", tmp_path / "save")
+    assert "--sequence" not in runner.preview_audio_command(job, m, "cpu", tmp_path / "c.json", tmp_path / "o.m4a")
+    for cmd in (runner.analyze_command(job, m, "cpu", sequence_path=seq),
+                runner.render_command(job, m, "cpu", tmp_path / "save", sequence_path=seq),
+                runner.preview_audio_command(job, m, "cpu", tmp_path / "c.json", tmp_path / "o.m4a", sequence_path=seq)):
+        assert cmd[cmd.index("--sequence") + 1] == str(seq)
+
+
+def test_save_sequence(tmp_path, monkeypatch):
+    from app.api import save_sequence
+    monkeypatch.setenv("YTEDIT_DATA_DIR", str(tmp_path / "data"))
+    job = Job(id="j", src=str(tmp_path / "a.mp4"))
+    assert save_sequence(job) is None
+    job.pieces = [{"id": "p1", "clip": "c1", "src": str(tmp_path / "a.mp4"), "name": "a", "in": 0.0, "out": 5.0}]
+    p = save_sequence(job)
+    assert json.loads(p.read_text(encoding="utf-8")) == [
+        {"id": "p1", "clip": "c1", "src": str(tmp_path / "a.mp4"), "in": 0.0, "out": 5.0}]
+    job.pieces = []
+    assert save_sequence(job) is None and not p.exists()
