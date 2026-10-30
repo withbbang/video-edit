@@ -204,3 +204,37 @@ def test_sequence_video_filter_mixed_depth_runs(tmp_path):
         out = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", *inputs, "-filter_complex", frag,
                               "-map", "[seq]", "-f", "null", "-"], capture_output=True, text=True)
         assert out.returncode == 0, out.stderr
+
+
+def test_sequence_video_filter_10bit_sdr_no_conversion(tmp_path):
+    """10비트 SDR(bt709) A + 8비트 bt709 B: HDR 이 아니므로 색 변환 없이 깊이만 format= 으로"""
+    sp = _spans(tmp_path, [("a.mov", 0, 2), ("b.mp4", 0, 1)])
+    a, b = sp[0].piece.fkey, sp[1].piece.fkey
+    bt709 = {"color_primaries": "bt709", "color_transfer": "bt709", "color_space": "bt709"}
+    infos = {a: _info(320, 240, 30, "yuv420p10le", True, bt709), b: _info(160, 160, 25, color=dict(bt709))}
+    frag, _, _ = pipeline.sequence_video_filter(sp, infos, infos[a], 0, 320, 240)
+    assert "zscale" not in frag and "colorspace" not in frag
+    assert frag.split(";")[1].endswith("format=yuv420p10le[pk1]")
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("pieces,expect", [
+    ([("a", 0, 2), ("b", 0, 1 / 30), ("a", 2, 4)], 121),       # 1프레임 B
+    ([("a", 0, 1 / 30), ("b", 0, 1), ("a", 1 / 30, 4)], 150),  # 1프레임 A1
+    ([("a", 0, 1 / 30), ("b", 0, 1 / 30), ("a", 1, 1 + 1 / 30), ("b", 0.5, 0.6), ("a", 3, 4)], 36),
+])
+def test_one_frame_pieces_keep_every_frame(tmp_path, pieces, expect):
+    """concat 이 1프레임 조각의 끝을 어림해 다음 조각과 겹치면 fps 가 한 프레임을 버린다 → 프레임 수가 정확해야 한다"""
+    a, b = tmp_path / "a.mov", tmp_path / "b.mp4"
+    _ff("-f", "lavfi", "-i", "testsrc=size=64x48:rate=30:duration=4", "-c:v", "libx264", "-pix_fmt", "yuv420p", a)
+    _ff("-f", "lavfi", "-i", "testsrc=size=32x32:rate=25:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", b)
+    files = {"a": a, "b": b}
+    infos = {seq.file_key(p): pipeline.ffprobe(p, require_audio=False) for p in (a, b)}
+    ps = [seq.Piece(str(i), n, files[n], seq.file_key(files[n]), t0, t1) for i, (n, t0, t1) in enumerate(pieces)]
+    sp = seq.spans(ps, Fraction(30))
+    assert sum(s.f_out - s.f_in for s in sp) == expect
+    frag, inputs, _ = pipeline.sequence_video_filter(sp, infos, infos[seq.file_key(a)], 0, 64, 48)
+    out = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", *inputs, "-filter_complex",
+                          f"{frag};[seq]select=1,setpts=N/FRAME_RATE/TB[v]", "-map", "[v]", "-f", "framemd5", "-"],
+                         capture_output=True, text=True, check=True).stdout
+    assert sum(1 for line in out.splitlines() if line and not line.startswith("#")) == expect

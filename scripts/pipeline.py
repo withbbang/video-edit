@@ -1725,10 +1725,10 @@ def overlay_filter(ovs: list[dict], keeps: list[tuple[int, int]], fps: Fraction,
 
 
 def is_hdr(info: dict) -> bool:
-    """10비트이거나 bt2020/HLG/PQ 표시가 붙은 영상 (이어 붙일 때 색을 A 쪽으로 바꿀지 가린다)"""
+    """bt2020 또는 HLG/PQ 표시가 붙은 영상 (이어 붙일 때 색을 A 쪽으로 바꿀지 가린다).
+    비트 깊이만으로는 정하지 않는다 — 10비트 SDR(bt709)은 SDR 이고, 깊이는 조각 끝의 format= 이 맞춘다."""
     c = info.get("color") or {}
-    return bool(info.get("high_bit") or c.get("color_primaries") == "bt2020"
-                or c.get("color_transfer") in ("arib-std-b67", "smpte2084"))
+    return c.get("color_primaries") == "bt2020" or c.get("color_transfer") in ("arib-std-b67", "smpte2084")
 
 
 # zscale 에 그대로 넘겨도 되는 ffprobe 색 이름 (그 밖의 값·빈 값은 SDR/HDR 기본값으로)
@@ -1796,8 +1796,9 @@ def sequence_video_filter(spans: list, infos: dict[str, dict], out_info: dict, f
                          f"trim=start_frame={sp.f_in}:end_frame={sp.f_out},setpts=PTS-STARTPTS,"
                          f"{color_convert(infos[k], out_info)}{tail}[pk{i}]")
         labels.append(f"[pk{i}]")
-    # concat 은 시간 기준을 마이크로초로 바꾼다 → 다시 A 의 격자로 (뒤의 select·setpts=N/FRAME_RATE 가 쓰는 값)
-    parts.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0,fps={rate}[seq]")
+    # concat 은 시간 기준을 마이크로초로 바꾸고, 조각 끝을 평균 프레임 간격으로 어림해 1프레임 조각 뒤 조각이 같은 시각에
+    # 시작한다 (fps 가 한 프레임을 버림) → 프레임 번호로 시각을 다시 매긴 뒤 A 의 격자로 (뒤의 select·FRAME_RATE 용)
+    parts.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0,setpts=N/({rate})/TB,fps={rate}[seq]")
     inputs = [x for k in order for x in ("-i", str(next(sp.piece.src for sp in spans if sp.piece.fkey == k)))]
     return ";".join(parts), inputs, first_input + len(order)
 
