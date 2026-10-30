@@ -72,9 +72,24 @@ def test_add_clip_copies_and_splits(tmp_path, monkeypatch):
     b = ps[1]
     assert b["name"] == "Clip B" and Path(b["src"]).parent == paths.job_dir(Path(job.src)) / "clips"
     assert Path(b["src"]).suffix == ".mov" and Path(b["src"]).read_bytes() == b"bbbb"
-    assert r["clips"] == [{"clip": b["clip"], "name": "Clip B", "start": 4.0, "end": 6.0, "dur": 2.0}]
+    assert r["clips"] == [{"clip": b["clip"], "name": "Clip B", "start": 4.0, "end": 6.0, "dur": 2.0, "spans": [[4.0, 6.0]]}]
     assert r["clips"] == a.list_clips(job.id)
     assert r["history"] == {"undo": True, "redo": False}
+
+
+def test_list_clips_spans(tmp_path, monkeypatch):
+    """갈린 영상(B1 C B2)은 한 줄이고 spans 에 조각마다 [시작, 끝] (이어 붙인 초) — 타임라인 띠용."""
+    a, store, q, job, _ = setup(tmp_path, monkeypatch)
+    job.pieces = [{"id": "1", "clip": "main", "src": job.src, "name": "a", "in": 0.0, "out": 4.0},
+                  {"id": "2", "clip": "b", "src": "b.mov", "name": "B", "in": 0.0, "out": 1.0},
+                  {"id": "3", "clip": "c", "src": "c.mov", "name": "C", "in": 0.0, "out": 0.5},
+                  {"id": "4", "clip": "b", "src": "b.mov", "name": "B", "in": 1.0, "out": 2.0},
+                  {"id": "5", "clip": "main", "src": job.src, "name": "a", "in": 4.0, "out": 10.0}]
+    rows = a.list_clips(job.id)
+    assert [r["clip"] for r in rows] == ["b", "c"]
+    assert rows[0]["spans"] == [[4.0, 5.0], [5.5, 6.5]] and rows[0]["dur"] == 2.0
+    assert (rows[0]["start"], rows[0]["end"]) == (4.0, 6.5)
+    assert rows[1]["spans"] == [[5.0, 5.5]]
 
 
 def test_add_clip_rejects_audio_only_and_cancel(tmp_path, monkeypatch):
@@ -320,7 +335,8 @@ def test_preset_insert_brings_edits(tmp_path, monkeypatch):
     job2 = _second_job(tmp_path, a, store, monkeypatch)
     r = a.insert_clip_preset(job2.id, p["id"], 6.0)
     assert r is not None and ("rejudge", job2.id) in q.calls
-    assert r["clips"] == [{"clip": job2.pieces[1]["clip"], "name": "인사말", "start": 6.0, "end": 8.0, "dur": 2.0}]
+    assert r["clips"] == [{"clip": job2.pieces[1]["clip"], "name": "인사말", "start": 6.0, "end": 8.0, "dur": 2.0,
+                          "spans": [[6.0, 8.0]]}]
     b = job2.pieces[1]
     assert Path(b["src"]).parent == paths.job_dir(Path(job2.src)) / "clips" and Path(b["src"]).read_bytes() == b"bbbb"
     assert [(o["op"], o["start"], o["end"]) for o in job2.range_ops] == [

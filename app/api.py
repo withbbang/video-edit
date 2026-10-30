@@ -879,7 +879,8 @@ class Api:
     # stable_edits(전사가 바뀌어도 변하지 않는 키)로 두었다가 다시 판정이 끝나면 새 전사 키로 푼다 (_settle_stable).
 
     def _clip_views(self, job: Job) -> list[dict]:
-        """넣은 영상마다 한 줄 {clip, name, start(첫 조각 시작), end(마지막 조각 끝), dur(조각 길이 합)}. A 는 뺀다."""
+        """넣은 영상마다 한 줄 {clip, name, start(첫 조각 시작), end(마지막 조각 끝), dur(조각 길이 합),
+        spans(조각마다 [시작, 끝] — 타임라인 띠)}. A 는 뺀다."""
         rows: dict[str, dict] = {}
         pos = 0.0
         for p in job.pieces:
@@ -887,9 +888,11 @@ class Api:
             if p.get("clip") != "main":
                 r = rows.get(p["clip"])
                 if r is None:
-                    rows[p["clip"]] = {"clip": p["clip"], "name": p.get("name") or "", "start": pos, "end": pos + d, "dur": d}
+                    rows[p["clip"]] = {"clip": p["clip"], "name": p.get("name") or "", "start": pos, "end": pos + d, "dur": d,
+                                       "spans": [[pos, pos + d]]}
                 else:
                     r["end"], r["dur"] = pos + d, r["dur"] + d
+                    r["spans"].append([pos, pos + d])
             pos += d
         return list(rows.values())
 

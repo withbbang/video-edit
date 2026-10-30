@@ -137,7 +137,18 @@ function lanesDrag(h0, dy, content, vid0, minVid, lane) {
   return clamp(h0 - dy, Math.min(lane, content), top);
 }
 
+// ---- 영상 끼워 넣기 ----
+// 끼워 넣은 조각 [{clip, start, end}](이어 붙인 초)의 화면 띠 [{clip, x0, x1}]: 줄 [0, w] 안으로 자르고 안 보이는 것은 뺀다
+function clipBands(pieces, v, w, cw) {
+  const out = [];
+  for (const p of pieces) {
+    const x0 = Math.max(0, tToX(v, p.start, cw)), x1 = Math.min(w, tToX(v, p.end, cw));
+    if (x1 > x0) out.push({ clip: p.clip, x0, x1 });
+  }
+  return out;
+}
+
 const TL = { fitView, clampView, tToX, xToT, zoomAt, followT, playFollow, playSpc, cells, sheetCell, waveMax, spcToSlider, sliderToSpc,
-  ovRect, ovMove, ovResizeEdge, barDrag, lanesDrag };
+  ovRect, ovMove, ovResizeEdge, barDrag, lanesDrag, clipBands };
 if (typeof window !== 'undefined') window.TL = TL;
 if (typeof module !== 'undefined') module.exports = TL;

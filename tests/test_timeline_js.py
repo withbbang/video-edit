@@ -169,3 +169,15 @@ def test_lanes_drag():
     assert run("out = T.lanesDrag(80, 10, 300, 100, 120, 20);") == 70
     # 내용이 한 줄보다 작으면 내용 높이
     assert run("out = T.lanesDrag(16, 5, 16, 400, 120, 20);") == 16
+
+
+def test_clip_bands():
+    # 보기 [10, 20) 초: w 1000, cw 100, spc 1 → 1초 = 100px
+    v = '{t0: 10, spc: 1}'
+    pieces = ('[{clip: "b", start: 2, end: 5}, {clip: "b", start: 12, end: 13.5}, {clip: "c", start: 18, end: 25},'
+              ' {clip: "d", start: 20, end: 22}, {clip: "e", start: 9, end: 11}]')
+    out = run(f"out = T.clipBands({pieces}, {v}, 1000, 100);")
+    # 보기 밖(b 첫 조각, d)은 빠지고, 걸친 것은 화면 끝에서 자른다
+    assert out == [{"clip": "b", "x0": 200, "x1": 350}, {"clip": "c", "x0": 800, "x1": 1000},
+                   {"clip": "e", "x0": 0, "x1": 100}]
+    assert run(f"out = T.clipBands([], {v}, 1000, 100);") == []

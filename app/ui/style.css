@@ -13,6 +13,8 @@
   --tl-lane: #e6e6eb;    /* 화면 줄·소리 줄 바탕 */
   --tl-cell: #d3d3da;    /* 아직 그림이 없는 썸네일 칸 */
   --tl-wave: #6b6b78;
+  /* 끼워 넣은 영상 띠 (영상마다 한 색, 잘린 곳 빗금이 잘 보이게 차분한 색) */
+  --clip-0: #3a9e98; --clip-1: #8b72cc; --clip-2: #c0739a; --clip-3: #7f9a45; --clip-4: #5f86b3;
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
@@ -454,3 +456,16 @@ body.ns-drag, body.ns-drag * { cursor: ns-resize !important; }   /* 끄는 동�
 .ov-item-main .ov-name { padding: 1px 4px; }
 .ov-name.bad { border-color: #d33; outline-color: #d33; }
 .ov-err { font-size: 11px; padding: 0 0 6px 48px; }
+
+/* 영상 끼워 넣기: 확대 타임라인 영상 줄·전체 막대 아래 얇은 띠·영상 탭 (이미지 탭 모양을 그대로 쓴다) */
+.cl-lane[hidden], .n-clips[hidden] { display: none; }
+.zt-name.n-clips { height: 14px; }
+.cl-lane { position: relative; height: 14px; background: var(--tl-lane); border-radius: 4px; overflow: hidden;
+  cursor: pointer; touch-action: none; }
+.cl-band { position: absolute; top: 2px; bottom: 2px; border-radius: 3px; opacity: .8; cursor: pointer; }
+.cl-band.sel { opacity: 1; box-shadow: 0 0 0 1.5px var(--fg) inset; }
+.tl .cl-strip { position: absolute; bottom: 0; height: 4px; min-width: 2px; z-index: 1; cursor: pointer; opacity: .9; }
+.tl .cl-strip.sel { height: 6px; opacity: 1; }
+.cl-sw { display: block; width: 10px; height: 24px; border-radius: 3px; flex-shrink: 0; }
+.cl-c0 { background: var(--clip-0); } .cl-c1 { background: var(--clip-1); } .cl-c2 { background: var(--clip-2); }
+.cl-c3 { background: var(--clip-3); } .cl-c4 { background: var(--clip-4); }

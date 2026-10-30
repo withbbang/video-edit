@@ -42,7 +42,7 @@ const S = {
   result: null, resultFor: null, resultKey: null,
   saveDir: '', advOpen: false, update: null,
   resultVersion: 0, drawn: null,
-  // 자막: caps 는 선택한 영상의 자막 줄(원본 초), tab 은 'cuts' | 'subs' | 'imgs', editing 은 열린 어절 입력칸 {key}
+  // 자막: caps 는 선택한 영상의 자막 줄(원본 초), tab 은 'cuts' | 'subs' | 'imgs' | 'clips', editing 은 열린 어절 입력칸 {key}
   // cutKind 는 잘린 곳 목록의 종류 탭 'all' | 'silence' | 'filler' | 'habit'
   tab: 'cuts', cutKind: 'all', renderPending: false, caps: null, capsFor: null, capsVersion: 0, dropped: false, lineSel: null, editing: null,
   findKeys: new Set(), findCount: 0, scroll: {},
@@ -57,6 +57,8 @@ const S = {
   hist: { undo: false, redo: false }, histBusy: false,
   // 이미지 겹쳐 넣기: 고른 이미지 id (영상 위·타임라인 줄에서 함께 강조)
   ovSel: null, ovTab: 'used',   // 이미지 탭 안 'used'(사용 중) | 'saved'(보관함)
+  // 영상 끼워 넣기: clips 는 list_clips 결과(clipsFor 작업 것), clipSel 은 고른 영상, clipTab 은 영상 탭 안 'used' | 'saved'
+  clips: null, clipsFor: null, clipSel: null, clipTab: 'used',
 };
 
 // ---- 작은 도우미 ---------------------------------------------------------
@@ -127,7 +129,7 @@ function select(id) {
   S.caps = null; S.capsFor = null; S.dropped = false; S.lineSel = null; S.editing = null; S.scroll = {};
   S.findKeys = new Set(); S.findCount = 0; findBar.find.value = ''; findBar.repl.value = '';
   S.range = null; S.rangeErr = false; S.mark = null; S.rangeEnd = 'end'; tlDrag = null;
-  S.view = null; S.thumbs = null; S.wave = null; S.tlDataFor = null; zoomTl.reset(); ovl.reset();
+  S.view = null; S.thumbs = null; S.wave = null; S.tlDataFor = null; zoomTl.reset(); ovl.reset(); clp.reset();
   S.hist ={ undo: false, redo: false };
   player.detach();
   if (id) {
@@ -160,6 +162,7 @@ async function loadResult(id) {
   if (!r) { S.resultKey = null; return; }          // 다음 알림 때 다시 읽는다
   S.result = r; S.resultFor = id; S.resultVersion++;
   noteHist(id, r);
+  clp.load(id);                                     // 넣기·빼기 뒤 다시 판정이 끝나면 조각 자리도 바뀐다
   render();
   if (S.tlDataFor !== id) { S.tlDataFor = id; loadThumbs(id); loadWave(id); }
 }
@@ -362,6 +365,8 @@ function renderResult(force) {
   drawRange();
   drawHist();
   ovl.renderTools();
+  clp.renderTools();
+  clp.drawBar();
 }
 
 function resultParts(j, r) {
@@ -1224,12 +1229,285 @@ const ovl = (() => {
     reset() { S.ovSel = null; naming = false; renaming = null; presets = null; drag = null; shownSel = null; } };
 })();
 
+// ---- 영상 끼워 넣기 -------------------------------------------------------
+// 넣은 영상 {clip, name, start, end, dur, spans: [[시작, 끝], ...]} (이어 붙인 초, A("main")는 서버가 뺀다).
+// 영상 탭 (잘린 곳·자막·이미지 옆): 왼쪽 사용 중·보관함 탭, 오른쪽 불러오기. 사용 중에서 고르면 이름 변경·보관·빼기.
+// 타임라인: 화면 줄 위 영상 줄에 조각마다 색 띠 (같은 영상은 같은 색), 전체 막대 아래쪽에도 얇게. 띠를 누르면 그 영상을 고른다.
+// 넣기·빼기 뒤엔 작업이 다시 판정(처리 중)으로 가고, 끝나면 loadResult 가 목록을 다시 읽는다.
+const CLIP_COLORS = 5;   // style.css 의 --clip-0 ~ --clip-4
+const clp = (() => {
+  const panel = h('div', { class: 'ov-panel cl-panel' });   // 영상 탭 내용 (이미지 탭과 같은 모양)
+  const tabText = h('span', {}, '영상');                     // 영상 탭 이름 (개수는 탭을 다시 그리지 않고 바꾼다)
+  const name = h('span', { class: 'zt-name n-clips', hidden: true }, '영상');
+  const lane = h('div', { class: 'cl-lane', hidden: true });  // 확대 타임라인의 영상 줄
+  let busy = false, naming = false, presets = null, loading = false, saveErr = null;
+  let renaming = null;       // 이름 바꾸는 중 {kind: 'clip' | 'preset', id, bad, value}
+  let finishRename = null;   // 열린 이름 칸 마치기 (save)
+
+  const list = () => (S.clipsFor === S.sel && S.clips) || [];
+  const editable = () => { const j = selected(); return !!j && HAS_RESULT.has(j.status); };
+  // 영상 순서대로 색 (조각이 여러 개여도 같은 영상은 같은 색)
+  const colorOf = (clip) => Math.max(0, list().findIndex((c) => c.clip === clip)) % CLIP_COLORS;
+  // 띠로 그릴 조각들 [{clip, start, end}]
+  const pieces = () => list().flatMap((c) => (c.spans || [[c.start, c.end]]).map(([start, end]) => ({ clip: c.clip, start, end })));
+
+  async function load(id) {
+    const rows = await call('list_clips', id);
+    if (S.sel !== id || !Array.isArray(rows)) return;
+    apply(id, rows);
+  }
+  function apply(id, rows) {
+    S.clips = rows; S.clipsFor = id;
+    if (S.clipSel && !rows.some((c) => c.clip === S.clipSel)) S.clipSel = null;
+    refresh();
+  }
+  function refresh() {
+    renderTools();
+    zoomTl.draw();
+    drawBar();
+  }
+  // 넣기·빼기·이름 바꾸기 공통: 응답 {clips, history} 를 받아 목록을 바꾼다
+  async function send(name, ...args) {
+    const j = selected();
+    if (!j || busy) return null;
+    busy = true;
+    renderTools();
+    try {
+      const res = await call(name, j.id, ...args);
+      if (res && S.sel === j.id) { noteHist(j.id, res); apply(j.id, res.clips); }
+      return res;
+    } finally {
+      busy = false;
+      renderTools();
+    }
+  }
+  function select(clip) {
+    if (S.clipSel === clip) return;
+    if (renaming && renaming.kind === 'clip' && finishRename) finishRename(true);
+    S.clipSel = clip; naming = false; saveErr = null; renaming = null;
+    refresh();
+  }
+  // 고른 영상의 첫 프레임 가운데로 (딱 시작 시각이면 재생기 반올림으로 그 앞 프레임에 떨어질 수 있다)
+  function seekTo(c) {
+    const at = Math.min(c.start + 0.5 / fps(), c.end);
+    player.seek(at);
+    ensureVisible(at);
+  }
+  // 타임라인 띠를 누르면: 그 영상을 고르고 영상 탭(사용 중)으로
+  function pick(clip) {
+    select(clip);
+    if (S.clipTab !== 'used') { S.clipTab = 'used'; renderTools(); }
+    if (S.tab !== 'clips') { S.tab = 'clips'; renderResult(); }
+  }
+  // 새로 들어온 영상을 고른다 (넣기 전 목록에 없던 것)
+  function selectNew(before, res) {
+    if (!res) return;
+    const fresh = res.clips.find((c) => !before.has(c.clip));
+    S.clipTab = 'used';
+    if (fresh) select(fresh.clip); else renderTools();
+  }
+  const at = () => (player.ready() ? player.time() : 0);
+  async function add() {
+    const before = new Set(list().map((c) => c.clip));
+    selectNew(before, await send('add_clip', at()));
+  }
+  async function insertPreset(pid) {
+    const before = new Set(list().map((c) => c.clip));
+    selectNew(before, await send('insert_clip_preset', pid, at()));
+  }
+  async function remove() {
+    if (S.clipSel) await send('remove_clip', S.clipSel);
+  }
+  async function savePreset(nm) {
+    const j = selected();
+    if (!j || !S.clipSel) return;
+    const res = await call('save_clip_preset', j.id, S.clipSel, nm);
+    if (res) { presets = res; naming = false; saveErr = null; }
+    else saveErr = (presets || []).some((p) => p.name === nm) ? '보관함에 같은 이름이 있습니다' : '보관하지 못했습니다';
+    renderTools();
+  }
+  async function loadPresets() {
+    loading = true;
+    try { presets = (await call('list_clip_presets')) || []; } finally { loading = false; }
+    renderTools();
+  }
+
+  // 이름 바꾸기: 이름을 두 번 누르거나 [이름 변경]. Enter·칸 밖을 누르면 반영, Esc 는 취소
+  function startRename(kind, id) {
+    naming = false;
+    renaming = { kind, id, bad: false };
+    renderTools();
+  }
+  async function commitRename(r, nm) {
+    if (!r) return;
+    const it = r.kind === 'clip' ? list().find((c) => c.clip === r.id) : (presets || []).find((p) => p.id === r.id);
+    if (!nm || !it || nm === it.name) { renaming = null; renderTools(); return; }
+    if (r.kind === 'clip') {
+      renaming = null;
+      await send('rename_clip', r.id, nm);
+      return;
+    }
+    const res = await call('rename_clip_preset', r.id, nm);
+    if (res) { presets = res; renaming = null; }
+    else renaming = { ...r, bad: true, value: nm };   // 다른 보관 영상과 같은 이름
+    renderTools();
+  }
+  function nameEl(kind, id, nm) {
+    if (!(renaming && renaming.kind === kind && renaming.id === id)) {
+      return h('span', { class: 'ov-item-name cl-item-name', title: nm, 'data-kind': kind, 'data-id': id }, nm);
+    }
+    const input = h('input', { type: 'text', class: 'ov-name' + (renaming.bad ? ' bad' : ''), maxlength: '40',
+      value: renaming.value || nm, 'aria-label': '영상 이름', 'aria-invalid': renaming.bad ? 'true' : 'false',
+      onclick: (e) => e.stopPropagation() });
+    const r = renaming;
+    let done = false;
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      if (finishRename === finish) finishRename = null;
+      if (save) commitRename(r, input.value.trim());
+      else { renaming = null; renderTools(); }
+    };
+    finishRename = finish;
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') finish(true);
+      if (e.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
+    requestAnimationFrame(() => { input.focus(); input.select(); });
+    return input;
+  }
+  const swatch = (clip) => h('i', { class: `cl-sw cl-c${colorOf(clip)}` });
+  const secs = (d) => `${(Number(d) || 0).toFixed(1)}초`;
+  function itemRows(c, can) {
+    const sel = c.clip === S.clipSel;
+    const row = h('div', { class: 'opt row ov-item' + (sel ? ' sel' : ''),
+      onclick: () => { select(c.clip); seekTo(c); } },
+      h('span', { class: 'ov-item-main' }, swatch(c.clip), nameEl('clip', c.clip, c.name)),
+      h('span', { class: 'sec' }, `${clock(c.start)} · ${secs(c.dur)}`));
+    if (!sel) return [row];
+    let acts;
+    if (naming) {
+      const input = h('input', { type: 'text', class: 'ov-name', maxlength: '40', value: c.name, 'aria-label': '저장할 이름' });
+      input.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter' && input.value.trim()) savePreset(input.value.trim());
+        if (e.key === 'Escape') { naming = false; saveErr = null; renderTools(); }
+      });
+      acts = [input, h('button', { type: 'button', class: 'btn', onclick: () => input.value.trim() && savePreset(input.value.trim()) }, '저장'),
+        h('button', { type: 'button', class: 'btn', onclick: () => { naming = false; saveErr = null; renderTools(); } }, '취소')];
+      requestAnimationFrame(() => { input.focus(); input.select(); });
+    } else {
+      acts = [h('button', { type: 'button', class: 'btn', disabled: !can || busy, onclick: () => startRename('clip', c.clip) }, '이름 변경'),
+        h('button', { type: 'button', class: 'btn', disabled: !can || busy,
+          onclick: () => { renaming = null; naming = true; saveErr = null; renderTools(); } }, '보관'),
+        h('button', { type: 'button', class: 'btn', disabled: !can || busy, onclick: remove }, '빼기')];
+    }
+    const out = [row, h('div', { class: 'ov-acts' }, acts)];
+    if (naming && saveErr) out.push(h('div', { class: 'ov-err err' }, saveErr));
+    return out;
+  }
+  function presetRow(p, can) {
+    const bad = renaming && renaming.kind === 'preset' && renaming.id === p.id && renaming.bad;
+    const row = h('div', { class: 'opt ov-item' },
+      h('span', { class: 'ov-item-main' }, nameEl('preset', p.id, p.name)),
+      h('span', { class: 'ov-item-btns' },
+        h('span', { class: 'sec' }, secs(p.dur)),
+        h('button', { type: 'button', class: 'btn', title: '지금 재생 위치에 삽입', disabled: !can || busy,
+          onclick: () => insertPreset(p.id) }, '삽입'),
+        h('button', { type: 'button', class: 'x', title: '보관함에서 지우기',
+          onclick: async () => { presets = (await call('delete_clip_preset', p.id)) || presets; renderTools(); } }, '✕')));
+    return bad ? [row, h('div', { class: 'ov-err err' }, '보관함에 같은 이름이 있습니다')] : [row];
+  }
+  function renderTools() {
+    const all = list();
+    tabText.textContent = all.length ? `영상 ${all.length}` : '영상';
+    if (S.tab !== 'clips') return;
+    if (presets === null && !loading) loadPresets();
+    const can = editable();
+    const scroll = panel.scrollTop;
+    const sub = (key, text) => h('button', { type: 'button', class: S.clipTab === key ? 'on' : null,
+      onclick: () => { if (S.clipTab !== key) { S.clipTab = key; naming = false; renaming = null; panel.scrollTop = 0; renderTools(); } } }, text);
+    const head = h('div', { class: 'ov-top' },
+      h('div', { class: 'kinds', role: 'tablist' },
+        sub('used', `사용 중 ${all.length}`), sub('saved', presets ? `보관함 ${presets.length}` : '보관함')),
+      h('button', { type: 'button', class: 'btn', title: '파일에서 영상을 골라 지금 재생 위치에 끼워 넣기', disabled: !can || busy, onclick: add }, '불러오기'));
+    const body = S.clipTab === 'used'
+      ? (all.length ? all.flatMap((c) => itemRows(c, can)) : [h('div', { class: 'opt muted' }, h('span', {}, '끼워 넣은 영상이 없습니다'))])
+      : presets === null ? [h('div', { class: 'opt muted' }, h('span', {}, '…'))]
+        : presets.length ? presets.flatMap((p) => presetRow(p, can))
+          : [h('div', { class: 'opt muted' }, h('span', {}, '사용 중인 영상을 보관하면 여기에 모입니다'))];
+    panel.replaceChildren(head, ...body);
+    panel.scrollTop = scroll;
+  }
+
+  // 이름을 두 번 누르면 이름 바꾸기. 첫 번째 누름에 목록을 다시 그려 두 누름의 요소가 달라지므로
+  // 그대로 남는 panel 에서 받고, 누른 자리의 이름을 다시 찾는다
+  panel.addEventListener('dblclick', (e) => {
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const n = el && el.closest && el.closest('.cl-item-name');
+    if (!n || !editable()) return;
+    if (n.dataset.kind === 'clip') select(n.dataset.id);
+    startRename(n.dataset.kind, n.dataset.id);
+  });
+
+  // ---- 타임라인 띠 ----
+  // 띠 하나: 누르면 그 영상 고르기 (아래 줄의 구간 고르기·이동으로 넘기지 않는다)
+  function band(clip, cls) {
+    const b = h(cls === 'cl-strip' ? 'i' : 'b', { class: `${cls} cl-c${colorOf(clip)}` + (clip === S.clipSel ? ' sel' : '') });
+    const it = list().find((c) => c.clip === clip);
+    if (it) b.title = it.name;
+    b.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      pick(clip);
+      const c = list().find((x) => x.clip === clip);
+      if (c) seekTo(c);
+    });
+    return b;
+  }
+  // 확대 타임라인의 영상 줄 (zoomTl.paint 가 부른다)
+  function paintLane(g) {
+    const ps = g && ovl.available() ? pieces() : [];
+    name.hidden = lane.hidden = !ps.length;
+    if (lane.hidden) return;
+    lane.replaceChildren(...TL.clipBands(ps, S.view, g.w, g.cw).map((p) => {
+      const b = band(p.clip, 'cl-band');
+      b.style.left = `${p.x0}px`;
+      b.style.width = `${Math.max(2, p.x1 - p.x0)}px`;
+      return b;
+    }));
+  }
+  // 전체 막대 아래쪽 얇은 띠 (막대는 renderResult 때 새로 만들어지므로 그때도 다시 붙인다)
+  let barBands = [];
+  function drawBar() {
+    for (const b of barBands) b.remove();
+    barBands = [];
+    const bar = document.querySelector('#dock .tl');
+    const d = rangeDur();
+    if (!bar || !d || !ovl.available()) return;
+    for (const p of pieces()) {
+      const b = band(p.clip, 'cl-strip');
+      b.style.left = `${(p.start / d) * 100}%`;
+      b.style.width = `${((p.end - p.start) / d) * 100}%`;
+      bar.insertBefore(b, bar.firstChild);
+      barBands.push(b);
+    }
+  }
+  rangePointer(lane, (x, rect) => { const g = zoomTl.geom(); return g && S.view ? TL.xToT(S.view, x - rect.left, g.cw) : 0; }, () => null);
+
+  return { panel, tabText, name, lane, renderTools, paintLane, drawBar, load, pieces, colorOf,
+    reset() { S.clips = null; S.clipsFor = null; S.clipSel = null; naming = false; renaming = null; presets = null; saveErr = null; } };
+})();
+
 const zoomTl = (() => {
   const ruler = h('canvas', { class: 'zt-ruler' });
   const frames = h('canvas', { class: 'zt-frames' });
   const wave = h('canvas', { class: 'zt-wave' });
   const head = h('i', { class: 'zhead', hidden: true });
-  const rows = h('div', { class: 'zt-rows' }, ruler, ovl.rows, frames, wave, head);
+  const rows = h('div', { class: 'zt-rows' }, ruler, ovl.rows, clp.lane, frames, wave, head);
   const nFrames = h('span', { class: 'zt-name n-frames' }, '화면');
   const nWave = h('span', { class: 'zt-name n-wave' }, '소리');
   const slider = h('input', { type: 'range', min: '0', max: '1000', step: '1', value: '0', 'aria-label': '확대' });
@@ -1239,7 +1517,7 @@ const zoomTl = (() => {
     el.title = title;
     return el;
   };
-  const el = h('div', { class: 'ztl' }, h('div', { class: 'zt-names' }, h('span', { class: 'zt-name n-ruler' }), ovl.names, nFrames, nWave), rows);
+  const el = h('div', { class: 'ztl' }, h('div', { class: 'zt-names' }, h('span', { class: 'zt-name n-ruler' }), ovl.names, clp.name, nFrames, nWave), rows);
   const now = h('b', { class: 'zt-now', title: '재생 위치' });   // 프레임 단위 현재 위치
   const zoom = h('span', { class: 'zt-zoom' }, zbtn('−', '축소', 0.5), slider, zbtn('+', '확대', 2), label);
   const imgs = new Map();   // 시트 주소 → Image
@@ -1320,7 +1598,8 @@ const zoomTl = (() => {
     const cs = getComputedStyle(document.documentElement);
     const v = (n) => cs.getPropertyValue(n).trim();
     return { cut: v('--cut'), accent: v('--accent'), fg: v('--fg'), soft: v('--soft'), bg: v('--bg'),
-      muted: v('--muted'), back: v('--restored'), cell: v('--tl-cell'), wave: v('--tl-wave') };
+      muted: v('--muted'), back: v('--restored'), cell: v('--tl-cell'), wave: v('--tl-wave'),
+      clips: Array.from({ length: CLIP_COLORS }, (_, i) => v(`--clip-${i}`)) };
   }
   function fit(cv, w, hgt) {
     const dpr = window.devicePixelRatio || 1;
@@ -1425,7 +1704,7 @@ const zoomTl = (() => {
     el.hidden = !r || (!showFrames && !showWave);
     zoom.hidden = el.hidden;
     const g = el.hidden ? null : geom();
-    if (!g) { viewWin.hidden = true; ovl.paintRows(null); return; }
+    if (!g) { viewWin.hidden = true; ovl.paintRows(null); clp.paintLane(null); return; }
     S.view = TL.clampView(S.view || TL.fitView(g.d, g.w, g.cw), g.d, g.w, g.cw, fps());
     const c = colors();
     const v = S.view;
@@ -1435,6 +1714,7 @@ const zoomTl = (() => {
       ctx.clearRect(0, 0, g.w, hh);
       overlays(ctx, g, hh, c);
     });
+    clp.paintLane(g);
     if (showFrames) {
       const ctx = fit(frames, g.w, ROW_H);
       ctx.clearRect(0, 0, g.w, ROW_H);
@@ -1462,6 +1742,12 @@ const zoomTl = (() => {
       }
       frameGrab.want(need);
       overlays(ctx, g, ROW_H, c);
+      // 끼워 넣은 구간: 위아래 테두리를 그 영상 색으로 (영상 줄의 띠와 같은 색)
+      for (const p of TL.clipBands(clp.pieces(), v, g.w, g.cw)) {
+        ctx.fillStyle = c.clips[clp.colorOf(p.clip)];
+        ctx.fillRect(p.x0, 0, p.x1 - p.x0, 3);
+        ctx.fillRect(p.x0, ROW_H - 3, p.x1 - p.x0, 3);
+      }
     }
     if (showWave) {
       const ctx = fit(wave, g.w, WAVE_H);
@@ -1641,15 +1927,20 @@ function listParts(j, r) {
   const caps = S.capsFor === j.id ? S.caps : null;
   const imgs = ovl.available();
   if (!items.length && !n && !(caps && caps.length) && !imgs) return [];
-  if (S.tab === 'imgs' && !imgs) S.tab = 'cuts';
+  if ((S.tab === 'imgs' || S.tab === 'clips') && !imgs) S.tab = 'cuts';   // 소리만 있는 파일은 이미지·영상 탭을 숨긴다
   const tab = (key, text, cls) => h('button', { type: 'button', class: [S.tab === key ? 'on' : '', cls || ''].join(' ').trim() || null,
     onclick: () => { if (S.tab !== key) { S.tab = key; renderResult(); } } }, text);
   const out = [h('div', { class: 'tabs', role: 'tablist' },
     tab('cuts', `잘린 곳 ${items.length}` + (n ? ` · 되살린 곳 ${n}` : '')),
     tab('subs', caps ? `자막 ${caps.filter((c) => !c.empty).length}` : '자막'),
-    imgs ? tab('imgs', ovl.tabText, 'ov-tab') : null)];
+    imgs ? tab('imgs', ovl.tabText, 'ov-tab') : null,
+    imgs ? tab('clips', clp.tabText, 'cl-tab') : null)];
   if (S.tab === 'imgs') {
     out.push(ovl.panel);
+    return out;
+  }
+  if (S.tab === 'clips') {
+    out.push(clp.panel);
     return out;
   }
   if (S.tab === 'subs') {
