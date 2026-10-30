@@ -9,7 +9,8 @@ mp4 안에도 끄고 켤 수 있는 자막 트랙(QuickTime 용)을 넣는다 (`
 
 ```
 scripts/pipeline.py   파이프라인 본체 (ffmpeg + faster-whisper + numpy)
-scripts/sequence.py   조각 목록(영상 끼워 넣기)·이어 붙인 전사·편집 시간 밀기 — 순수 함수 (pipeline·앱이 함께 씀)
+scripts/sequence.py   조각 목록(영상 끼워 넣기)·이어 붙인 전사·오디오 잇기 (pipeline 이 씀)
+app/sequence.py       영상 끼워 넣기 때 편집 시간 밀기·자막 수정 키 옮기기 — 순수 함수
 fillers.json          필러/습관어 사전과 감지 파라미터 — 사용자가 직접 고치는 파일
 models/sh.rnnn        RNNoise 노이즈 모델 (ffmpeg arnndn 필터용)
 setup.sh              ffmpeg 확인, .venv 생성, 의존성 설치
@@ -164,7 +165,7 @@ tests/                pytest (requirements-dev.txt)
   `영상` 탭(`사용 중`·`보관함`, `불러오기`, 고른 영상 `이름 변경`·`보관`·`빼기`, 보관함 `삽입`)이 재생 위치(프레임 격자, 잘린 구간 안이면 그 시작)에
   넣는다(Api.add_clip/insert_clip_preset/remove_clip/rename_clip/list_clips — `spans` 가 타임라인 색 띠 `TL.clipBands`). 고른 파일은 작업 폴더
   `clips/` 로 복사, 넣은 영상도 A 와 똑같이 컷·자막(다시 판정에서 그 파일만 전사). 넣은 자리 뒤 편집(자르기·되살리기·줄 시간·이미지)은
-  길이만큼 밀리고(`sequence.shift_for_insert/remove`), 자막 수정은 넣기·빼기 동안 `Job.stable_edits`(`clip|sid|w` 키 — 같은 파일 두 번도 따로)로
+  길이만큼 밀리고(`app/sequence.shift_for_insert/remove`), 자막 수정은 넣기·빼기 동안 `Job.stable_edits`(`clip|sid|w` 키 — 같은 파일 두 번도 따로)로
   옮겼다가 새 전사 키로 푼다. 넣기·빼기도 실행 취소 대상이고 파일별 캐시라 되돌려도 전사를 다시 하지 않는다. 다시 판정이 실패한(FAILED) 넣기도
   실행 취소·빼기가 된다. 보관함은 `<데이터>/clip_presets/`(presets.json, `<id>/<sha16><ext>`, 분석 캐시 `<id>/files/`): 그 영상 안의 편집
   (파일 안 초)도 같이 저장되고, 넣을 때 캐시를 작업 복사본 서명으로 옮겨(`rebase_file_cache`) 바로 들어간다.
