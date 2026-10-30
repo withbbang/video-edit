@@ -1077,8 +1077,10 @@ def _union_spans(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
 
 
 def silence_cuts_for_level(tr: dict, rms: list[float], hop: float, duration: float, cfg: dict, level: int,
-                           suspects: dict = None) -> tuple[list[Cut], list[dict], dict]:
+                           suspects: dict = None, stats="auto") -> tuple[list[Cut], list[dict], dict]:
     """--silence-level 의 무음 컷. cfg 는 auto_silence 를 적용하기 전 설정(fillers.json 그대로)이다.
+    stats: 미리 잰 auto_silence_stats 결과 (None 포함). 주면 안에서 재지 않는다 — 이어 붙이기 모드에서 조각만으로 재지 않고
+    파일 전체로 잰 값을 쓰려고. 기본 "auto" 는 tr·rms 로 잰다.
     → (컷, 건너뜀, 무음 판정에 쓴 cfg). 0 은 컷 없음, 50 은 지금의 --silence on 과 같다.
     50 을 넘으면 50 부터 그 값까지 모든 정수 값의 무음 컷을 합친다 — 기준을 올리면 무음이 길어져, 반쯤 걸쳐 있던 단어가
     무음 안에 통째로 들어가 그 주변을 새로 남기는 일이 생겨 잘린 곳이 줄 수 있기 때문 (값이 커지면 잘린 곳이 줄지 않게).
@@ -1086,7 +1088,8 @@ def silence_cuts_for_level(tr: dict, rms: list[float], hop: float, duration: flo
     level = max(0, min(100, int(level)))
     if level <= 0:
         return [], [], {}
-    stats = auto_silence_stats(tr, rms, hop) if cfg.get("silence_auto", False) else None
+    if isinstance(stats, str):
+        stats = auto_silence_stats(tr, rms, hop) if cfg.get("silence_auto", False) else None
 
     def level_cfg(lv: int) -> dict:
         c = {**cfg, **silence_level_cfg(cfg, lv)}
@@ -2130,6 +2133,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="--vbitrate auto 일 때 자동 비트레이트에 곱할 배율 (기본 1.0)")
     ap.add_argument("--subs-edits", type=Path, default=None,
                     help='자막 수정 파일 {"transcript_sha1","words","lines"} (데스크톱 앱용). 받아쓰기가 다르면 무시')
+    ap.add_argument("--sequence", type=Path, default=None,
+                    help="(앱 전용) 조각 목록 json [{id, clip, src, in, out}] — 영상 끼워 넣기. input 은 첫 조각의 파일(A)")
     return ap
 
 
@@ -2243,6 +2248,27 @@ def analyze_file(src: Path, work: Path, tr_path: Path, args: argparse.Namespace,
     return FileAnalysis(info, clean_wav, asr_wav, audio_key, tr, rms, hop, cfg, sil_base, stats)
 
 
+def _sequence_channels(spans: list, analyses: dict) -> int:
+    """이어 붙인 48k 오디오의 채널 수 = 첫 조각 파일의 정리된 오디오 (소리 없는 파일이면 그 파일 정보)"""
+    first = analyses[spans[0].piece.fkey]
+    if first.clean_wav is not None:
+        with wave.open(str(first.clean_wav), "rb") as w:
+            return w.getnchannels()
+    return min(2, max(1, first.info.get("channels", 2)))
+
+
+def _span_parts(spans: list, wavs: dict, rate: int, fps: Fraction) -> list[tuple[Path | None, int, int]]:
+    """조각마다 (그 파일의 wav, 시작 샘플, 끝 샘플). 길이는 이어 붙인 시간의 누적 프레임으로 정해
+    앞 조각 끝 = 다음 조각 시작이 되게 한다."""
+    parts = []
+    for s in spans:
+        a = round(Fraction(s.start_f) * rate / fps)
+        b = round(Fraction(s.start_f + s.f_out - s.f_in) * rate / fps)
+        i0 = round(Fraction(s.f_in) * rate / fps)
+        parts.append((wavs[s.piece.fkey], i0, i0 + (b - a)))
+    return parts
+
+
 def sequence_audio(spans: list, analyses: dict, work: Path, fps: Fraction, which: str) -> tuple[Path, dict]:
     """조각(Span) 순서대로 각 파일의 정리된 소리를 이어 붙여 work/clean.wav(48k) 또는 asr.wav(16k) 를 만든다.
     경계는 누적 프레임 × rate / fps 를 반올림해 앞 조각 끝 = 다음 조각 시작이 되게 한다. 소리 없는 파일은 무음.
@@ -2264,27 +2290,160 @@ def sequence_audio(spans: list, analyses: dict, work: Path, fps: Fraction, which
     if which in built and out.exists():
         log("이어 붙인 오디오 재사용 (work/ 에 이미 있음)")
         return out, key
-    channels = 1
-    if clean:
-        first = analyses[spans[0].piece.fkey]
-        if first.clean_wav is not None:
-            with wave.open(str(first.clean_wav), "rb") as w:
-                channels = w.getnchannels()
-        else:
-            channels = min(2, max(1, first.info.get("channels", 2)))
-    parts = []
-    for s in spans:
-        fa = analyses[s.piece.fkey]
-        n_f = s.f_out - s.f_in
-        a = round(Fraction(s.start_f) * rate / fps)
-        b = round(Fraction(s.start_f + n_f) * rate / fps)
-        wav = fa.clean_wav if clean else fa.asr_wav
-        i0 = round(Fraction(s.f_in) * rate / fps)
-        parts.append((wav, i0, i0 + (b - a)))
-    seq.concat_wav(parts, out, rate, channels)
+    channels = _sequence_channels(spans, analyses) if clean else 1
+    wavs = {k: (fa.clean_wav if clean else fa.asr_wav) for k, fa in analyses.items()}
+    seq.concat_wav(_span_parts(spans, wavs, rate, fps), out, rate, channels)
     # clean·asr 가 meta 하나를 나눠 쓴다 → 같은 키로 만든 종류만 "built" 에 쌓고, 키가 바뀌면 이번 종류만 남긴다
     meta.write_text(json.dumps({**key, "built": sorted(set(built) | {which})}, ensure_ascii=False), encoding="utf-8")
     return out, key
+
+
+@dataclass
+class SequenceAnalysis:
+    """--sequence 의 분석 결과. 시간은 모두 이어 붙인 시간"""
+    spans: list           # sequence.Span
+    analyses: dict        # fkey → FileAnalysis
+    tr: dict              # 이어 붙인 전사 (pieces 포함)
+    clean_wav: Path
+    audio_key: dict
+    asr_wav: Path
+    rms: list
+    hop: float
+    total_frames: int
+
+
+def analyze_sequence(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work: Path, cfg: dict,
+                     fps: Fraction, cut_only: bool) -> SequenceAnalysis:
+    """조각 목록의 파일마다 analyze_file (work/files/<fkey>/ 에 캐시) → 이어 붙인 전사·오디오.
+    입력(src)은 첫 조각의 파일이어야 한다. A 의 단독 모드 캐시는 먼저 파일별 폴더로 옮겨 다시 전사하지 않는다.
+    이어 붙인 전사는 out/<stem>.transcript.json 에 쓴다 (cache_key 대신 sequence_key)."""
+    pieces = seq.load_sequence(args.sequence)
+    if not pieces or pieces[0].src.resolve() != src:
+        sys.exit(f"오류: --sequence 의 첫 조각이 입력 파일이 아닙니다: {src.name}")
+    spans_ = seq.spans(pieces, fps)
+    if not spans_:
+        sys.exit("오류: --sequence 에 길이가 있는 조각이 없습니다")
+    adopt_single_cache(work, out_dir, stem, file_work(work, pieces[0].fkey))  # 무엇이든 쓰기 전에
+    analyses: dict = {}
+    for sp in spans_:
+        k = sp.piece.fkey
+        if k in analyses:
+            continue
+        fw = file_work(work, k)
+        fw.mkdir(parents=True, exist_ok=True)
+        log(f"파일 분석: {sp.piece.src.name}")
+        # info 는 넘기지 않는다: analyze_file 이 길이를 고쳐 쓰므로 A 의 info 를 이어 붙인 info 와 나누지 않게
+        analyses[k] = analyze_file(sp.piece.src, fw, fw / "transcript.json", args, cfg, cut_only)
+    tr = seq.combine_transcripts(spans_, {k: fa.tr for k, fa in analyses.items()}, fps)
+    tr["sequence_key"] = {"sequence": [[s.piece.fkey, s.f_in, s.f_out] for s in spans_],
+                          "files": {k: fa.tr.get("cache_key") for k, fa in analyses.items()}}
+    if not cut_only:  # 잘린 미리보기 소리만 만들 땐 전사 파일을 건드리지 않는다
+        (out_dir / f"{stem}.transcript.json").write_text(json.dumps(tr, ensure_ascii=False, indent=1),
+                                                         encoding="utf-8")
+    clean_wav, audio_key = sequence_audio(spans_, analyses, work, fps, "clean")
+    asr_wav, _ = sequence_audio(spans_, analyses, work, fps, "asr")
+    rms, hop = load_rms(asr_wav)
+    total = sum(s.f_out - s.f_in for s in spans_)
+    log(f"조각 {len(spans_)}개 이어 붙임: {fmt_clock(total / float(fps))}")
+    return SequenceAnalysis(spans_, analyses, tr, clean_wav, audio_key, asr_wav, rms, hop, total)
+
+
+def judge_sequence(sq: SequenceAnalysis, args: argparse.Namespace, fps: Fraction) -> tuple[list[Cut], list[dict], int]:
+    """조각마다 judge_cuts. 조각 경계는 영상 맨 앞/뒤처럼 다룬다 (조각의 전사·에너지만 넘기므로 무음 잇기가 경계를 넘지 않고
+    경계에 붙은 무음은 여유 없이 컷). 설정·자동 무음 기준은 그 조각 파일의 것. 소리 없는 조각은 판정하지 않는다."""
+    raw, skipped, n = [], [], 0
+    for sp, p in zip(sq.spans, sq.tr["pieces"]):
+        fa = sq.analyses[sp.piece.fkey]
+        if fa.asr_wav is None:
+            continue
+        t0, lo, hi = p["start"], float(sp.f_in / fps), float(sp.f_out / fps)
+        ptr = seq.slice_piece(sq.tr, p)
+        ptr["align_failed"] = [{**x, "start": x["start"] - lo, "end": x["end"] - lo}
+                               for x in fa.tr.get("align_failed", []) if lo <= (x["start"] + x["end"]) / 2 < hi]
+        # --silence-level 의 자동 무음 기준은 파일 전체로 잰다 (단독 모드와 같은 값 — 짧은 조각으로 재면 달라진다)
+        stats = (auto_silence_stats(fa.tr, fa.rms, fa.hop) if args.silence_level and fa.sil_base.get("silence_auto")
+                 else None)
+        c, sk, nf = judge_cuts(ptr, sq.rms[round(t0 / sq.hop):round(p["end"] / sq.hop)], sq.hop, p["end"] - t0,
+                               fa.cfg, fa.sil_base, args, stats)
+        for x in c:
+            x.start += t0
+            x.end += t0
+        raw += c
+        skipped += [{**x, "start": x["start"] + t0, "end": x["end"] + t0} for x in sk]
+        n += nf
+    return raw, skipped, n
+
+
+def sequence_render_audio(args: argparse.Namespace, sq: SequenceAnalysis, work: Path,
+                          fps: Fraction) -> tuple[Path, dict]:
+    """결과·미리보기 소리 (이어 붙이기 모드의 preview_audio_source). 파일마다 render_audio_for (그 파일 폴더의 render.wav)
+    → 조각 순서대로 이어 work/render.wav. 설정이 분석 오디오와 같으면 이어 붙인 정리 오디오(work/clean.wav)를 그대로 쓴다."""
+    r_denoise, r_loud, r_level = render_audio_args(args)
+    if r_level is None and (r_denoise, r_loud) == (args.denoise, not args.no_loudnorm):
+        return sq.clean_wav, sq.audio_key
+    wavs, keys = {}, {}
+    for sp in sq.spans:
+        k = sp.piece.fkey
+        fa = sq.analyses[k]
+        if k in wavs:
+            continue
+        if fa.clean_wav is None:   # 소리 없는 파일: 무음
+            wavs[k], keys[k] = None, fa.audio_key
+            continue
+        wavs[k], keys[k] = render_audio_for(sp.piece.src, file_work(work, k), fa.info, r_denoise, r_loud,
+                                            args.force, r_level, analysis=(fa.clean_wav, fa.audio_key))
+    out, meta = work / "render.wav", work / "render.meta.json"
+    key = json.loads(json.dumps({"sequence": [[s.piece.fkey, s.f_in, s.f_out] for s in sq.spans], "files": keys},
+                                ensure_ascii=False))
+    if cached_meta(meta, key, [out], False):
+        log("이어 붙인 렌더용 오디오 재사용 (work/render.wav)")
+        return out, key
+    meta.unlink(missing_ok=True)
+    seq.concat_wav(_span_parts(sq.spans, wavs, 48000, fps), out, 48000, _sequence_channels(sq.spans, sq.analyses))
+    meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
+    return out, key
+
+
+def judge_cuts(tr: dict, rms: list[float], hop: float, duration: float, cfg: dict, sil_base: dict,
+               args: argparse.Namespace, stats) -> tuple[list[Cut], list[dict], int]:
+    """자동 컷 판정 (필러 · 단어 시간 의심 · 전사 누락 · 무음). refine_cuts 전의 컷이다. → (컷, 건너뜀, 필러 컷 수)
+    cfg 는 auto_silence 를 적용한 설정, sil_base 는 적용 전 설정(--silence-level 용).
+    stats 는 --silence-level 이 쓸 auto_silence_stats ("auto" 면 tr·rms 로 잰다 — 파일 하나일 때).
+    이어 붙이기 모드에선 조각마다 (조각 기준 시간의 전사·에너지, 그 파일의 설정으로) 부른다."""
+    level = args.silence_level
+    habit_mode = {"on": "conservative", "off": "off", "aggressive": "aggressive"}[args.habit]
+    raw_cuts, skipped = detect_fillers(tr, cfg, habit_mode, args.filler == "on")
+    suspects = find_suspect_words(tr, quiet_mask(rms, hop, cfg), hop, cfg)
+    skipped += tr.get("align_failed", [])
+    aw = all_words(tr)
+    for k, (seg, wi, w) in enumerate(aw):
+        if (seg, wi) in suspects:
+            ctx = " ".join(x[2]["word"].strip() for x in aw[max(0, k - 3):k]) + f" [{w['word'].strip()}] " \
+                + " ".join(x[2]["word"].strip() for x in aw[k + 1:k + 4])
+            skipped.append({"start": w["start"], "end": w["end"], "word": w["word"].strip(),
+                            "why": f"단어 시간 의심: 단어 안에 {suspects[(seg, wi)]:.1f}s 무음 "
+                                   "(실제 위치와 어긋났을 수 있음, 주변 컷·자막 확인)", "context": ctx.strip()})
+    un_cuts, un_skipped = detect_untranscribed(tr, rms, hop, raw_cuts, cfg, suspects)
+    raw_cuts += un_cuts
+    skipped += un_skipped
+    if un_cuts or un_skipped:
+        log(f"전사 안 된 목소리: 필러 옆이라 컷 {len(un_cuts)}곳, 확인 필요 {len(un_skipped)}곳")
+    n_fillers = len(raw_cuts)
+    if level is not None and level > 0:
+        sil_cuts, sil_skipped, sil_cfg = silence_cuts_for_level(tr, rms, hop, duration, sil_base,
+                                                                level, suspects, stats)
+        log(f"무음 세기 {level}: 기준 {sil_cfg['silence_threshold_db']:.1f}dB, "
+            f"{sil_cfg['silence_min_sec']:.2f}초 이상{', 단어 없는 틈 전부' if level >= 100 else ''}")
+    elif level is None and args.silence == "on":
+        sil_cuts, sil_skipped = detect_silences(tr, rms, hop, duration, cfg, suspects)
+    else:
+        sil_cuts = None
+    if sil_cuts is not None:
+        raw_cuts += sil_cuts
+        skipped += sil_skipped
+        log(f"무음 감지: {len(sil_cuts)}곳, {sum(c.end - c.start for c in sil_cuts):.1f}s "
+            f"(건너뜀 {len(sil_skipped)}건)")
+    return raw_cuts, skipped, n_fillers
 
 
 def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work: Path,
@@ -2298,12 +2457,24 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
 
     # 1) 오디오 · 2) 전사 · 필러 시간 보정 (파일 하나 분석)
     cut_only = bool(args.preview_cut_audio)   # 잘린 미리보기 소리만: 전사·분석 오디오는 캐시만 쓴다
-    tr_path = out_dir / f"{stem}.transcript.json"
-    fa = analyze_file(src, work, tr_path, args, cfg, cut_only, info)
-    clean_wav, asr_wav, audio_key = fa.clean_wav, fa.asr_wav, fa.audio_key
-    tr, rms, hop = fa.tr, fa.rms, fa.hop
-    cfg, sil_base = fa.cfg, fa.sil_base
-    total_frames = int(round(info["duration"] * float(fps)))
+    sq = None
+    if args.sequence:   # 조각 이어 붙이기 (앱의 영상 끼워 넣기): 파일마다 분석해 이어 붙인 시간으로
+        if not (args.review or args.preview_cut_audio):
+            sys.exit("오류: --sequence 렌더는 아직 지원하지 않습니다 (--review 또는 --preview-cut-audio 와 함께 쓰세요)")
+        sq = analyze_sequence(args, src, stem, out_dir, work, cfg, fps, cut_only)
+        fa = sq.analyses[sq.spans[0].piece.fkey]
+        clean_wav, asr_wav, audio_key = sq.clean_wav, sq.asr_wav, sq.audio_key
+        tr, rms, hop = sq.tr, sq.rms, sq.hop
+        cfg, sil_base = fa.cfg, fa.sil_base   # refine_cuts·자막이 쓰는 값은 파일과 상관없다 (사전·경계 넓히기)
+        total_frames = sq.total_frames
+        info = {**info, "duration": float(Fraction(total_frames) / fps)}
+    else:
+        tr_path = out_dir / f"{stem}.transcript.json"
+        fa = analyze_file(src, work, tr_path, args, cfg, cut_only, info)
+        clean_wav, asr_wav, audio_key = fa.clean_wav, fa.asr_wav, fa.audio_key
+        tr, rms, hop = fa.tr, fa.rms, fa.hop
+        cfg, sil_base = fa.cfg, fa.sil_base
+        total_frames = int(round(info["duration"] * float(fps)))
 
     # 3) 컷 리스트
     cuts_path = out_dir / f"{stem}.cuts.json"
@@ -2314,43 +2485,16 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         level = args.silence_level
         modes = {"filler": args.filler, "habit": args.habit,
                  "silence": args.silence if level is None else f"level:{level}"}
-        habit_mode = {"on": "conservative", "off": "off", "aggressive": "aggressive"}[args.habit]
-        raw_cuts, skipped = detect_fillers(tr, cfg, habit_mode, args.filler == "on")
-        suspects = find_suspect_words(tr, quiet_mask(rms, hop, cfg), hop, cfg)
-        skipped += tr.get("align_failed", [])
-        aw = all_words(tr)
-        for k, (seg, wi, w) in enumerate(aw):
-            if (seg, wi) in suspects:
-                ctx = " ".join(x[2]["word"].strip() for x in aw[max(0, k - 3):k]) + f" [{w['word'].strip()}] " \
-                    + " ".join(x[2]["word"].strip() for x in aw[k + 1:k + 4])
-                skipped.append({"start": w["start"], "end": w["end"], "word": w["word"].strip(),
-                                "why": f"단어 시간 의심: 단어 안에 {suspects[(seg, wi)]:.1f}s 무음 "
-                                       "(실제 위치와 어긋났을 수 있음, 주변 컷·자막 확인)", "context": ctx.strip()})
-        un_cuts, un_skipped = detect_untranscribed(tr, rms, hop, raw_cuts, cfg, suspects)
-        raw_cuts += un_cuts
-        skipped += un_skipped
-        if un_cuts or un_skipped:
-            log(f"전사 안 된 목소리: 필러 옆이라 컷 {len(un_cuts)}곳, 확인 필요 {len(un_skipped)}곳")
-        n_fillers = len(raw_cuts)
-        if level is not None and level > 0:
-            sil_cuts, sil_skipped, sil_cfg = silence_cuts_for_level(tr, rms, hop, info["duration"], sil_base,
-                                                                    level, suspects)
-            log(f"무음 세기 {level}: 기준 {sil_cfg['silence_threshold_db']:.1f}dB, "
-                f"{sil_cfg['silence_min_sec']:.2f}초 이상{', 단어 없는 틈 전부' if level >= 100 else ''}")
-        elif level is None and args.silence == "on":
-            sil_cuts, sil_skipped = detect_silences(tr, rms, hop, info["duration"], cfg, suspects)
+        if sq is None:
+            raw_cuts, skipped, n_fillers = judge_cuts(tr, rms, hop, info["duration"], cfg, sil_base, args, "auto")
         else:
-            sil_cuts = None
-        if sil_cuts is not None:
-            raw_cuts += sil_cuts
-            skipped += sil_skipped
-            log(f"무음 감지: {len(sil_cuts)}곳, {sum(c.end - c.start for c in sil_cuts):.1f}s "
-                f"(건너뜀 {len(sil_skipped)}건)")
+            raw_cuts, skipped, n_fillers = judge_sequence(sq, args, fps)
         cuts = refine_cuts(raw_cuts, rms, hop, fps, total_frames, cfg)
         cuts_path.write_text(json.dumps(
             {"source": str(src), "fps": f"{fps.numerator}/{fps.denominator}", **modes,
              "transcript_sha1": transcript_sha1(tr),
-             "cuts": [asdict(c) for c in cuts], "skipped": skipped},
+             "cuts": [asdict(c) for c in cuts], "skipped": skipped,
+             **({"pieces": tr["pieces"]} if sq else {})},
             ensure_ascii=False, indent=1), encoding="utf-8")
         write_review(cuts, skipped, out_dir / f"{stem}.review.md")
         removed = sum(c.end - c.start for c in cuts)
@@ -2361,12 +2505,15 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         keeps = keep_segments(cuts, total_frames)
         if not keeps:
             sys.exit("오류: 남길 구간이 없습니다 (전부 컷 대상).")
-        p_wav, _ = preview_audio_source(args, src, work, info, clean_wav, audio_key)
+        p_wav, _ = (sequence_render_audio(args, sq, work, fps) if sq else
+                    preview_audio_source(args, src, work, info, clean_wav, audio_key))
         idx = make_cut_preview_audio(p_wav, keeps, fps, args.preview_cut_audio.resolve(), work)
         log(f"미리보기 소리: {args.preview_cut_audio.name} ({len(keeps)}구간, {idx['duration']:.1f}초)")
         progress("preview", 1.0)
         return
-    if args.preview:
+    if args.preview and sq:
+        log("--sequence: 미리보기는 아직 만들지 않습니다")   # 이어 붙인 미리보기 영상은 다음 단계
+    elif args.preview:
         p_wav, p_key = preview_audio_source(args, src, work, info, clean_wav, audio_key)
         try_preview(src, p_wav, p_key, info, args.preview.resolve(), work, args.hw == "on", args.force)
     if args.review:

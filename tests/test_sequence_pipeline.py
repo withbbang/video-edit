@@ -55,3 +55,167 @@ def test_adopt_without_cache_or_missing_files(tmp_path):
     (work / "asr.wav").unlink()
     pipeline.adopt_single_cache(work, out, "a", fw)  # 없는 파일은 건너뜀
     assert (fw / "clean.wav").exists() and not (fw / "asr.wav").exists()
+
+
+# --- --sequence 분석: 조각별 컷 판정 (합성 영상, 전사는 가짜 모델) ---------------------------------------
+
+import shutil
+import subprocess
+import sys
+import wave
+from types import SimpleNamespace
+
+import pytest
+
+needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg 필요")
+
+FPS = 30
+# A (5초): 0.5~2.6 · 3.4~4.5 에 소리. "음" 은 필러, 2.6~3.4 는 말 사이 무음, 앞뒤 무음
+A_WORDS = [("안녕", 0.5, 1.0), ("음", 1.0, 1.3), ("하세요", 1.3, 2.0), ("여러분", 2.0, 2.6),
+           ("반갑습니다", 3.4, 4.5)]
+A_TONE = r"between(t\,0.5\,2.6)+between(t\,3.4\,4.5)"
+# B (2초): 앞뒤 0.5초 무음
+B_WORDS = [("비디오", 0.5, 1.5)]
+B_TONE = r"between(t\,0.5\,1.5)"
+
+
+def _media(path, dur, tone):
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", f"testsrc=size=160x120:rate={FPS}:duration={dur}",
+                    "-f", "lavfi", "-i", f"aevalsrc=0.3*sin(2*PI*440*t)*({tone}):s=48000:d={dur}",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", "-shortest", str(path)],
+                   check=True)
+
+
+class _FakeModel:
+    """wav 길이로 A·B 를 가려 미리 정한 단어를 돌려준다. 불린 길이를 calls 에 남긴다"""
+    def __init__(self, calls):
+        self.calls = calls
+
+    def transcribe(self, path, **kw):
+        with wave.open(str(path), "rb") as w:
+            dur = w.getnframes() / w.getframerate()
+        self.calls.append(round(dur, 1))
+        words = A_WORDS if dur > 3.5 else B_WORDS
+        seg = SimpleNamespace(start=words[0][1], end=words[-1][2], text=" ".join(x[0] for x in words),
+                              words=[SimpleNamespace(word=" " + x, start=s, end=e, probability=0.9)
+                                     for x, s, e in words])
+        return iter([seg]), SimpleNamespace(language="ko", duration=dur)
+
+
+@pytest.fixture
+def seq_env(tmp_path, monkeypatch):
+    a, b = tmp_path / "a.mov", tmp_path / "b.mov"
+    _media(a, 5, A_TONE)
+    _media(b, 2, B_TONE)
+    calls = []
+    model = _FakeModel(calls)
+    monkeypatch.setattr(pipeline, "load_whisper", lambda *x, **k: model)
+    monkeypatch.setattr(pipeline, "ctc_fix_fillers", lambda *x, **k: (0, []))
+    sq = tmp_path / "seq.json"
+    sq.write_text(json.dumps([
+        {"id": "a1", "clip": "A", "src": str(a), "in": 0, "out": 2},
+        {"id": "b1", "clip": "B", "src": str(b), "in": 0, "out": 2},
+        {"id": "a2", "clip": "A", "src": str(a), "in": 2, "out": 5}]), encoding="utf-8")
+
+    def run(inp, out, *extra):
+        monkeypatch.setattr(sys, "argv", ["pipeline.py", str(inp), "--review", "--denoise", "none",
+                                          "--no-loudnorm", "--out", str(out),
+                                          "--work-root", str(tmp_path / "work"), *map(str, extra)])
+        pipeline.main()
+        return json.loads((out / f"{pipeline.Path(inp).stem}.cuts.json").read_text(encoding="utf-8"))
+    return SimpleNamespace(a=a, b=b, sq=sq, calls=calls, run=run, tmp=tmp_path, mp=monkeypatch)
+
+
+def _frames(cuts):
+    return [(c["start_frame"], c["end_frame"]) for c in cuts]
+
+
+@needs_ffmpeg
+def test_inserting_b_keeps_a_cuts(seq_env):
+    out = seq_env.tmp / "out"
+    single = seq_env.run(seq_env.a, out)
+    combined = seq_env.run(seq_env.a, out, "--sequence", seq_env.sq)
+    assert single["cuts"]
+    b0, b1 = 2 * FPS, 4 * FPS   # B 는 이어 붙인 시간 2~4초
+    a_part = [(s if s < b0 else s - (b1 - b0), e if e <= b0 else e - (b1 - b0))
+              for s, e in _frames(combined["cuts"]) if e <= b0 or s >= b1]
+    assert a_part == _frames(single["cuts"])
+    assert [p["id"] for p in combined["pieces"]] == ["a1", "b1", "a2"]
+    tr = json.loads((out / "a.transcript.json").read_text(encoding="utf-8"))
+    assert "sequence_key" in tr and "cache_key" not in tr
+    assert combined["transcript_sha1"] == pipeline.transcript_sha1(tr)
+
+
+@needs_ffmpeg
+def test_b_edges_silence_fully_cut(seq_env):
+    out = seq_env.tmp / "out"
+    data = seq_env.run(seq_env.a, out, "--sequence", seq_env.sq)
+    b_cuts = [(s, e) for s, e in _frames(data["cuts"]) if 2 * FPS <= s and e <= 4 * FPS]
+    assert b_cuts[0][0] == 2 * FPS and b_cuts[0][1] <= 2.5 * FPS     # 앞 무음: 경계 쪽은 여유 없이
+    assert b_cuts[-1][1] == 4 * FPS and b_cuts[-1][0] >= 3.5 * FPS   # 뒤 무음: 경계 쪽은 여유 없이
+    assert all(c["reason"] == "silence" for c in data["cuts"]
+               if 2 * FPS <= c["start_frame"] and c["end_frame"] <= 4 * FPS)
+
+
+@needs_ffmpeg
+def test_sequence_does_not_retranscribe_a(seq_env):
+    out = seq_env.tmp / "out"
+    seq_env.run(seq_env.a, out)
+    assert seq_env.calls == [5.0]
+    seq_env.run(seq_env.a, out, "--sequence", seq_env.sq)
+    assert seq_env.calls == [5.0, 2.0]   # B 만 새로 전사
+    seq_env.run(seq_env.a, out, "--sequence", seq_env.sq)
+    assert seq_env.calls == [5.0, 2.0]   # 다시 돌려도 전사 없음
+
+
+@needs_ffmpeg
+def test_sequence_input_must_be_first_piece(seq_env, capsys):
+    with pytest.raises(SystemExit) as e:
+        seq_env.run(seq_env.b, seq_env.tmp / "out", "--sequence", seq_env.sq)
+    assert "첫 조각" in str(e.value.code)
+    assert seq_env.calls == []
+
+
+@needs_ffmpeg
+def test_sequence_preview_cut_audio_from_cache(seq_env):
+    out = seq_env.tmp / "out"
+    data = seq_env.run(seq_env.a, out, "--sequence", seq_env.sq)
+    tr_before = (out / "a.transcript.json").read_text(encoding="utf-8")
+    m4a = seq_env.tmp / "cut.m4a"
+    seq_env.mp.setattr(sys, "argv", ["pipeline.py", str(seq_env.a), "--denoise", "none", "--no-loudnorm", "--out", str(out),
+                "--work-root", str(seq_env.tmp / "work"), "--sequence", str(seq_env.sq), "--denoise-level", "0",
+                "--apply-cuts", str(out / "a.cuts.json"), "--preview-cut-audio", str(m4a)])
+    pipeline.main()
+    assert seq_env.calls == [5.0, 2.0]   # 전사 캐시만
+    assert (out / "a.transcript.json").read_text(encoding="utf-8") == tr_before
+    work = seq_env.tmp / "work" / "a"
+    assert json.loads((work / "render.meta.json").read_text())["sequence"][1][1:] == [0, 2 * FPS]
+    with wave.open(str(work / "render.wav"), "rb") as w:
+        assert w.getnframes() == 7 * 48000   # A 5초 + B 2초
+    kept = 7 * FPS - sum(e - s for s, e in _frames(data["cuts"]))
+    idx = json.loads(m4a.with_suffix(".index.json").read_text())
+    assert m4a.exists() and abs(idx["duration"] - kept / FPS) < 0.05
+
+
+@needs_ffmpeg
+def test_silent_b_is_not_judged(seq_env):
+    b = seq_env.tmp / "silent.mp4"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+                    "-i", f"testsrc=size=160x120:rate={FPS}:duration=2", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", str(b)], check=True)
+    items = json.loads(seq_env.sq.read_text())
+    items[1]["src"] = str(b)
+    seq_env.sq.write_text(json.dumps(items), encoding="utf-8")
+    data = seq_env.run(seq_env.a, seq_env.tmp / "out", "--sequence", seq_env.sq)
+    assert seq_env.calls == [5.0]   # 소리 없는 B 는 전사하지 않음
+    assert not [c for c in data["cuts"] if c["start_frame"] < 4 * FPS and c["end_frame"] > 2 * FPS]
+
+
+@needs_ffmpeg
+def test_sequence_render_not_yet(seq_env):
+    seq_env.mp.setattr(sys, "argv", ["pipeline.py", str(seq_env.a), "--denoise", "none", "--out", str(seq_env.tmp / "o"),
+                                     "--work-root", str(seq_env.tmp / "work"), "--sequence", str(seq_env.sq)])
+    with pytest.raises(SystemExit) as e:
+        pipeline.main()
+    assert "--sequence 렌더" in str(e.value.code) and seq_env.calls == []   # 임시: 렌더는 다음 단계에서
