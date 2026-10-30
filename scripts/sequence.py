@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -116,3 +117,48 @@ def slice_piece(tr: dict, p: dict) -> dict:
     out["segments"] = segs
     out["duration"] = p["end"] - t0
     return out
+
+
+def concat_wav(parts: list[tuple[Path | None, int, int]], out: Path, rate: int, channels: int) -> int:
+    """(wav, 시작 샘플, 끝 샘플) 조각들을 이어 붙여 out 에 쓴다 (16비트 PCM). 반환 = 전체 샘플 수.
+    wav 가 None 이거나 원본이 모자라면 그 부분은 0 (무음). 채널 수가 다르면 모노→복제, 스테레오→평균으로 맞춘다.
+    .part 에 쓴 뒤 os.replace 한다."""
+    import wave
+    import numpy as np
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".part")
+    total = 0
+    chunk = rate * 30
+    with wave.open(str(tmp), "wb") as w:
+        w.setnchannels(channels); w.setsampwidth(2); w.setframerate(rate)
+        for path, a, b in parts:
+            n = max(0, b - a)
+            if path is None:
+                done = 0
+                while done < n:
+                    m = min(chunk, n - done)
+                    w.writeframes(bytes(m * channels * 2))
+                    done += m
+                total += n
+                continue
+            with wave.open(str(path), "rb") as r:
+                ch, avail = r.getnchannels(), r.getnframes()
+                r.setpos(min(a, avail))
+                done = 0
+                while done < n:
+                    m = min(chunk, n - done)
+                    raw = r.readframes(min(m, max(0, avail - min(a, avail) - done)))
+                    x = np.frombuffer(raw, dtype=np.int16).reshape(-1, ch) if raw else np.zeros((0, ch), np.int16)
+                    if ch != channels:
+                        if ch == 1:
+                            x = np.repeat(x, channels, axis=1)
+                        else:
+                            x = x.astype(np.int32).mean(axis=1, keepdims=True).round().astype(np.int16)
+                            x = np.repeat(x, channels, axis=1)
+                    if len(x) < m:
+                        x = np.concatenate([x, np.zeros((m - len(x), channels), np.int16)])
+                    w.writeframes(x.astype(np.int16).tobytes())
+                    done += m
+            total += n
+    os.replace(tmp, out)
+    return total

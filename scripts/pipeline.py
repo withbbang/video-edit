@@ -49,6 +49,8 @@ from dataclasses import dataclass, asdict
 from fractions import Fraction
 from pathlib import Path
 
+import sequence as seq
+
 ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = ROOT / "models"
 DEFAULT_FILLERS = ROOT / "fillers.json"
@@ -173,17 +175,7 @@ def video_rotation(v: dict) -> int:
         return 0
 
 
-def ffprobe(path: Path) -> dict:
-    out = run(["ffprobe", "-v", "error", "-print_format", "json",
-               "-show_streams", "-show_format", path], quiet=True).stdout
-    info = json.loads(out)
-    # 오디오 파일에 붙은 앨범 아트(attached_pic)는 영상이 아니다
-    v = next((s for s in info["streams"] if s["codec_type"] == "video"
-              and not s.get("disposition", {}).get("attached_pic")), None)
-    a = next((s for s in info["streams"] if s["codec_type"] == "audio"), None)
-    if a is None:
-        sys.exit("오류: 오디오 트랙이 없는 파일입니다.")
-
+def _probe_fps(v: dict | None) -> tuple[Fraction, bool]:
     fps, vfr = Fraction(30), False
     if v:
         avg, rate = _frac(v.get("avg_frame_rate")), _frac(v.get("r_frame_rate"))
@@ -192,13 +184,38 @@ def ffprobe(path: Path) -> dict:
             fps, vfr = rate, True
         else:
             fps = avg or (rate if rate and rate <= 120 else None) or Fraction(30)
+    return fps, vfr
 
+
+def ffprobe(path: Path, require_audio: bool = True) -> dict:
+    out = run(["ffprobe", "-v", "error", "-print_format", "json",
+               "-show_streams", "-show_format", path], quiet=True).stdout
+    info = json.loads(out)
+    # 오디오 파일에 붙은 앨범 아트(attached_pic)는 영상이 아니다
+    v = next((s for s in info["streams"] if s["codec_type"] == "video"
+              and not s.get("disposition", {}).get("attached_pic")), None)
+    a = next((s for s in info["streams"] if s["codec_type"] == "audio"), None)
+    if a is None:
+        if not require_audio:  # 끼워 넣기: 소리 없는 영상도 조각이 될 수 있다
+            fmt_dur = float(info["format"].get("duration") or 0)
+            return {"has_audio": False, "has_video": v is not None, "fps": _probe_fps(v)[0],
+                    "vfr": _probe_fps(v)[1], "width": int(v["width"]) if v else 0,
+                    "height": int(v["height"]) if v else 0, "rotation": video_rotation(v) if v else 0,
+                    "duration": float((v or {}).get("duration") or fmt_dur or 0),
+                    "sample_rate": 48000, "channels": 0, "audio_offset": 0.0,
+                    "pix_fmt": (v or {}).get("pix_fmt", ""),
+                    "high_bit": bool(re.search(r"p1[0-6]|p010|p016", (v or {}).get("pix_fmt", ""))),
+                    "color": {k: (v or {}).get(k) for k in ("color_primaries", "color_transfer", "color_space")}}
+        sys.exit("오류: 오디오 트랙이 없는 파일입니다.")
+
+    fps, vfr = _probe_fps(v)
     fmt_dur = float(info["format"].get("duration") or 0)
     duration = float((v or {}).get("duration") or fmt_dur or a.get("duration") or 0)
     pix_fmt = (v or {}).get("pix_fmt", "")
     a_start = float(a.get("start_time") or 0)
     v_start = float(v.get("start_time") or 0) if v else a_start
     return {
+        "has_audio": True,
         "has_video": v is not None,
         "fps": fps,
         "vfr": vfr,
@@ -2182,7 +2199,13 @@ def analyze_file(src: Path, work: Path, tr_path: Path, args: argparse.Namespace,
     cfg 는 복사해서 쓰고, 자동 무음을 적용한 그 파일의 설정을 돌려준다."""
     cfg = copy.deepcopy(cfg)
     if info is None:
-        info = ffprobe(src)
+        info = ffprobe(src, require_audio=False)
+    if not info.get("has_audio", True):  # 소리 없는 영상: 정리·전사 없이 빈 전사로 (이어 붙일 땐 그 구간이 무음)
+        log(f"소리 없는 파일: {src.name} (오디오 정리·전사를 건너뜀)")
+        tr = {"segments": [], "duration": info["duration"], "language": "ko"}
+        progress("audio", 1.0); progress("align", 1.0)
+        return FileAnalysis(info, None, None, {"silent": True, "src": source_sig(src)}, tr, [], 0.01,
+                            cfg, dict(cfg), None)
     # 1) 오디오
     clean_wav, asr_wav, audio_key = prepare_audio(src, work, info, args.denoise,
                                                   not args.no_loudnorm, args.force, cut_only)
@@ -2217,6 +2240,42 @@ def analyze_file(src: Path, work: Path, tr_path: Path, args: argparse.Namespace,
         tr_path.write_text(json.dumps(tr, ensure_ascii=False, indent=1), encoding="utf-8")
     progress("align", 1.0)
     return FileAnalysis(info, clean_wav, asr_wav, audio_key, tr, rms, hop, cfg, sil_base, stats)
+
+
+def sequence_audio(spans: list, analyses: dict, work: Path, fps: Fraction, which: str) -> tuple[Path, dict]:
+    """조각(Span) 순서대로 각 파일의 정리된 소리를 이어 붙여 work/clean.wav(48k) 또는 asr.wav(16k) 를 만든다.
+    경계는 누적 프레임 × rate / fps 를 반올림해 앞 조각 끝 = 다음 조각 시작이 되게 한다. 소리 없는 파일은 무음.
+    work/audio.meta.json 의 키(조각 순서 + 파일별 audio_key)가 같으면 다시 만들지 않는다. 반환 = (wav, 키)"""
+    clean = which == "clean"
+    rate = 48000 if clean else 16000
+    out = work / ("clean.wav" if clean else "asr.wav")
+    meta = work / "audio.meta.json"
+    key = {"sequence": [[s.piece.fkey, s.f_in, s.f_out] for s in spans],
+           "files": {s.piece.fkey: analyses[s.piece.fkey].audio_key for s in spans}}
+    key = json.loads(json.dumps(key))
+    if cached_meta(meta, key, [out], False):
+        log("이어 붙인 오디오 재사용 (work/ 에 이미 있음)")
+        return out, key
+    channels = 1
+    if clean:
+        first = analyses[spans[0].piece.fkey]
+        if first.clean_wav is not None:
+            with wave.open(str(first.clean_wav), "rb") as w:
+                channels = w.getnchannels()
+        else:
+            channels = min(2, max(1, first.info.get("channels", 2)))
+    parts = []
+    for s in spans:
+        fa = analyses[s.piece.fkey]
+        n_f = s.f_out - s.f_in
+        a = round(Fraction(s.start_f) * rate / fps)
+        b = round(Fraction(s.start_f + n_f) * rate / fps)
+        wav = fa.clean_wav if clean else fa.asr_wav
+        i0 = round(Fraction(s.f_in) * rate / fps)
+        parts.append((wav, i0, i0 + (b - a)))
+    seq.concat_wav(parts, out, rate, channels)
+    meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
+    return out, key
 
 
 def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work: Path,
