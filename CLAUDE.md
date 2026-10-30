@@ -9,6 +9,7 @@ mp4 안에도 끄고 켤 수 있는 자막 트랙(QuickTime 용)을 넣는다 (`
 
 ```
 scripts/pipeline.py   파이프라인 본체 (ffmpeg + faster-whisper + numpy)
+scripts/sequence.py   조각 목록(영상 끼워 넣기)·이어 붙인 전사·편집 시간 밀기 — 순수 함수 (pipeline·앱이 함께 씀)
 fillers.json          필러/습관어 사전과 감지 파라미터 — 사용자가 직접 고치는 파일
 models/sh.rnnn        RNNoise 노이즈 모델 (ffmpeg arnndn 필터용)
 setup.sh              ffmpeg 확인, .venv 생성, 의존성 설치
@@ -142,7 +143,11 @@ tests/                pytest (requirements-dev.txt)
   `work/<이름>/burn.ass` 로 만들어 컷 뒤 영상에 `ass` 필터로 새김. 켜면 자막 트랙은 넣지 않음. ffmpeg 에 libass 필요 —
   홈브루 ffmpeg 9 엔 없고 `packaging/bin/ffmpeg`(배포용)엔 있다. 크기·여백 비율은 `BURN_*` 와 `app/ui/capstyle.js` 의 `BASE` 가 같아야 함),
   `--overlays <json>`(이미지 겹쳐 새기기 `[{path, x, y, w, h?, start, end}]`: x·y·w·h 는 화면 비율(h 없으면 그림 비율대로), start/end 는 원본 초 → keeps 로 결과 구간
-  (`overlay_windows`)으로 바꿔 컷 뒤·자막(ass) 앞에 `overlay` 필터. 소리만 있는 파일이면 무시).
+  (`overlay_windows`)으로 바꿔 컷 뒤·자막(ass) 앞에 `overlay` 필터. 소리만 있는 파일이면 무시),
+  `--sequence <json>`(영상 끼워 넣기 `[{id, clip, src, in, out}]`: 이어 붙인 시간이 "원본 초". 분석 오디오·전사는 파일마다
+  `work/<이름>/files/<fkey>/` 에 캐시해 조각대로 잘라 잇고, 조각 경계는 영상 맨 앞/뒤처럼(앞뒤 무음 전부 컷, 무음 잇기·자막 줄·필러 경계
+  넓히기가 넘지 않음) 다룬다. 자동 무음 기준·음량 정규화는 파일마다. 해상도·fps·색은 A(첫 조각)를 따르고 다른 비율은 검은 여백,
+  렌더는 조각별 trim→concat 한 번 인코딩. 없으면 기존 동작. 단독 실행도 키가 맞으면 파일별 캐시를 쓴다(`restore_single_cache`)).
 - 앱 화면: 자막 탭 줄·(멈췄을 때) 영상 위 자막을 누르면 그 줄 전체를 고치는 칸(contenteditable)이 열리고 꾸밈 막대도 켜짐
   (Api.set_line → `subtitles.plan_line` 이 띄어쓰기 낱말을 어절에 다시 나눠 담고 꾸밈을 글자 따라 옮김, `원문 복원`), 찾아 바꾸기, 줄 시간 ±0.1초·`지금 위치로`.
   타임라인을 끌거나 Shift+클릭 두 번으로 구간을 골라 직접 자르거나 되살림
@@ -155,6 +160,14 @@ tests/                pytest (requirements-dev.txt)
   `<데이터>/overlay_presets/`(presets.json). 영상 위 층(`ovl` in app.js)·확대 타임라인 이미지 줄·오른쪽 목록의 `이미지` 탭(잘린 곳·자막 옆: `사용 중`·`보관함` 탭과 `불러오기`, 고른 이미지 `이름 변경`·`보관`·`지우기`, 보관함 `삽입`, 이름 두 번 누르기로 이름 바꾸기 — Api.rename_overlay/rename_preset), 계산은 `TL.ovRect/ovMove/ovResizeEdge/barDrag`.
   저장 때 `out/<이름>.overlays.json` → `--overlays`. 이미지 줄은 기본 3줄 반 높이까지만 보이고 넘치면 그 줄만 스크롤(영상이 줄지 않게),
   패널 위 테두리 손잡이로 높이를 바꾼다(`TL.lanesDrag`, 영상 최소 120px, `localStorage` 의 `ovLanesH`, 두 번 누르면 기본).
+  영상 끼워 넣기: `Job.pieces`(`[{id, clip, src, name, in, out}]`, 비면 A 하나) → `out/<이름>.sequence.json` → `--sequence`.
+  `영상` 탭(`사용 중`·`보관함`, `불러오기`, 고른 영상 `이름 변경`·`보관`·`빼기`, 보관함 `삽입`)이 재생 위치(프레임 격자, 잘린 구간 안이면 그 시작)에
+  넣는다(Api.add_clip/insert_clip_preset/remove_clip/rename_clip/list_clips — `spans` 가 타임라인 색 띠 `TL.clipBands`). 고른 파일은 작업 폴더
+  `clips/` 로 복사, 넣은 영상도 A 와 똑같이 컷·자막(다시 판정에서 그 파일만 전사). 넣은 자리 뒤 편집(자르기·되살리기·줄 시간·이미지)은
+  길이만큼 밀리고(`sequence.shift_for_insert/remove`), 자막 수정은 넣기·빼기 동안 `Job.stable_edits`(`clip|sid|w` 키 — 같은 파일 두 번도 따로)로
+  옮겼다가 새 전사 키로 푼다. 넣기·빼기도 실행 취소 대상이고 파일별 캐시라 되돌려도 전사를 다시 하지 않는다. 다시 판정이 실패한(FAILED) 넣기도
+  실행 취소·빼기가 된다. 보관함은 `<데이터>/clip_presets/`(presets.json, `<id>/<sha16><ext>`, 분석 캐시 `<id>/files/`): 그 영상 안의 편집
+  (파일 안 초)도 같이 저장되고, 넣을 때 캐시를 작업 복사본 서명으로 옮겨(`rebase_file_cache`) 바로 들어간다.
   자막은 영상 화면 아래쪽에 겹쳐 그린다(새기는 자리·크기 그대로). 글자 꾸미기는 줄 고치는 칸 안 선택(없으면 줄 전체) 또는 자막 탭 목록에서
   음절(span.c)을 끌어 선택하면(브라우저 선택이 있는 동안만 켜짐, 꾸민 뒤엔 같은 글자를 다시 선택) 꾸밈 막대(목록 위 — 꺼지면 흐리게·inert, 영상 위에서 고칠 땐 자막 위에 뜨는 한 벌 더)로 글자마다 글꼴·크기·색·굵기를 바꾼다 (Api.set_style, Job.word_styles, 실행 취소 대상). 글꼴은 `app/ui/fonts`(OFL) — 화면 @font-face 와 새기기가 같은 파일을 쓴다.
 - 사용자 데이터: 맥 `~/Library/Application Support/youtube-edit`, 윈도우 `%APPDATA%\youtube-edit` (`YTEDIT_DATA_DIR` 로 덮어씀).
