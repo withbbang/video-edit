@@ -786,6 +786,43 @@ function ensureVisible(t) {
   if (v.t0 !== S.view.t0 || v.spc !== S.view.spc) { S.view = v; zoomTl.draw(); }
 }
 
+// ---- 이름 바꾸기 칸 (이미지 탭·영상 탭이 같이 쓴다) ----------------------------------
+// 이름 글자 (두 번 누르면 이름 바꾸기 — bindRenameDblclick 이 data-kind·data-id 로 찾는다)
+function renameName(cls, kind, id, name) {
+  return h('span', { class: cls, title: name, 'data-kind': kind, 'data-id': id }, name);
+}
+// 이름 입력칸: Enter·칸 밖을 누르면 done(true, 값), Esc 는 done(false). 한 번만 마친다.
+// 돌려준 칸의 finish(save) 로 밖에서 마치고, cancel() 은 아무것도 하지 않고 닫힌 것으로 친다 (칸을 버릴 때)
+function renameField({ value, bad, label, done }) {
+  const input = h('input', { type: 'text', class: 'ov-name' + (bad ? ' bad' : ''), maxlength: '40',
+    value, 'aria-label': label, 'aria-invalid': bad ? 'true' : 'false',
+    onclick: (e) => e.stopPropagation() });
+  let over = false;
+  input.finish = (save) => {
+    if (over) return;
+    over = true;
+    done(save, input.value.trim());
+  };
+  input.cancel = () => { over = true; };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') input.finish(true);
+    if (e.key === 'Escape') input.finish(false);
+  });
+  input.addEventListener('blur', () => input.finish(true));
+  requestAnimationFrame(() => { input.focus(); input.select(); });
+  return input;
+}
+// 이름을 두 번 누르면 onName(kind, id). 첫 번째 누름에 목록을 다시 그려 두 누름의 요소가 달라지므로
+// 그대로 남는 panel 에서 받고, 누른 자리의 이름(sel)을 다시 찾는다
+function bindRenameDblclick(panel, sel, onName) {
+  panel.addEventListener('dblclick', (e) => {
+    const at = document.elementFromPoint(e.clientX, e.clientY);
+    const n = at && at.closest && at.closest(sel);
+    if (n) onName(n.dataset.kind, n.dataset.id);
+  });
+}
+
 // ---- 이미지 겹쳐 넣기 -------------------------------------------------------
 // 항목 {id, img, name, aspect, x, y, w, start, end, url}: x·y·w 는 영상 화면 비율, start/end 는 원본 초 (저장 때 컷을 따라간다).
 // 영상 위 층: 지금 시각의 이미지를 그리고, 멈췄을 때 눌러 고르기·끌어 옮기기·손잡이 8개로 크기
@@ -1115,29 +1152,14 @@ const ovl = (() => {
     renderTools();
   }
   function nameEl(kind, it) {
-    if (!(renaming && renaming.kind === kind && renaming.id === it.id)) {
-      return h('span', { class: 'ov-item-name', title: it.name, 'data-kind': kind, 'data-id': it.id }, it.name);
-    }
-    const input = h('input', { type: 'text', class: 'ov-name' + (renaming.bad ? ' bad' : ''), maxlength: '40',
-      value: renaming.value || it.name, 'aria-label': '이미지 이름', 'aria-invalid': renaming.bad ? 'true' : 'false',
-      onclick: (e) => e.stopPropagation() });
+    if (!(renaming && renaming.kind === kind && renaming.id === it.id)) return renameName('ov-item-name', kind, it.id, it.name);
     const r = renaming;
-    let done = false;
-    const finish = (save) => {
-      if (done) return;
-      done = true;
-      if (finishRename === finish) finishRename = null;
-      if (save) commitRename(r, input.value.trim());
+    const input = renameField({ value: r.value || it.name, bad: r.bad, label: '이미지 이름', done: (save, name) => {
+      if (finishRename === input.finish) finishRename = null;
+      if (save) commitRename(r, name);
       else { renaming = null; renderTools(); }
-    };
-    finishRename = finish;
-    input.addEventListener('keydown', (e) => {
-      e.stopPropagation();
-      if (e.key === 'Enter') finish(true);
-      if (e.key === 'Escape') finish(false);
-    });
-    input.addEventListener('blur', () => finish(true));
-    requestAnimationFrame(() => { input.focus(); input.select(); });
+    } });
+    finishRename = input.finish;
     return input;
   }
   function itemRows(o, can) {
@@ -1205,14 +1227,11 @@ const ovl = (() => {
     panel.scrollTop = scroll;
   }
 
-  // 이름을 두 번 누르면 이름 바꾸기. 첫 번째 누름에 목록을 다시 그려 두 누름의 요소가 달라지므로
-  // 그대로 남는 panel 에서 받고, 누른 자리의 이름을 다시 찾는다
-  panel.addEventListener('dblclick', (e) => {
-    const at = document.elementFromPoint(e.clientX, e.clientY);
-    const n = at && at.closest && at.closest('.ov-item-name');
-    if (!n || !editable()) return;
-    if (n.dataset.kind === 'ov') select(n.dataset.id);
-    startRename(n.dataset.kind, n.dataset.id);
+  // 이름을 두 번 누르면 이름 바꾸기
+  bindRenameDblclick(panel, '.ov-item-name', (kind, id) => {
+    if (!editable()) return;
+    if (kind === 'ov') select(id);
+    startRename(kind, id);
   });
 
   // 이미지·이미지 막대·이미지 탭 밖을 누르면 고르기를 푼다 (Delete 가 다른 일을 하다 이미지를 지우지 않게)
@@ -1241,8 +1260,9 @@ const clp = (() => {
   const name = h('span', { class: 'zt-name n-clips', hidden: true }, '영상');
   const lane = h('div', { class: 'cl-lane', hidden: true });  // 확대 타임라인의 영상 줄
   let busy = false, naming = false, presets = null, loading = false, saveErr = null;
-  let renaming = null;       // 이름 바꾸는 중 {kind: 'clip' | 'preset', id, bad, value}
-  let finishRename = null;   // 열린 이름 칸 마치기 (save)
+  let renaming = null;       // 이름 바꾸는 중 {kind: 'clip' | 'preset', id, bad, value, err}
+  let clipErr = null;        // 넣은 영상 이름 바꾸기가 거절됨 {id, text} (다른 줄을 고르거나 다시 바꾸면 지움)
+  let field = null;          // 열린 이름 칸 (renameField) — 고르기가 바뀌거나 편집할 수 없게 되면 마치거나 버린다
 
   const list = () => (S.clipsFor === S.sel && S.clips) || [];
   const editable = () => { const j = selected(); return !!j && HAS_RESULT.has(j.status); };
@@ -1283,8 +1303,8 @@ const clp = (() => {
   }
   function select(clip) {
     if (S.clipSel === clip) return;
-    if (renaming && renaming.kind === 'clip' && finishRename) finishRename(true);
-    S.clipSel = clip; naming = false; saveErr = null; renaming = null;
+    if (renaming && renaming.kind === 'clip' && field) field.finish(true);
+    S.clipSel = clip; naming = false; saveErr = null; renaming = null; clipErr = null;
     refresh();
   }
   // 고른 영상의 첫 프레임 가운데로 (딱 시작 시각이면 재생기 반올림으로 그 앞 프레임에 떨어질 수 있다)
@@ -1334,7 +1354,7 @@ const clp = (() => {
 
   // 이름 바꾸기: 이름을 두 번 누르거나 [이름 변경]. Enter·칸 밖을 누르면 반영, Esc 는 취소
   function startRename(kind, id) {
-    naming = false;
+    naming = false; clipErr = null;
     renaming = { kind, id, bad: false };
     renderTools();
   }
@@ -1344,49 +1364,41 @@ const clp = (() => {
     if (!nm || !it || nm === it.name) { renaming = null; renderTools(); return; }
     if (r.kind === 'clip') {
       renaming = null;
-      await send('rename_clip', r.id, nm);
+      const res = await send('rename_clip', r.id, nm);
+      if (!res) { clipErr = { id: r.id, text: '이름을 바꾸지 못했습니다' }; renderTools(); }   // 거절됨 (처리 중 등)
       return;
     }
     const res = await call('rename_clip_preset', r.id, nm);
     if (res) { presets = res; renaming = null; }
-    else renaming = { ...r, bad: true, value: nm };   // 다른 보관 영상과 같은 이름
+    else renaming = { ...r, bad: true, value: nm, err: '보관함에 같은 이름이 있습니다' };   // 다른 보관 영상과 같은 이름
     renderTools();
   }
   function nameEl(kind, id, nm) {
-    if (!(renaming && renaming.kind === kind && renaming.id === id)) {
-      return h('span', { class: 'ov-item-name cl-item-name', title: nm, 'data-kind': kind, 'data-id': id }, nm);
-    }
-    const input = h('input', { type: 'text', class: 'ov-name' + (renaming.bad ? ' bad' : ''), maxlength: '40',
-      value: renaming.value || nm, 'aria-label': '영상 이름', 'aria-invalid': renaming.bad ? 'true' : 'false',
-      onclick: (e) => e.stopPropagation() });
+    if (!(renaming && renaming.kind === kind && renaming.id === id)) return renameName('ov-item-name cl-item-name', kind, id, nm);
     const r = renaming;
-    let done = false;
-    const finish = (save) => {
-      if (done) return;
-      done = true;
-      if (finishRename === finish) finishRename = null;
-      if (save) commitRename(r, input.value.trim());
+    const input = renameField({ value: r.value || nm, bad: r.bad, label: '영상 이름', done: (save, v) => {
+      if (field === input) field = null;
+      if (save) commitRename(r, v);
       else { renaming = null; renderTools(); }
-    };
-    finishRename = finish;
-    input.addEventListener('keydown', (e) => {
-      e.stopPropagation();
-      if (e.key === 'Enter') finish(true);
-      if (e.key === 'Escape') finish(false);
-    });
-    input.addEventListener('blur', () => finish(true));
-    requestAnimationFrame(() => { input.focus(); input.select(); });
+    } });
+    field = input;
     return input;
+  }
+  // 이름 칸 아래 오류 한 줄 (같은 이름·거절)
+  function renameErr(kind, id) {
+    if (kind === 'clip' && clipErr && clipErr.id === id) return h('div', { class: 'ov-err err' }, clipErr.text);
+    return renaming && renaming.kind === kind && renaming.id === id && renaming.bad
+      ? h('div', { class: 'ov-err err' }, renaming.err || '보관함에 같은 이름이 있습니다') : null;
   }
   const swatch = (clip) => h('i', { class: `cl-sw cl-c${colorOf(clip)}` });
   const secs = (d) => `${(Number(d) || 0).toFixed(1)}초`;
   function itemRows(c, can) {
     const sel = c.clip === S.clipSel;
     const row = h('div', { class: 'opt row ov-item' + (sel ? ' sel' : ''),
-      onclick: () => { select(c.clip); seekTo(c); } },
+      onclick: () => { select(c.clip); if (editable()) seekTo(c); } },   // 처리 중엔 옛 미리보기라 옮기지 않는다
       h('span', { class: 'ov-item-main' }, swatch(c.clip), nameEl('clip', c.clip, c.name)),
       h('span', { class: 'sec' }, `${clock(c.start)} · ${secs(c.dur)}`));
-    if (!sel) return [row];
+    if (!sel) return [row, renameErr('clip', c.clip)];
     let acts;
     if (naming) {
       const input = h('input', { type: 'text', class: 'ov-name', maxlength: '40', value: c.name, 'aria-label': '저장할 이름' });
@@ -1404,12 +1416,11 @@ const clp = (() => {
           onclick: () => { renaming = null; naming = true; saveErr = null; renderTools(); } }, '보관'),
         h('button', { type: 'button', class: 'btn', disabled: !can || busy, onclick: remove }, '빼기')];
     }
-    const out = [row, h('div', { class: 'ov-acts' }, acts)];
+    const out = [row, renameErr('clip', c.clip), h('div', { class: 'ov-acts' }, acts)];
     if (naming && saveErr) out.push(h('div', { class: 'ov-err err' }, saveErr));
     return out;
   }
   function presetRow(p, can) {
-    const bad = renaming && renaming.kind === 'preset' && renaming.id === p.id && renaming.bad;
     const row = h('div', { class: 'opt ov-item' },
       h('span', { class: 'ov-item-main' }, nameEl('preset', p.id, p.name)),
       h('span', { class: 'ov-item-btns' },
@@ -1418,14 +1429,20 @@ const clp = (() => {
           onclick: () => insertPreset(p.id) }, '삽입'),
         h('button', { type: 'button', class: 'x', title: '보관함에서 지우기',
           onclick: async () => { presets = (await call('delete_clip_preset', p.id)) || presets; renderTools(); } }, '✕')));
-    return bad ? [row, h('div', { class: 'ov-err err' }, '보관함에 같은 이름이 있습니다')] : [row];
+    return [row, renameErr('preset', p.id)];
   }
   function renderTools() {
     const all = list();
     tabText.textContent = all.length ? `영상 ${all.length}` : '영상';
+    const can = editable();
+    // 처리 중으로 바뀌면 열린 보관 이름 칸·넣은 영상 이름 칸은 닫는다 (반영하지 않고)
+    if (!can && (naming || (renaming && renaming.kind === 'clip'))) {
+      if (field && renaming && renaming.kind === 'clip') { field.cancel(); field = null; }
+      naming = false; saveErr = null;
+      if (renaming && renaming.kind === 'clip') renaming = null;
+    }
     if (S.tab !== 'clips') return;
     if (presets === null && !loading) loadPresets();
-    const can = editable();
     const scroll = panel.scrollTop;
     const sub = (key, text) => h('button', { type: 'button', class: S.clipTab === key ? 'on' : null,
       onclick: () => { if (S.clipTab !== key) { S.clipTab = key; naming = false; renaming = null; panel.scrollTop = 0; renderTools(); } } }, text);
@@ -1438,18 +1455,15 @@ const clp = (() => {
       : presets === null ? [h('div', { class: 'opt muted' }, h('span', {}, '…'))]
         : presets.length ? presets.flatMap((p) => presetRow(p, can))
           : [h('div', { class: 'opt muted' }, h('span', {}, '사용 중인 영상을 보관하면 여기에 모입니다'))];
-    panel.replaceChildren(head, ...body);
+    panel.replaceChildren(head, ...body.filter(Boolean));   // 오류 줄이 없으면 null
     panel.scrollTop = scroll;
   }
 
-  // 이름을 두 번 누르면 이름 바꾸기. 첫 번째 누름에 목록을 다시 그려 두 누름의 요소가 달라지므로
-  // 그대로 남는 panel 에서 받고, 누른 자리의 이름을 다시 찾는다
-  panel.addEventListener('dblclick', (e) => {
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    const n = el && el.closest && el.closest('.cl-item-name');
-    if (!n || !editable()) return;
-    if (n.dataset.kind === 'clip') select(n.dataset.id);
-    startRename(n.dataset.kind, n.dataset.id);
+  // 이름을 두 번 누르면 이름 바꾸기
+  bindRenameDblclick(panel, '.cl-item-name', (kind, id) => {
+    if (!editable()) return;
+    if (kind === 'clip') select(id);
+    startRename(kind, id);
   });
 
   // ---- 타임라인 띠 ----
@@ -1489,9 +1503,11 @@ const clp = (() => {
     const d = rangeDur();
     if (!bar || !d || !ovl.available()) return;
     for (const p of pieces()) {
+      const a = Math.min(Math.max(p.start, 0), d), e = Math.min(Math.max(p.end, 0), d);   // 막대 밖으로 넘치지 않게
+      if (e <= a) continue;
       const b = band(p.clip, 'cl-strip');
-      b.style.left = `${(p.start / d) * 100}%`;
-      b.style.width = `${((p.end - p.start) / d) * 100}%`;
+      b.style.left = `${(a / d) * 100}%`;
+      b.style.width = `${((e - a) / d) * 100}%`;
       bar.insertBefore(b, bar.firstChild);
       barBands.push(b);
     }
@@ -1499,7 +1515,7 @@ const clp = (() => {
   rangePointer(lane, (x, rect) => { const g = zoomTl.geom(); return g && S.view ? TL.xToT(S.view, x - rect.left, g.cw) : 0; }, () => null);
 
   return { panel, tabText, name, lane, renderTools, paintLane, drawBar, load, pieces, colorOf,
-    reset() { S.clips = null; S.clipsFor = null; S.clipSel = null; naming = false; renaming = null; presets = null; saveErr = null; } };
+    reset() { S.clips = null; S.clipsFor = null; S.clipSel = null; naming = false; renaming = null; presets = null; saveErr = null; clipErr = null; field = null; } };
 })();
 
 const zoomTl = (() => {
