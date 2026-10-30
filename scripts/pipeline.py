@@ -198,8 +198,9 @@ def ffprobe(path: Path, require_audio: bool = True) -> dict:
     if a is None:
         if not require_audio:  # 끼워 넣기: 소리 없는 영상도 조각이 될 수 있다
             fmt_dur = float(info["format"].get("duration") or 0)
-            return {"has_audio": False, "has_video": v is not None, "fps": _probe_fps(v)[0],
-                    "vfr": _probe_fps(v)[1], "width": int(v["width"]) if v else 0,
+            fps, vfr = _probe_fps(v)
+            return {"has_audio": False, "has_video": v is not None, "fps": fps,
+                    "vfr": vfr, "width": int(v["width"]) if v else 0,
                     "height": int(v["height"]) if v else 0, "rotation": video_rotation(v) if v else 0,
                     "duration": float((v or {}).get("duration") or fmt_dur or 0),
                     "sample_rate": 48000, "channels": 0, "audio_offset": 0.0,
@@ -2253,7 +2254,14 @@ def sequence_audio(spans: list, analyses: dict, work: Path, fps: Fraction, which
     key = {"sequence": [[s.piece.fkey, s.f_in, s.f_out] for s in spans],
            "files": {s.piece.fkey: analyses[s.piece.fkey].audio_key for s in spans}}
     key = json.loads(json.dumps(key))
-    if cached_meta(meta, key, [out], False):
+    built: list = []
+    try:
+        old = json.loads(meta.read_text(encoding="utf-8"))
+        if {k: old.get(k) for k in key} == key:
+            built = list(old.get("built", []))
+    except (OSError, ValueError, AttributeError):
+        pass
+    if which in built and out.exists():
         log("이어 붙인 오디오 재사용 (work/ 에 이미 있음)")
         return out, key
     channels = 1
@@ -2274,7 +2282,8 @@ def sequence_audio(spans: list, analyses: dict, work: Path, fps: Fraction, which
         i0 = round(Fraction(s.f_in) * rate / fps)
         parts.append((wav, i0, i0 + (b - a)))
     seq.concat_wav(parts, out, rate, channels)
-    meta.write_text(json.dumps(key, ensure_ascii=False), encoding="utf-8")
+    # clean·asr 가 meta 하나를 나눠 쓴다 → 같은 키로 만든 종류만 "built" 에 쌓고, 키가 바뀌면 이번 종류만 남긴다
+    meta.write_text(json.dumps({**key, "built": sorted(set(built) | {which})}, ensure_ascii=False), encoding="utf-8")
     return out, key
 
 

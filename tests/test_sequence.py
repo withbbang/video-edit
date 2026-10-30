@@ -165,7 +165,24 @@ def test_sequence_audio_boundaries_and_cache(tmp_path):
     assert wav2.stat().st_mtime_ns == st
     awav, _ = pipeline.sequence_audio(sps, {"A": fa(a, a), "B": fa(b, b)}, work, fps, "asr")
     assert awav == work / "asr.wav"
-    assert json.loads((work / "audio.meta.json").read_text()) == m  # 같은 키
+    assert json.loads((work / "audio.meta.json").read_text()) == {**m, "built": ["asr", "clean"]}
+
+
+def test_sequence_audio_key_change_rebuilds_both_kinds(tmp_path):
+    fps = Fraction(30)
+    a = tmp_path / "a.wav"
+    write_wav(a, sine(48000 * 4)); 
+    an = {"A": fa(a, a)}
+    work = tmp_path / "work"; work.mkdir()
+    k1 = [sp("A", "A", 0, 30, 0)]
+    k2 = [sp("A", "A", 0, 60, 0)]
+    for w in ("clean", "asr"):
+        pipeline.sequence_audio(k1, an, work, fps, w)
+    assert len(read_wav(work / "asr.wav")[0]) == 16000
+    for w in ("clean", "asr"):
+        pipeline.sequence_audio(k2, an, work, fps, w)
+    assert len(read_wav(work / "asr.wav")[0]) == 32000
+    assert len(read_wav(work / "clean.wav")[0]) == 96000
 
 
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg 필요")
