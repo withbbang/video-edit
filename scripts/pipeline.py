@@ -1310,18 +1310,25 @@ def build_captions(tr: dict, cut_words: set, remap: TimeRemap, always_fillers: s
 
     words = all_words(tr)
     norms = [normalize(w["word"]) for _, _, w in words]
+    # 이어 붙인 전사(--sequence): 세그먼트 id → 조각 번호. 줄은 조각 경계를 넘지 않는다
+    segs = tr.get("segments") or []
+    piece_of = {segs[i]["id"]: n for n, pc in enumerate(tr.get("pieces") or [])
+                for i in range(int(pc["seg_from"]), min(int(pc["seg_to"]), len(segs)))}
+    cur_piece = None
     for k, (seg_id, wi, w) in enumerate(words):
         if (seg_id, wi) in cut_words:
             continue  # 잘려나간 필러
         if norms[k] in always_fillers and not is_repeated_sound(words, norms, k, single_only):
             continue  # 오디오엔 남았더라도(건너뛴 항목) 자막에는 '어/음'을 넣지 않는다
         s, e, orig = remap(w["start"]), remap(w["end"]), w["word"].strip()
+        piece = piece_of.get(seg_id)
         if cur_r:
             # 멈춤·길이는 결과 영상 기준으로 잰다 — 무음 컷으로 사라진 멈춤에서 끊으면 한 단어 자막이 생긴다
             length = sum(len(x[2]) + 1 for x in cur_r) + len(orig)
             if (s - cur_r[-1][1] > gap_break or length > max_chars or e - cur_r[0][0] > max_dur
-                    or cur_r[-1][2].endswith((".", "?", "!"))):
+                    or cur_r[-1][2].endswith((".", "?", "!")) or piece != cur_piece):
                 flush()
+        cur_piece = piece
         key = f"{seg_id}:{wi}"
         cur_r.append((s, e, orig))
         cur.append({"key": key, "text": word_edits.get(key, orig).strip(), "orig": orig,
