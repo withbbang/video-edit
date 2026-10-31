@@ -2251,7 +2251,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--subs-edits", type=Path, default=None,
                     help='자막 수정 파일 {"transcript_sha1","words","lines"} (데스크톱 앱용). 받아쓰기가 다르면 무시')
     ap.add_argument("--sequence", type=Path, default=None,
-                    help="(앱 전용) 조각 목록 json [{id, clip, src, in, out}] — 영상 끼워 넣기. input 은 첫 조각의 파일(A)")
+                    help="(앱 전용) 조각 목록 json [{id, clip, src, in, out}] — 영상 끼워 넣기. input 은 조각 중 하나의 파일(A, 맨 앞이 아니어도 됨)")
     return ap
 
 
@@ -2436,8 +2436,9 @@ def analyze_file(src: Path, work: Path, tr_path: Path, args: argparse.Namespace,
 
 
 def _sequence_channels(spans: list, analyses: dict) -> int:
-    """이어 붙인 48k 오디오의 채널 수 = 첫 조각 파일의 정리된 오디오 (소리 없는 파일이면 그 파일 정보)"""
-    first = analyses[spans[0].piece.fkey]
+    """이어 붙인 48k 오디오의 채널 수 = 입력(A) 파일의 정리된 오디오 (소리 없는 파일이면 그 파일 정보).
+    analyses 는 A 를 맨 앞에 담는다 (analyze_sequence)"""
+    first = next(iter(analyses.values()))
     if first.clean_wav is not None:
         with wave.open(str(first.clean_wav), "rb") as w:
             return w.getnchannels()
@@ -2502,17 +2503,19 @@ class SequenceAnalysis:
 def analyze_sequence(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work: Path, cfg: dict,
                      fps: Fraction, cut_only: bool) -> SequenceAnalysis:
     """조각 목록의 파일마다 analyze_file (work/files/<fkey>/ 에 캐시) → 이어 붙인 전사·오디오.
-    입력(src)은 첫 조각의 파일이어야 한다. A 의 단독 모드 캐시는 먼저 파일별 폴더로 옮겨 다시 전사하지 않는다.
+    입력(src)은 조각 중 하나의 파일이어야 한다 (B 를 맨 앞에 넣으면 A 는 둘째 조각). A 의 단독 모드 캐시는 먼저 파일별 폴더로 옮겨 다시 전사하지 않는다.
     이어 붙인 전사는 out/<stem>.transcript.json 에 쓴다 (cache_key 대신 sequence_key)."""
     pieces = seq.load_sequence(args.sequence)
-    if not pieces or pieces[0].src.resolve() != src:
-        sys.exit(f"오류: --sequence 의 첫 조각이 입력 파일이 아닙니다: {src.name}")
+    a = next((p for p in pieces if p.src == src), None)
+    if a is None:
+        sys.exit(f"오류: --sequence 의 조각 중에 입력 파일이 없습니다: {src.name}")
     spans_ = seq.spans(pieces, fps)
     if not spans_:
         sys.exit("오류: --sequence 에 길이가 있는 조각이 없습니다")
-    adopt_single_cache(work, out_dir, stem, file_work(work, pieces[0].fkey))  # 무엇이든 쓰기 전에
+    adopt_single_cache(work, out_dir, stem, file_work(work, a.fkey))  # 무엇이든 쓰기 전에
     analyses: dict = {}
-    for sp in spans_:
+    a_span = next((sp for sp in spans_ if sp.piece.fkey == a.fkey), None)
+    for sp in ([a_span] if a_span else []) + spans_:   # A 를 맨 앞에 (채널 수·기준 설정)
         k = sp.piece.fkey
         if k in analyses:
             continue
@@ -2659,7 +2662,7 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
     sq = None
     if args.sequence:   # 조각 이어 붙이기 (앱의 영상 끼워 넣기): 파일마다 분석해 이어 붙인 시간으로
         sq = analyze_sequence(args, src, stem, out_dir, work, cfg, fps, cut_only)
-        fa = sq.analyses[sq.spans[0].piece.fkey]
+        fa = next(iter(sq.analyses.values()))   # 입력(A) 파일
         clean_wav, asr_wav, audio_key = sq.clean_wav, sq.asr_wav, sq.audio_key
         tr, rms, hop = sq.tr, sq.rms, sq.hop
         cfg, sil_base = fa.cfg, fa.sil_base   # refine_cuts·자막이 쓰는 값은 파일과 상관없다 (사전·경계 넓히기)

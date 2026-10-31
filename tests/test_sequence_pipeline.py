@@ -171,11 +171,29 @@ def test_sequence_does_not_retranscribe_a(seq_env):
 
 
 @needs_ffmpeg
-def test_sequence_input_must_be_first_piece(seq_env, capsys):
+def test_sequence_input_must_be_a_piece(seq_env, capsys):
+    c = seq_env.tmp / "c.mov"
+    _media(c, 2, B_TONE)
     with pytest.raises(SystemExit) as e:
-        seq_env.run(seq_env.b, seq_env.tmp / "out", "--sequence", seq_env.sq)
-    assert "첫 조각" in str(e.value.code)
+        seq_env.run(c, seq_env.tmp / "out", "--sequence", seq_env.sq)
+    assert "조각" in str(e.value.code)
     assert seq_env.calls == []
+
+
+@needs_ffmpeg
+def test_b_inserted_at_start(seq_env):
+    """재생 위치 0 에 넣으면 B 가 첫 조각 — 입력(A)은 그 뒤 조각이어도 된다. A 는 다시 전사하지 않는다"""
+    out = seq_env.tmp / "out"
+    single = seq_env.run(seq_env.a, out)
+    sq = seq_env.tmp / "seq0.json"
+    sq.write_text(json.dumps([
+        {"id": "b1", "clip": "B", "src": str(seq_env.b), "in": 0, "out": 2},
+        {"id": "a1", "clip": "main", "src": str(seq_env.a), "in": 0, "out": 5}]), encoding="utf-8")
+    combined = seq_env.run(seq_env.a, out, "--sequence", sq)
+    assert seq_env.calls == [5.0, 2.0]
+    assert [p["id"] for p in combined["pieces"]] == ["b1", "a1"]
+    a_part = [(s - 2 * FPS, e - 2 * FPS) for s, e in _frames(combined["cuts"]) if s >= 2 * FPS]
+    assert a_part == _frames(single["cuts"])
 
 
 @needs_ffmpeg
