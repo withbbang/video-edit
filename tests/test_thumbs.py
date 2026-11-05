@@ -1,6 +1,7 @@
 """썸네일 시트: 미리보기 영상에서 1초 간격 썸네일을 100장씩 타일 이미지로 만든다."""
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -133,7 +134,7 @@ def test_builds_all_sheets_in_order_and_notifies(tmp_path):
     meta = w.request("A", v, d, 250.0, (960, 540))
     assert meta["done"] == [] and meta["sheets"] == 3
     assert w.wait_idle(5)
-    assert [p.rsplit("/", 1)[-1] for p in run.calls] == [thumbs.sheet_name(i) for i in range(3)]
+    assert [Path(p).name for p in run.calls] == [thumbs.sheet_name(i) for i in range(3)]
     assert seen == ["A", "A", "A"]
     assert w.request("A", v, d, 250.0, (960, 540))["done"] == [0, 1, 2]
     assert w.wait_idle(5) and len(run.calls) == 3   # 다 있으면 다시 만들지 않는다
@@ -149,7 +150,7 @@ def test_new_job_replaces_current(tmp_path):
     run.block = False
     w.request("B", b, tmp_path / "tb", 150.0, (960, 540))
     assert w.wait_idle(5)
-    assert all("/tb/" in p for p in run.calls[1:]) and len(run.calls) == 3
+    assert all(Path(p).parent.name == "tb" for p in run.calls[1:]) and len(run.calls) == 3
     w.shutdown()
 
 
