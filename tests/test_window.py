@@ -276,6 +276,9 @@ def test_dialogs_use_window(monkeypatch):
     assert d.choose_folder() == "/save/here"
     assert calls[0][0] == webview.OPEN_DIALOG and calls[0][1]["allow_multiple"] is True
     assert calls[1][0] == webview.FOLDER_DIALOG
+    assert d.open_video() == "/save/here"
+    assert calls[2][0] == webview.OPEN_DIALOG and calls[2][1]["allow_multiple"] is False
+    assert all(e in calls[2][1]["file_types"][0] for e in ("*.mp4", "*.mov", "*.m4v", "*.mkv", "*.webm"))
 
 
 def test_build_wires_api(tmp_path):
@@ -318,3 +321,21 @@ def test_serves_thumb_sheet_as_jpeg(served, tmp_path):
     for name in ("thumbs.json", "sheet_0.jpg", "../video.mp4"):
         r, _ = _req(served[0], f"/0123456789ab/preview/thumbs/{name}")
         assert r.status == 404
+
+
+def test_serves_overlay_and_preset_png(served, tmp_path):
+    d = tmp_path / "jobs" / "0123456789ab" / "overlays"
+    d.mkdir(parents=True)
+    (d / "0123456789abcdef.png").write_bytes(b"png")
+    p = tmp_path / "overlay_presets"
+    p.mkdir()
+    (p / "fedcba9876543210.png").write_bytes(b"logo")
+    (p / "presets.json").write_bytes(b"[]")
+    r, body = _req(served[0], "/0123456789ab/overlays/0123456789abcdef.png")
+    assert r.status == 200 and body == b"png" and r.getheader("Content-Type") == "image/png"
+    r, body = _req(served[0], "/presets/fedcba9876543210.png")
+    assert r.status == 200 and body == b"logo" and r.getheader("Content-Type") == "image/png"
+    for path in ("/presets/presets.json", "/0123456789ab/overlays/x.png", "/presets/../jobs/0123456789ab/preview.mp4",
+                 "/0123456789ab/overlays/0123456789ABCDEF.png"):
+        r, _ = _req(served[0], path)
+        assert r.status == 404, path

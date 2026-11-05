@@ -37,6 +37,7 @@ def pipeline_imports() -> list[str]:
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             names.add(node.module)
     names.discard("__future__")
+    names.discard("sequence")  # scripts/ 와 함께 datas 로 들어간다 (pathex 에 없어 hiddenimport 로는 못 찾음)
     return sorted(names)
 
 
@@ -63,6 +64,7 @@ datas = [
     (str(ROOT / "fillers.json"), "."),
     (str(ROOT / "models" / "sh.rnnn"), "models"),
     (str(ROOT / "scripts" / "pipeline.py"), "scripts"),
+    (str(ROOT / "scripts" / "sequence.py"), "scripts"),  # pipeline 이 같은 폴더에서 import 한다
     (str(ROOT / "LICENSE"), "."),
     (str(ROOT / "packaging" / "THIRD_PARTY.txt"), "."),
 ]

@@ -135,3 +135,9 @@ def test_prune_job_dirs(tmp_path):
     assert prune_job_dirs(s, root) == [orphan]
     assert keep.is_dir() and other.is_dir() and not orphan.exists()
     assert prune_job_dirs(s, tmp_path / "none") == []
+
+
+def test_job_from_old_dict_has_no_pieces():
+    from app.store import Job
+    j = Job.from_dict({"id": "j", "src": "/a.mp4"})
+    assert j.pieces == [] and j.stable_edits is None

@@ -41,6 +41,9 @@ class Job:
     word_styles: dict = field(default_factory=dict) # 자막 글자 꾸밈 {"seg:i": [글자마다 {font,size,color,bold} 또는 None]}
     range_ops: list = field(default_factory=list)   # 직접 자르기·남기기 구간 작업
     edits_sha1: str | None = None                   # 자막을 고칠 때의 받아쓰기 지문
+    overlays: list = field(default_factory=list)    # 겹쳐 새길 이미지 [{id, img, name, aspect, x, y, w, start, end}] (비율·원본 초)
+    pieces: list = field(default_factory=list)      # 이어 붙인 조각 [{id, clip, src, name, in, out}] (비면 A 하나)
+    stable_edits: dict | None = None                # 조각을 넣거나 뺀 직후 to_stable 결과 (다시 판정이 끝나면 풀어 씀)
 
     def to_dict(self) -> dict:
         d = asdict(self)

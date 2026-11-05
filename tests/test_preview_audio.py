@@ -69,6 +69,23 @@ def test_cut_key_changes_with_cuts_and_denoise():
     assert preview.cut_key(cuts, JobOptions(habit="all", quality="high")) == k
 
 
+def test_cut_key_includes_piece_layout():
+    """컷이 같아도 조각 자리(넣기·빼기·실행 취소)가 다르면 다른 소리. 조각이 없으면 예전 식 그대로 (캐시 유지)."""
+    import hashlib
+    import json
+    cuts = [{"start": 1.0, "end": 1.5}]
+    o = JobOptions()
+    old = hashlib.sha1(json.dumps({"v": preview.CUT_AUDIO_VERSION, "cuts": [[1.0, 1.5]], "denoise": o.denoise,
+                                   "loudnorm": o.loudnorm}, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    assert preview.cut_key(cuts, o) == old
+    assert preview.cut_key(cuts, o, []) == old and preview.cut_key(cuts, o, None) == old
+    a_only = [("a1", "main", "/x/a.mp4", 0.0, 10.0)]
+    with_b = [*a_only, ("b1", "B", "/x/b.mov", 0.0, 2.0)]
+    k1, k2 = preview.cut_key(cuts, o, a_only), preview.cut_key(cuts, o, with_b)
+    assert len({old, k1, k2}) == 3
+    assert preview.cut_key(cuts, o, list(with_b)) == k2
+
+
 def test_request_ready_when_files_exist(tmp_path):
     run, ready = FakeRun(), Ready()
     ca = preview.CutAudio(run, ready)

@@ -180,3 +180,21 @@ def test_no_line_times_srt_unchanged():
         _, _, a = _srt_for(tr, cuts)
         _, _, b = _srt_for(tr, cuts, {})
         assert a == b
+
+
+def test_caption_line_does_not_cross_piece_boundary():
+    """끼워 넣은 영상(조각) 경계에서는 멈춤이 없어도 자막 줄을 나눈다 (A 의 줄 가운데에 B 를 넣은 경우)."""
+    def seg(sid, spec):
+        return {"id": sid, "words": [{"word": w, "start": s, "end": e} for w, s, e in spec]}
+    tr = {"segments": [seg(0, [(" 그리고", 0.0, 0.4), (" 자막도", 0.5, 0.95)]),
+                       seg(1, [(" 구독과", 1.0, 1.4), (" 좋아요", 1.5, 1.9)]),
+                       seg(2, [(" 만들어", 2.0, 2.4), (" 줍니다.", 2.5, 2.9)])],
+          "pieces": [{"id": "a1", "clip": "main", "start": 0.0, "end": 1.0, "seg_from": 0, "seg_to": 1},
+                     {"id": "b", "clip": "x", "start": 1.0, "end": 2.0, "seg_from": 1, "seg_to": 2},
+                     {"id": "a2", "clip": "main", "start": 2.0, "end": 3.0, "seg_from": 2, "seg_to": 3}]}
+    remap = pipeline.TimeRemap([])
+    caps = pipeline.build_captions(tr, set(), remap)
+    assert [[w["text"] for w in c["words"]] for c in caps] == [["그리고", "자막도"], ["구독과", "좋아요"], ["만들어", "줍니다."]]
+    # 조각 목록이 없는 전사는 세그먼트가 바뀌어도 그대로 이어진다
+    del tr["pieces"]
+    assert len(pipeline.build_captions(tr, set(), remap)) == 1
