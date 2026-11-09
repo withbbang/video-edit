@@ -162,7 +162,7 @@ tests/                pytest (requirements-dev.txt)
   저장 때 `out/<이름>.overlays.json` → `--overlays`. 이미지 줄은 기본 3줄 반 높이까지만 보이고 넘치면 그 줄만 스크롤(영상이 줄지 않게),
   패널 위 테두리 손잡이로 높이를 바꾼다(`TL.lanesDrag`, 영상 최소 120px, `localStorage` 의 `ovLanesH`, 두 번 누르면 기본).
   영상 끼워 넣기: `Job.pieces`(`[{id, clip, src, name, in, out}]`, 비면 A 하나) → `out/<이름>.sequence.json` → `--sequence`.
-  `영상` 탭(`사용 중`·`보관함`, `불러오기`, 고른 영상 `이름 변경`·`보관`·`빼기`, 보관함 `삽입`)이 재생 위치(프레임 격자, 잘린 구간 안이면 그 시작)에
+  `영상` 탭(`사용 중`·`보관함`, `불러오기`, 고른 영상 `이름 변경`·`보관`·`제거`, 보관함 `삽입`)이 재생 위치(프레임 격자, 잘린 구간 안이면 그 시작)에
   넣는다(Api.add_clip/insert_clip_preset/remove_clip/rename_clip/list_clips — `spans` 가 타임라인 색 띠 `TL.clipBands`). 고른 파일은 작업 폴더
   `clips/` 로 복사, 넣은 영상도 A 와 똑같이 컷·자막(다시 판정에서 그 파일만 전사). 넣은 자리 뒤 편집(자르기·되살리기·줄 시간·이미지)은
   길이만큼 밀리고(`app/sequence.shift_for_insert/remove`), 자막 수정은 넣기·빼기 동안 `Job.stable_edits`(`clip|sid|w` 키 — 같은 파일 두 번도 따로)로
