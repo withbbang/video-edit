@@ -137,7 +137,7 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-RETRY_WAITS = (5, 15, 30)   # 연결 끊김(ffmpeg.org 가 CI 에서 종종 reset)엔 이만큼 쉬었다 다시 받는다
+RETRY_WAITS = (5, 10, 20, 30, 30, 30, 30)   # 연결 끊김엔 이만큼 쉬었다 다시 받는다 (2026-11 ffmpeg.org 는 TLS 연결을 열에 일곱 끊었다)
 
 
 def download(url: str, sha256: str, cache: Path, sleep=time.sleep) -> Path:

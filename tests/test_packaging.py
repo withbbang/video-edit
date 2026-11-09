@@ -166,7 +166,7 @@ def test_download_retries_connection_reset(tmp_path, monkeypatch):
     monkeypatch.setattr(ff.urllib.request, "urlopen", flaky)
     waits = []
     got = ff.download("https://example.invalid/f.tar.xz", hashlib.sha256(data).hexdigest(), tmp_path / "c", sleep=waits.append)
-    assert got.read_bytes() == data and calls["n"] == 3 and waits == [5, 15]
+    assert got.read_bytes() == data and calls["n"] == 3 and waits == list(ff.RETRY_WAITS[:2])
 
 
 def test_download_gives_up_after_retries(tmp_path, monkeypatch):
