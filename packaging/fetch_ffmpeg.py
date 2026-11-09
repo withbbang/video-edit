@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -136,12 +137,28 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def download(url: str, sha256: str, cache: Path) -> Path:
-    """cache/<sha256 앞 16자>-<이름> 에 받는다. 이미 있고 해시가 맞으면 다시 받지 않는다."""
+RETRY_WAITS = (5, 15, 30)   # 연결 끊김(ffmpeg.org 가 CI 에서 종종 reset)엔 이만큼 쉬었다 다시 받는다
+
+
+def download(url: str, sha256: str, cache: Path, sleep=time.sleep) -> Path:
+    """cache/<sha256 앞 16자>-<이름> 에 받는다. 이미 있고 해시가 맞으면 다시 받지 않는다.
+    네트워크 오류(OSError)는 RETRY_WAITS 대로 다시 시도한다. 해시가 다르면 바로 멈춘다."""
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / f"{sha256[:16]}-{url.rsplit('/', 1)[-1]}"
     if target.is_file() and sha256_of(target) == sha256:
         return target
+    for wait in (*RETRY_WAITS, None):
+        try:
+            return _download_once(url, sha256, cache, target)
+        except OSError as e:
+            if wait is None:
+                raise
+            print(f"  내려받기 실패({e}) — {wait}초 뒤 다시 시도", flush=True)
+            sleep(wait)
+    raise AssertionError("unreachable")
+
+
+def _download_once(url: str, sha256: str, cache: Path, target: Path) -> Path:
     print(f"내려받는 중: {url}", flush=True)
     fd, tmp = tempfile.mkstemp(dir=cache, suffix=".part")
     try:

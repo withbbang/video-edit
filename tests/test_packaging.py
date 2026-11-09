@@ -147,3 +147,33 @@ def test_app_pins_ctranslate2_to_cuda_manifest():
     man = json.loads((ROOT / "app" / "manifest.json").read_text(encoding="utf-8"))
     assert {w["name"] for w in man["cuda_win"]} == {"nvidia-cublas-cu12", "nvidia-cudnn-cu12"}
     assert next(w for w in man["cuda_win"] if w["name"] == "nvidia-cudnn-cu12")["version"].startswith("9.")
+
+
+def test_download_retries_connection_reset(tmp_path, monkeypatch):
+    data = b"payload"
+    src = tmp_path / "f.tar.xz"
+    src.write_bytes(data)
+    import hashlib
+    real = ff.urllib.request.urlopen
+    calls = {"n": 0}
+
+    def flaky(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise ff.urllib.error.URLError(ConnectionResetError(104, "Connection reset by peer"))
+        return real(src.as_uri(), timeout=timeout)
+
+    monkeypatch.setattr(ff.urllib.request, "urlopen", flaky)
+    waits = []
+    got = ff.download("https://example.invalid/f.tar.xz", hashlib.sha256(data).hexdigest(), tmp_path / "c", sleep=waits.append)
+    assert got.read_bytes() == data and calls["n"] == 3 and waits == [5, 15]
+
+
+def test_download_gives_up_after_retries(tmp_path, monkeypatch):
+    def down(req, timeout=None):
+        raise ff.urllib.error.URLError(ConnectionResetError(104, "reset"))
+    monkeypatch.setattr(ff.urllib.request, "urlopen", down)
+    waits = []
+    with pytest.raises(OSError):
+        ff.download("https://example.invalid/x.tar.xz", "0" * 64, tmp_path / "c", sleep=waits.append)
+    assert waits == list(ff.RETRY_WAITS) and not list((tmp_path / "c").glob("*.part"))
