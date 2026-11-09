@@ -202,3 +202,6 @@ def test_snap_and_drop_target():
     assert run("out = T.dropTarget(6.0, [], [5, 7], 30, 10, [5, 7]);") is None               # 덩어리 안
     assert run("out = T.dropTarget(8.0, [], [5, 7], 30, 10, [5, 7]);") == 8
     assert run("out = [T.isDrag(3, 2), T.isDrag(4, 1)];") == [False, True]
+    # 겹치거나 맞닿은 잘린 구간은 합쳐서 본다 (서버 snap_at 은 합친 컷을 받음)
+    assert run("out = T.snapAt(5.75, [[5.0, 5.8], [5.7, 6.4]], [6.0], 30, 100);") == pytest.approx(6.0)
+    assert run("out = T.snapAt(5.5, [[5.0, 6.0], [6.0, 6.4]], [6.0], 30, 100);") == pytest.approx(6.0)

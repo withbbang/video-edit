@@ -154,7 +154,12 @@ function snapAt(t, cuts, bounds, fps, total) {
   const grid = (x) => clamp(Math.round(x * fps) / fps, 0, total);
   const e = 1e-6;
   t = grid(t);
-  for (const [a, b] of cuts) {
+  const merged = [];   // 겹치거나 맞닿은 컷은 합침 (app/api.py _union 과 같게)
+  for (const [a, b] of [...cuts].sort((p, q) => p[0] - q[0])) {
+    if (merged.length && a <= merged[merged.length - 1][1]) merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], b);
+    else merged.push([a, b]);
+  }
+  for (const [a, b] of merged) {
     if (a + e < t && t < b - e) {
       let best = null;
       for (const x of [...bounds].sort((p, q) => p - q)) {
