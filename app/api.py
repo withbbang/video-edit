@@ -1030,11 +1030,8 @@ class Api:
             pieces = copy.deepcopy(job.pieces) or [{"id": secrets.token_hex(4), "clip": "main", "src": job.src,
                                                     "name": Path(job.src).stem, "in": 0.0, "out": _grid(self._duration(job), fps)}]
             total = sum(float(p["out"]) - float(p["in"]) for p in pieces)
-            t = min(max(_grid(at, fps), 0.0), total)
-            for a, b in _union(diff.effective_cuts(cur, job.restored, job.range_ops, tr).get("cuts", [])):
-                if a + EPS < t < b - EPS:
-                    t = min(max(_grid(a, fps), 0.0), total)
-                    break
+            cuts = _union(diff.effective_cuts(cur, job.restored, job.range_ops, tr).get("cuts", []))
+            t = sequence.snap_at(at, cuts, sequence.piece_bounds(pieces), fps, total)
             before = self._snap(job)
             e = sequence.shift_for_insert({k: getattr(job, k) for k in sequence.EDIT_KEYS}, t, d)
             new = {"id": secrets.token_hex(4), "clip": secrets.token_hex(4), "src": str(clip_path),
@@ -1231,6 +1228,42 @@ class Api:
                 stable = {k: sequence.to_stable(e[k], tr) for k in STABLE_KEYS}
             pieces = _merge_pieces([p for p in job.pieces if p.get("clip") != clip])
             result = self._restructure(job, before, pieces, e, stable)
+        self._queue.rejudge(job_id)
+        return result
+
+    def move_clip(self, job_id: str, clip: str, at: float) -> dict | None:
+        """넣은 영상 덩어리(갈라 넣은 영상 포함)를 이어 붙인 시간 at 으로 옮긴다. at 은 넣기와 같이 맞추고(영상 경계 우선),
+        덩어리 안이면 거절(None), 제자리면 아무것도 바꾸지 않는다. 안 편집은 따라가고 바깥은 밀리며, 빠진 자리에서 이어진
+        같은 파일 조각은 합친다. 옮긴 뒤 다시 판정한다. A("main")는 못 옮긴다. → {"clips", "history"}"""
+        if not isinstance(clip, str) or clip == "main":
+            return None
+        if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at):
+            return None
+        inputs = self._clip_inputs(job_id)
+        if inputs is None:
+            return None
+        _, cur, tr = inputs
+        with self._queue.lock:
+            job = self._job(job_id)
+            if not self._can_restructure(job, tr):
+                return None
+            span = sequence.block_span(job.pieces, clip)
+            if span is None:
+                return None
+            s, end = span
+            fps = subtitles._fps(cur)
+            total = sum(float(p["out"]) - float(p["in"]) for p in job.pieces)
+            cuts = _union(diff.effective_cuts(cur, job.restored, job.range_ops, tr).get("cuts", []))
+            t = sequence.snap_at(at, cuts, sequence.piece_bounds(job.pieces), fps, total)
+            if s + EPS < t < end - EPS:
+                return None
+            if abs(t - s) <= EPS or abs(t - end) <= EPS:   # 제자리
+                return {"clips": self._clip_views(job), "history": self._hist(job.id)}
+            before = self._snap(job)
+            pieces, t2 = sequence.move_block(copy.deepcopy(job.pieces), clip, t)
+            e = sequence.shift_for_move({k: getattr(job, k) for k in sequence.EDIT_KEYS}, s, end, t2)
+            stable = {k: sequence.to_stable(e[k], tr) for k in STABLE_KEYS}
+            result = self._restructure(job, before, _merge_pieces(pieces), e, stable)
         self._queue.rejudge(job_id)
         return result
 

@@ -72,13 +72,13 @@ def block_span(pieces: list, clip: str):
 def snap_at(t: float, cuts: list, bounds: list, fps: float, total: float) -> float:
     """t 를 프레임 격자 → [0, total] 에 맞추고, 잘린 구간 (a, b) 안이면 그 안의 영상 경계 중 가장 가까운 것
     (같으면 앞쪽), 경계가 없으면 a 를 격자에 맞춘 값."""
-    t = min(max(round(float(t) * fps) / fps, 0.0), total)
+    t = float(min(max(round(float(t) * fps) / fps, 0.0), total))   # fps 가 Fraction 이어도 float
     for a, b in cuts:
         if a + EPS < t < b - EPS:
             inside = [x for x in sorted(bounds) if a + EPS < x < b - EPS]
             if inside:
                 return min(inside, key=lambda x: abs(x - t))
-            return min(max(round(a * fps) / fps, 0.0), total)
+            return float(min(max(round(a * fps) / fps, 0.0), total))
     return t
 
 

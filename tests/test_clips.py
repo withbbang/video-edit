@@ -476,3 +476,97 @@ def test_preset_rename_duplicate(tmp_path, monkeypatch):
     left = a.delete_clip_preset(pid)
     assert [i["name"] for i in left] == ["인트로"]
     assert not (tmp_path / "data" / "clip_presets" / pid).exists()
+
+
+EMPTY_CUTS = {"fps": "30/1", "cuts": []}
+
+
+def test_add_clip_near_boundary_snaps_to_boundary(tmp_path, monkeypatch):
+    a, store, q, job, _ = setup(tmp_path, monkeypatch)
+    a.add_clip(job.id, 4.0)                                  # B: 4~6
+    clip_b = job.pieces[1]["clip"]
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    # 다시 판정이 쓴 cuts.json 위에: 경계 6.0 을 가로지르는 잘린 구간 (B 꼬리 무음 + A 머리 무음)
+    write_out(job, "a.cuts.json", {"fps": "30/1", "cuts": [
+        {"start": 5.7, "end": 6.4, "word": "(무음)", "reason": "silence", "context": "", "seg": -1, "words_idx": []}]})
+    a.add_clip(job.id, 5.8)                                  # C 는 B 를 가르지 않고 6.0 에
+    assert [p["clip"] for p in job.pieces][:3] == ["main", clip_b, job.pieces[2]["clip"]]
+    assert sum(1 for p in job.pieces if p["clip"] == clip_b) == 1
+
+
+def test_move_clip_moves_and_rejudges(tmp_path, monkeypatch):
+    a, store, q, job, _ = setup(tmp_path, monkeypatch)
+    a.add_clip(job.id, 4.0)
+    clip_b = job.pieces[1]["clip"]
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    write_out(job, "a.cuts.json", EMPTY_CUTS)
+    job.range_ops = [{"op": "cut", "start": 4.5, "end": 5.0}]   # B 안 편집
+    q.calls.clear()
+    r = a.move_clip(job.id, clip_b, 9.0)                     # 옮긴 뒤 B 는 7~9
+    assert r is not None and ("rejudge", job.id) in q.calls
+    assert [(p["clip"] == clip_b, p["in"], p["out"]) for p in job.pieces] == \
+        [(False, 0.0, 7.0), (True, 0.0, 2.0), (False, 7.0, 10.0)]   # 빠진 자리의 A 두 조각은 합쳐짐
+    assert job.range_ops == [{"op": "cut", "start": 7.5, "end": 8.0}]
+    assert r["clips"][0]["start"] == 7.0
+
+
+def test_move_clip_refusals_and_noop(tmp_path, monkeypatch):
+    a, store, q, job, _ = setup(tmp_path, monkeypatch)
+    a.add_clip(job.id, 4.0)
+    clip_b = job.pieces[1]["clip"]
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    write_out(job, "a.cuts.json", EMPTY_CUTS)
+    assert a.move_clip(job.id, "main", 1.0) is None
+    assert a.move_clip(job.id, clip_b, 5.0) is None          # 덩어리 안
+    assert a.move_clip(job.id, clip_b, float("nan")) is None
+    before = [dict(p) for p in job.pieces]
+    q.calls.clear()
+    r = a.move_clip(job.id, clip_b, 6.0)                     # 제자리
+    assert r is not None and job.pieces == before and not q.calls
+    job.status = Status.FAILED
+    assert a.move_clip(job.id, clip_b, 9.0) is None
+
+
+def test_move_nested_out_merges_parent(tmp_path, monkeypatch):
+    a, store, q, job, dialogs = setup(tmp_path, monkeypatch)
+    a.add_clip(job.id, 4.0)                                  # B 4~6
+    clip_b = job.pieces[1]["clip"]
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    write_out(job, "a.cuts.json", EMPTY_CUTS)
+    a.add_clip(job.id, 5.0)                                  # C 가 B 를 가름: B1 C B2
+    clip_c = job.pieces[2]["clip"]
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    write_out(job, "a.cuts.json", EMPTY_CUTS)
+    assert a.move_clip(job.id, clip_c, 0.0) is not None
+    assert [p["clip"] for p in job.pieces] == [clip_c, "main", clip_b, "main"]
+    assert [(p["in"], p["out"]) for p in job.pieces if p["clip"] == clip_b] == [(0.0, 2.0)]
+
+
+def test_move_block_with_nested(tmp_path, monkeypatch):
+    a, store, q, job, _ = setup(tmp_path, monkeypatch)
+    a.add_clip(job.id, 4.0)                                  # B 4~6
+    clip_b = job.pieces[1]["clip"]
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    write_out(job, "a.cuts.json", EMPTY_CUTS)
+    a.add_clip(job.id, 5.0)                                  # B1(0~1) C(0~2) B2(1~2), 덩어리 4~8, 전체 14 (A 10 + B 2 + C 2)
+    clip_c = job.pieces[2]["clip"]
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    write_out(job, "a.cuts.json", EMPTY_CUTS)
+    assert a.move_clip(job.id, clip_b, 14.0) is not None     # 맨 끝으로: B1 C B2 가 함께, A 두 조각은 합쳐짐
+    assert [(p["clip"], p["in"], p["out"]) for p in job.pieces] == \
+        [("main", 0.0, 10.0), (clip_b, 0.0, 1.0), (clip_c, 0.0, 2.0), (clip_b, 1.0, 2.0)]
+
+
+def test_move_undo_restores_everything(tmp_path, monkeypatch):
+    a, store, q, job, _ = setup(tmp_path, monkeypatch)
+    a.add_clip(job.id, 4.0)
+    clip_b = job.pieces[1]["clip"]
+    run_fake_analyze(job, store, a, q, tmp_path, monkeypatch, b_tr=TR_B)
+    write_out(job, "a.cuts.json", EMPTY_CUTS)
+    a.get_captions(job.id)
+    job.overlays = [{"id": "o", "img": "x.png", "start": 4.2, "end": 4.8, "x": 0, "y": 0, "w": 0.2}]
+    snap = a._snap(job)
+    a.move_clip(job.id, clip_b, 9.0)
+    assert a._snap(job) != snap
+    a.undo(job.id)
+    assert a._snap(job) == snap
