@@ -1256,7 +1256,7 @@ const ovl = (() => {
 // 타임라인: 화면 줄 위 영상 줄에 조각마다 색 띠 (같은 영상은 같은 색), 전체 막대 아래쪽에도 얇게. 띠를 누르면 그 영상을 고르고, 끌면 옮긴다.
 // 넣기·빼기 뒤엔 작업이 다시 판정(처리 중)으로 가고, 끝나면 loadResult 가 목록을 다시 읽는다.
 const CLIP_COLORS = 5;   // style.css 의 --clip-0 ~ --clip-4
-const TIP_REMOVE = '고른 영상을 결과에서 뺍니다 (실행 취소로 되돌릴 수 있음)';
+const TIP_REMOVE = '선택한 영상 제거';
 const clp = (() => {
   const panel = h('div', { class: 'ov-panel cl-panel' });   // 영상 탭 내용 (이미지 탭과 같은 모양)
   const tabText = h('span', {}, '영상');                     // 영상 탭 이름 (개수는 탭을 다시 그리지 않고 바꾼다)
@@ -1501,7 +1501,7 @@ const clp = (() => {
     moveBtn.disabled = !ok || inside;
     delBtn.disabled = !ok;
     const pickTip = '타임라인 띠나 영상 탭에서 끼워 넣은 영상을 고르세요';
-    const mt = !c ? pickTip : inside ? '재생 위치를 고른 영상 밖으로 옮기세요' : '고른 영상을 지금 재생 위치로 옮깁니다';
+    const mt = !c ? pickTip : inside ? '재생 위치를 고른 영상 밖으로 옮기세요' : '재생 위치로 선택한 영상 옮기기';
     const dt = !c ? pickTip : TIP_REMOVE;
     if (moveTip.title !== mt) moveTip.title = mt;   // 재생 중 매 프레임 불린다 — 바뀔 때만
     if (delTip.title !== dt) delTip.title = dt;
@@ -1598,6 +1598,7 @@ const clp = (() => {
     const ps = g && ovl.available() ? pieces() : [];
     name.hidden = lane.hidden = !ps.length;
     if (lane.hidden) return;
+    lane.classList.toggle('has-sel', !!S.clipSel && ps.some((p) => p.clip === S.clipSel));
     lane.replaceChildren(...TL.clipBands(ps, S.view, g.w, g.cw).map((p) => {
       const b = band(p.clip, 'cl-band');
       b.style.left = `${p.x0}px`;
@@ -1873,10 +1874,18 @@ const zoomTl = (() => {
       frameGrab.want(need);
       overlays(ctx, g, ROW_H, c);
       // 끼워 넣은 구간: 위아래 테두리를 그 영상 색으로 (영상 줄의 띠와 같은 색)
+      // 고른 영상은 네 변을 두껍게 두르고 그 색으로 살짝 덮는다
       for (const p of TL.clipBands(clp.pieces(), v, g.w, g.cw)) {
+        const on = p.clip === S.clipSel, k = on ? 4 : 3, w = p.x1 - p.x0;
         ctx.fillStyle = c.clips[clp.colorOf(p.clip)];
-        ctx.fillRect(p.x0, 0, p.x1 - p.x0, 3);
-        ctx.fillRect(p.x0, ROW_H - 3, p.x1 - p.x0, 3);
+        ctx.fillRect(p.x0, 0, w, k);
+        ctx.fillRect(p.x0, ROW_H - k, w, k);
+        if (!on) continue;
+        ctx.fillRect(p.x0, 0, Math.min(3, w), ROW_H);
+        ctx.fillRect(Math.max(p.x0, p.x1 - 3), 0, Math.min(3, w), ROW_H);
+        ctx.globalAlpha = 0.18;
+        ctx.fillRect(p.x0, 0, w, ROW_H);
+        ctx.globalAlpha = 1;
       }
     }
     if (showWave) {
