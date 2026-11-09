@@ -170,3 +170,38 @@ def test_snap_prefers_piece_boundary_in_cut():
     assert S.snap_at(-1, [], [], fps, 10) == 0 and S.snap_at(99, [], [], fps, 10) == 10
     # 한 잘린 구간 안 경계 둘 → t 에 가까운 쪽
     assert S.snap_at(6.9, [(4.5, 7.5)], [5.0, 7.0], fps, 10) == 7.0
+
+
+def test_move_block_after_and_before():
+    ps = [P("a", "main", 0, 4), P("b", "B", 0, 2), P("e", "main", 4, 10)]
+    out, t2 = S.move_block(ps, "B", 8)           # 뒤로: 8 - 2
+    assert t2 == 6 and [(p["clip"], p["in"], p["out"]) for p in out] == \
+        [("main", 0, 4), ("main", 4, 6), ("B", 0, 2), ("main", 6, 10)]
+    out, t2 = S.move_block(ps, "B", 1)           # 앞으로
+    assert t2 == 1 and [p["clip"] for p in out] == ["main", "B", "main", "main"]
+
+
+def test_move_block_carries_nested():
+    ps = [P("a", "main", 0, 4), P("b", "B", 0, 1), P("c", "C", 0, 2), P("d", "B", 1, 3), P("e", "main", 4, 10)]
+    out, t2 = S.move_block(ps, "B", 10)
+    assert t2 == 5 and [p["clip"] for p in out] == ["main", "main", "B", "C", "B", "main"]
+
+
+def test_shift_for_move_inside_follows():
+    e = E(range_ops=[{"op": "cut", "start": 4.5, "end": 5.0}], line_times={"9:0": [4.25, 4.75]},
+          overlays=[{"id": "in", "start": 4.125, "end": 4.875}], word_edits={"x": 1})
+    r = S.shift_for_move(e, 4, 6, 7)             # 덩어리 4~6 → 옮긴 뒤 7 에서 시작
+    assert r["range_ops"] == [{"op": "cut", "start": 7.5, "end": 8.0}]
+    assert r["line_times"] == {"9:0": [7.25, 7.75]}
+    assert [(o["start"], o["end"]) for o in r["overlays"]] == [(7.125, 7.875)]
+    assert r["word_edits"] == {"x": 1}
+
+
+def test_shift_for_move_straddlers():
+    e = E(range_ops=[{"op": "cut", "start": 3, "end": 5}],          # 경계 4 를 넘음
+          overlays=[{"id": "o", "start": 2, "end": 5}],              # 덩어리에 걸침
+          restored=[[8, 9]])                                          # 바깥, 옮긴 자리 뒤
+    r = S.shift_for_move(e, 4, 6, 7)
+    assert sorted((o["start"], o["end"]) for o in r["range_ops"]) == [(3, 4), (7, 8)]
+    assert [(o["start"], o["end"]) for o in r["overlays"]] == [(2, 4)]
+    assert r["restored"] == [[6, 7]]

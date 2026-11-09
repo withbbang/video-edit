@@ -168,6 +168,40 @@ def shift_for_remove(e: dict, spans: list) -> dict:
     return r
 
 
+# ---- 옮기기 -----------------------------------------------------------------
+
+def move_block(pieces: list, clip: str, t: float):
+    """clip 덩어리(첫~끝 조각 사이 모두)를 t(옮기기 전 시각, 맞춘 값, 덩어리 밖)로 옮긴다. → (조각 목록, t2).
+    합치기는 하지 않는다 (API 가 한다)."""
+    s, end = block_span(pieces, clip)
+    d = end - s
+    block, rest, pos = [], [], 0.0
+    for p in pieces:
+        a, b = pos, pos + float(p["out"]) - float(p["in"])
+        pos = b
+        (block if a >= s - EPS and b <= end + EPS else rest).append(p)
+    t2 = t if t <= s + EPS else t - d
+    out, at = rest, t2
+    for p in block:  # 경계에 넣으면 갈지 않으므로 앞 조각 뒤에 이어 넣는다
+        out = split_piece(out, at, p)
+        at += float(p["out"]) - float(p["in"])
+    return out, t2
+
+
+def shift_for_move(e: dict, s: float, end: float, t2: float) -> dict:
+    """덩어리 [s, end] 를 빼서 t2(옮긴 뒤 시각)에 넣을 때의 편집. 덩어리 안 편집은 따라가고 바깥은 밀린다."""
+    d = end - s
+    r = shift_for_insert(shift_for_remove(e, [(s, end)]), t2, d)
+    inner = _convert(e, [(s, end, t2)])
+    r["restored"] += inner["restored"]
+    r["range_ops"] += inner["range_ops"]
+    r["line_times"].update(inner["line_times"])
+    whole = [o for o in e.get("overlays") or []
+             if float(o["start"]) >= s - EPS and float(o["end"]) <= end + EPS]
+    r["overlays"] += _convert({"overlays": whole}, [(s, end, t2)])["overlays"]
+    return r
+
+
 # ---- 자막 키 ----------------------------------------------------------------
 
 def _seg_clips(tr: dict) -> dict:
