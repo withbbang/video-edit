@@ -394,7 +394,7 @@ function resultParts(j, r) {
 // 편집기처럼 창 아래 전체 폭 한 패널: 머리 줄(위치·구간·실행 취소·확대) → 전체 막대 → 시간 눈금·이미지 줄·화면 줄·소리 줄
 function tlPanel(r) {
   return h('div', { class: 'tlp' }, ovl.grip,
-    h('div', { class: 'tlp-head' }, zoomTl.now, rangeBar.acts, rangeBar.el, h('span', { class: 'tlp-right' }, histBar.el, zoomTl.zoom)),
+    h('div', { class: 'tlp-head' }, zoomTl.now, rangeBar.acts, clp.acts, rangeBar.el, h('span', { class: 'tlp-right' }, histBar.el, zoomTl.zoom)),
     h('div', { class: 'tlp-over' }, timeline(r)),
     zoomTl.el);
 }
@@ -676,6 +676,7 @@ function drawRange() {
   rangeMark.hidden = S.mark === null || !d;
   if (!rangeMark.hidden) rangeMark.style.left = `${(S.mark / d) * 100}%`;
   zoomTl.draw();
+  clp.drawActs();
   // 막대 아래
   const b = rangeBar;
   b.el.hidden = !r || !d;
@@ -1251,10 +1252,11 @@ const ovl = (() => {
 
 // ---- 영상 끼워 넣기 -------------------------------------------------------
 // 넣은 영상 {clip, name, start, end, dur, spans: [[시작, 끝], ...]} (이어 붙인 초, A("main")는 서버가 뺀다).
-// 영상 탭 (잘린 곳·자막·이미지 옆): 왼쪽 사용 중·보관함 탭, 오른쪽 불러오기. 사용 중에서 고르면 이름 변경·보관·빼기.
-// 타임라인: 화면 줄 위 영상 줄에 조각마다 색 띠 (같은 영상은 같은 색), 전체 막대 아래쪽에도 얇게. 띠를 누르면 그 영상을 고른다.
+// 영상 탭 (잘린 곳·자막·이미지 옆): 왼쪽 사용 중·보관함 탭, 오른쪽 불러오기. 사용 중에서 고르면 이름 변경·보관·제거.
+// 타임라인: 화면 줄 위 영상 줄에 조각마다 색 띠 (같은 영상은 같은 색), 전체 막대 아래쪽에도 얇게. 띠를 누르면 그 영상을 고르고, 끌면 옮긴다.
 // 넣기·빼기 뒤엔 작업이 다시 판정(처리 중)으로 가고, 끝나면 loadResult 가 목록을 다시 읽는다.
 const CLIP_COLORS = 5;   // style.css 의 --clip-0 ~ --clip-4
+const TIP_REMOVE = '고른 영상을 결과에서 뺍니다 (실행 취소로 되돌릴 수 있음)';
 const clp = (() => {
   const panel = h('div', { class: 'ov-panel cl-panel' });   // 영상 탭 내용 (이미지 탭과 같은 모양)
   const tabText = h('span', {}, '영상');                     // 영상 탭 이름 (개수는 탭을 다시 그리지 않고 바꾼다)
@@ -1339,6 +1341,24 @@ const clp = (() => {
   async function remove() {
     if (S.clipSel) await send('remove_clip', S.clipSel);
   }
+  // 옮기기 자리 재료: 잘린 구간·영상 경계(0·끝 뺌)·전체 길이
+  function dropAt(clip, t) {
+    const c = list().find((x) => x.clip === clip);
+    const r = S.resultFor === S.sel ? S.result : null;
+    const d = rangeDur();
+    if (!c || !d) return null;
+    const bounds = [...new Set(pieces().flatMap((p) => [p.start, p.end]))].filter((x) => x > 1e-6 && x < d - 1e-6);
+    const sp = c.spans || [[c.start, c.end]];
+    return TL.dropTarget(t, (r && r.cuts) || [], bounds, fps(), d, [sp[0][0], sp[sp.length - 1][1]]);
+  }
+  // 고른 영상을 t 로 옮기고, 끝나면 그 영상을 고른 채 새 자리 시작으로
+  async function move(clip, t) {
+    const res = await send('move_clip', clip, t);
+    const c = res && res.clips.find((x) => x.clip === clip);
+    if (!c) return;
+    select(clip);
+    seekTo(c);
+  }
   async function savePreset(nm) {
     const j = selected();
     if (!j || !S.clipSel) return;
@@ -1415,7 +1435,7 @@ const clp = (() => {
       acts = [h('button', { type: 'button', class: 'btn', disabled: !can || busy, onclick: () => startRename('clip', c.clip) }, '이름 변경'),
         h('button', { type: 'button', class: 'btn', disabled: !can || busy,
           onclick: () => { renaming = null; naming = true; saveErr = null; renderTools(); } }, '보관'),
-        h('button', { type: 'button', class: 'btn', disabled: !can || busy, onclick: remove }, '빼기')];
+        h('button', { type: 'button', class: 'btn', title: TIP_REMOVE, disabled: !can || busy, onclick: remove }, '제거')];
     }
     const out = [row, renameErr('clip', c.clip), h('div', { class: 'ov-acts' }, acts)];
     if (naming && saveErr) out.push(h('div', { class: 'ov-err err' }, saveErr));
@@ -1433,6 +1453,7 @@ const clp = (() => {
     return [row, renameErr('preset', p.id)];
   }
   function renderTools() {
+    drawActs();
     const all = list();
     tabText.textContent = all.length ? `영상 ${all.length}` : '영상';
     const can = editable();
@@ -1467,21 +1488,110 @@ const clp = (() => {
     startRename(kind, id);
   });
 
+  // ---- 타임라인 머리 줄 버튼 (옮기기·제거). 비활성 버튼은 마우스를 받지 않으므로 말풍선은 감싼 span 에 단다 ----
+  const moveBtn = h('button', { type: 'button', class: 'btn', onclick: () => { if (S.clipSel) move(S.clipSel, at()); } }, '옮기기');
+  const delBtn = h('button', { type: 'button', class: 'btn', onclick: remove }, '제거');
+  const moveTip = h('span', { class: 'tipw' }, moveBtn), delTip = h('span', { class: 'tipw' }, delBtn);
+  const acts = h('span', { class: 'lt clip-acts' }, moveTip, delTip);
+  // 재생 위치·고르기·처리 중이 바뀔 때 켜짐·말풍선을 다시 정한다
+  function drawActs() {
+    const c = S.clipSel ? list().find((x) => x.clip === S.clipSel) : null;
+    const ok = !!c && editable() && !busy;
+    const inside = !!c && dropAt(c.clip, at()) === null;
+    moveBtn.disabled = !ok || inside;
+    delBtn.disabled = !ok;
+    const pickTip = '타임라인 띠나 영상 탭에서 끼워 넣은 영상을 고르세요';
+    const mt = !c ? pickTip : inside ? '재생 위치를 고른 영상 밖으로 옮기세요' : '고른 영상을 지금 재생 위치로 옮깁니다';
+    const dt = !c ? pickTip : TIP_REMOVE;
+    if (moveTip.title !== mt) moveTip.title = mt;   // 재생 중 매 프레임 불린다 — 바뀔 때만
+    if (delTip.title !== dt) delTip.title = dt;
+  }
+
   // ---- 타임라인 띠 ----
-  // 띠 하나: 누르면 그 영상 고르기 (아래 줄의 구간 고르기·이동으로 넘기지 않는다)
+  // 띠 하나: 짧게 누르면 그 영상 고르기, 4px 넘게 끌면 옮기기 (아래 줄의 구간 고르기·이동으로 넘기지 않는다)
+  let drag = null;   // 띠 끌기 {clip, kind, x0, y0, on, t}: on = 끌기로 넘어감, t = 놓일 자리(못 놓으면 null)
+  const laneDrop = h('i', { class: 'cl-drop', hidden: true }), barDrop = h('i', { class: 'cl-drop', hidden: true });
   function band(clip, cls) {
-    const b = h(cls === 'cl-strip' ? 'i' : 'b', { class: `${cls} cl-c${colorOf(clip)}` + (clip === S.clipSel ? ' sel' : '') });
+    const b = h(cls === 'cl-strip' ? 'i' : 'b', { class: `${cls} cl-c${colorOf(clip)}` + (clip === S.clipSel ? ' sel' : '')
+      + (drag && drag.on && drag.clip === clip ? ' dragging' : ''), 'data-clip': clip });
     const it = list().find((c) => c.clip === clip);
     if (it) b.title = it.name;
     b.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
-      pick(clip);
-      const c = list().find((x) => x.clip === clip);
-      if (c) seekTo(c);
+      if (drag) endDrag();
+      drag = { clip, kind: cls, x0: e.clientX, y0: e.clientY, on: false, t: null };
+      try { b.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ }
+      // 끄는 동안 줄이 다시 그려져 띠가 바뀌어도 받도록 창에서 듣는다
+      window.addEventListener('pointermove', dragMove);
+      window.addEventListener('pointerup', dragUp);
+      window.addEventListener('pointercancel', endDrag);
+      window.addEventListener('keydown', dragKey, true);
     });
     return b;
+  }
+  // 끄는 곳의 원본 초: 영상 줄은 보기 범위로, 전체 막대 띠는 막대 비율로
+  function dragT(x) {
+    if (drag.kind === 'cl-strip') {
+      const bar = document.querySelector('#dock .tl'), d = rangeDur();
+      if (!bar || !d) return null;
+      const rect = bar.getBoundingClientRect();
+      return Math.min(d, Math.max(0, ((x - rect.left) / rect.width) * d));
+    }
+    const g = zoomTl.geom();
+    return g && S.view ? TL.xToT(S.view, x - lane.getBoundingClientRect().left, g.cw) : null;
+  }
+  function dragMove(e) {
+    if (!drag) return;
+    if (e.buttons === 0) { endDrag(); return; }   // 손 뗀 걸 못 받았다 (창 밖 등)
+    if (!drag.on) {
+      if (!TL.isDrag(e.clientX - drag.x0, e.clientY - drag.y0) || !editable() || busy) return;   // 처리 중엔 고르기만
+      drag.on = true;
+      for (const el of [...lane.children, ...barBands]) if (el.dataset.clip === drag.clip) el.classList.add('dragging');
+    }
+    const t = dragT(e.clientX);
+    drag.t = t === null ? null : dropAt(drag.clip, t);
+    drawDrop();
+  }
+  function dragUp() {
+    const g = drag;
+    endDrag();
+    if (!g) return;
+    if (g.on) {   // 놓을 수 없는 자리(덩어리 안)면 아무것도 안 한다
+      if (g.t !== null) { pick(g.clip); move(g.clip, g.t); }
+      return;
+    }
+    pick(g.clip);
+    const c = list().find((x) => x.clip === g.clip);
+    if (c) seekTo(c);
+  }
+  function dragKey(e) {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    endDrag();
+  }
+  // 끌기를 마치거나 취소: 듣기·흐림·세로선을 지운다
+  function endDrag() {
+    drag = null;
+    window.removeEventListener('pointermove', dragMove);
+    window.removeEventListener('pointerup', dragUp);
+    window.removeEventListener('pointercancel', endDrag);
+    window.removeEventListener('keydown', dragKey, true);
+    for (const el of [...lane.children, ...barBands]) el.classList.remove('dragging');
+    drawDrop();
+  }
+  // 놓일 자리 세로선 (전체 막대·영상 줄 두 곳)
+  function drawDrop() {
+    const t = drag && drag.on ? drag.t : null;
+    const d = rangeDur();
+    barDrop.hidden = t === null || !d;
+    if (!barDrop.hidden) barDrop.style.left = `${(t / d) * 100}%`;
+    const g = t === null ? null : zoomTl.geom();
+    const x = g && S.view ? TL.tToX(S.view, t, g.cw) : -1;
+    laneDrop.hidden = x < 0 || x > g.w;
+    if (!laneDrop.hidden) laneDrop.style.left = `${x}px`;
   }
   // 확대 타임라인의 영상 줄 (zoomTl.paint 가 부른다)
   function paintLane(g) {
@@ -1493,7 +1603,8 @@ const clp = (() => {
       b.style.left = `${p.x0}px`;
       b.style.width = `${Math.max(2, p.x1 - p.x0)}px`;
       return b;
-    }));
+    }), laneDrop);
+    drawDrop();
   }
   // 전체 막대 아래쪽 얇은 띠 (막대는 renderResult 때 새로 만들어지므로 그때도 다시 붙인다)
   let barBands = [];
@@ -1512,10 +1623,12 @@ const clp = (() => {
       bar.insertBefore(b, bar.firstChild);
       barBands.push(b);
     }
+    bar.append(barDrop);
+    drawDrop();
   }
   rangePointer(lane, (x, rect) => { const g = zoomTl.geom(); return g && S.view ? TL.xToT(S.view, x - rect.left, g.cw) : 0; }, () => null);
 
-  return { panel, tabText, name, lane, renderTools, paintLane, drawBar, load, pieces, colorOf,
+  return { panel, tabText, name, lane, acts, renderTools, drawActs, paintLane, drawBar, load, pieces, colorOf,
     reset() { S.clips = null; S.clipsFor = null; S.clipSel = null; naming = false; renaming = null; presets = null; saveErr = null; clipErr = null; field = null; } };
 })();
 
@@ -2752,6 +2865,7 @@ const player = {
     const t = this.time();
     this.head.style.left = d ? `${Math.min(100, (t / d) * 100)}%` : '0';
     zoomTl.head(t, this.playing());
+    clp.drawActs();
     ovl.drawLayer(t);
     this.drawSub(t);
   },

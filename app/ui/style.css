@@ -255,6 +255,9 @@ video.grab { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity:
   border-radius: 8px; }
 .tlp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-bottom: 8px; font-size: 12px; }
 .tlp-head .range-acts { display: inline-flex; gap: 4px; }
+.tlp-head .clip-acts { display: inline-flex; gap: 4px; }
+.tipw { display: inline-flex; }
+.tipw .btn:disabled { pointer-events: none; }   /* 말풍선(title)은 감싼 span 이 받는다 */
 .zt-now { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; min-width: 72px; }
 .tlp-over { padding-left: var(--names); }
 .tlp-over .tl { margin: 0 0 6px; height: 12px; }
@@ -466,6 +469,10 @@ body.ns-drag, body.ns-drag * { cursor: ns-resize !important; }   /* 끄는 동�
 .cl-band.sel { opacity: 1; box-shadow: 0 0 0 1.5px var(--fg) inset; }
 .tl .cl-strip { position: absolute; bottom: 0; height: 4px; min-width: 2px; z-index: 1; cursor: pointer; opacity: .9; }
 .tl .cl-strip.sel { height: 6px; opacity: 1; }
+/* 띠 끌어 옮기기: 끄는 영상은 흐리게, 놓일 자리에 세로선 */
+.cl-band.dragging, .tl .cl-strip.dragging { opacity: .4; }
+.cl-drop { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--fg); pointer-events: none; z-index: 2; }
+.cl-drop[hidden] { display: none; }
 .cl-sw { display: block; width: 10px; height: 24px; border-radius: 3px; flex-shrink: 0; }
 .cl-c0 { background: var(--clip-0); } .cl-c1 { background: var(--clip-1); } .cl-c2 { background: var(--clip-2); }
 .cl-c3 { background: var(--clip-3); } .cl-c4 { background: var(--clip-4); }
