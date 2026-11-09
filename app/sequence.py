@@ -52,6 +52,36 @@ def split_piece(pieces: list, at: float, new: dict) -> list:
     return out
 
 
+# ---- 자리 맞춤 (넣기·옮기기 공통, app/ui/timeline.js 의 snapAt 과 같은 규칙) ----
+
+def piece_bounds(pieces: list) -> list:
+    """조각 사이 경계 시각 (0·전체 끝 제외, 오름차순)."""
+    r, t = [], 0.0
+    for p in pieces[:-1]:
+        t += float(p["out"]) - float(p["in"])
+        r.append(t)
+    return r
+
+
+def block_span(pieces: list, clip: str):
+    """그 영상 첫 조각 시작 ~ 마지막 조각 끝 (이어 붙인 초). 없으면 None."""
+    spans = clip_spans(pieces, clip)
+    return (spans[0][0], spans[-1][1]) if spans else None
+
+
+def snap_at(t: float, cuts: list, bounds: list, fps: float, total: float) -> float:
+    """t 를 프레임 격자 → [0, total] 에 맞추고, 잘린 구간 (a, b) 안이면 그 안의 영상 경계 중 가장 가까운 것
+    (같으면 앞쪽), 경계가 없으면 a 를 격자에 맞춘 값."""
+    t = min(max(round(float(t) * fps) / fps, 0.0), total)
+    for a, b in cuts:
+        if a + EPS < t < b - EPS:
+            inside = [x for x in sorted(bounds) if a + EPS < x < b - EPS]
+            if inside:
+                return min(inside, key=lambda x: abs(x - t))
+            return min(max(round(a * fps) / fps, 0.0), total)
+    return t
+
+
 # ---- 넣기 -------------------------------------------------------------------
 
 def _ins_span(s, e, at, d):

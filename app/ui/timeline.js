@@ -148,12 +148,37 @@ function clipBands(pieces, v, w, cw) {
   return out;
 }
 
+// ---- 영상 옮기기 자리 맞춤 (app/sequence.py 의 snap_at 과 같은 규칙) ----
+// t 를 프레임 격자 → [0, total] 에 맞추고, 잘린 구간 [a, b] 안이면 그 안의 영상 경계 중 가장 가까운 것(같으면 앞쪽), 없으면 a 를 격자에
+function snapAt(t, cuts, bounds, fps, total) {
+  const grid = (x) => clamp(Math.round(x * fps) / fps, 0, total);
+  const e = 1e-6;
+  t = grid(t);
+  for (const [a, b] of cuts) {
+    if (a + e < t && t < b - e) {
+      let best = null;
+      for (const x of [...bounds].sort((p, q) => p - q)) {
+        if (a + e < x && x < b - e && (best === null || Math.abs(x - t) < Math.abs(best - t))) best = x;
+      }
+      return best === null ? grid(a) : best;
+    }
+  }
+  return t;
+}
+// 덩어리 block [s, e] 를 t 로 끌어 놓을 자리. 덩어리 안이거나 s·e 와 같으면(제자리) null
+function dropTarget(t, cuts, bounds, fps, total, block) {
+  const x = snapAt(t, cuts, bounds, fps, total), e = 1e-6;
+  return x > block[0] - e && x < block[1] + e ? null : x;
+}
+// 누른 채 4px 넘게 움직였으면 끌기
+function isDrag(dx, dy) { return Math.hypot(dx, dy) > 4; }
+
 // 썸네일·소리 줄을 다시 읽을 키: 작업이 같아도 길이나 조각 자리(get_result 의 layout)가 바뀌면 asr.wav·미리보기 영상이 바뀐다
 function tlDataKey(id, r) {
   return JSON.stringify([id, (r && r.duration) || 0, (r && r.layout) || []]);
 }
 
 const TL = { fitView, clampView, tToX, xToT, zoomAt, followT, playFollow, playSpc, cells, sheetCell, waveMax, spcToSlider, sliderToSpc,
-  ovRect, ovMove, ovResizeEdge, barDrag, lanesDrag, clipBands, tlDataKey };
+  ovRect, ovMove, ovResizeEdge, barDrag, lanesDrag, clipBands, snapAt, dropTarget, isDrag, tlDataKey };
 if (typeof window !== 'undefined') window.TL = TL;
 if (typeof module !== 'undefined') module.exports = TL;

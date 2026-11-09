@@ -193,3 +193,12 @@ def test_tl_data_key():
             ' T.tlDataKey("j", {duration: 10})];')
     assert k[0] == k[1] == k[6]
     assert len({k[0], k[2], k[3], k[4], k[5]}) == 5
+
+
+def test_snap_and_drop_target():
+    assert run("out = T.snapAt(5.3, [[4.6, 5.5]], [5], 30, 10);") == 5
+    assert run("out = T.snapAt(3.0, [[2.6, 3.4]], [5], 30, 10);") == pytest.approx(2.6)
+    assert run("out = T.dropTarget(5.3, [[4.6, 5.5]], [5, 7], 30, 10, [5, 7]);") is None      # 제자리(시작)
+    assert run("out = T.dropTarget(6.0, [], [5, 7], 30, 10, [5, 7]);") is None               # 덩어리 안
+    assert run("out = T.dropTarget(8.0, [], [5, 7], 30, 10, [5, 7]);") == 8
+    assert run("out = [T.isDrag(3, 2), T.isDrag(4, 1)];") == [False, True]

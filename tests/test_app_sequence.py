@@ -1,3 +1,5 @@
+import pytest
+
 from app import sequence as S
 
 
@@ -146,3 +148,25 @@ def test_to_stable_plain_is_main_roundtrip():
     ], "pieces": [{"id": "a1", "clip": "main", "seg_from": 0, "seg_to": 1}, {"id": "b", "clip": "cb", "seg_from": 1, "seg_to": 2},
                   {"id": "a2", "clip": "main", "seg_from": 2, "seg_to": 3}]}
     assert S.from_stable(st, comb) == {"0:1": "x", "2:0": "y"}
+
+
+def test_piece_bounds_and_block_span():
+    ps = [P("a", "main", 0, 4), P("b", "B", 0, 1), P("c", "C", 0, 2), P("d", "B", 1, 3), P("e", "main", 4, 10)]
+    assert S.piece_bounds(ps) == [4, 5, 7, 9]
+    assert S.block_span(ps, "B") == (4, 9)
+    assert S.block_span(ps, "C") == (5, 7)
+    assert S.block_span(ps, "X") is None
+
+
+def test_snap_prefers_piece_boundary_in_cut():
+    fps = 30.0
+    # 경계 5.0 이 잘린 구간 (4.6, 5.5) 안 → 가장 가까운 경계
+    assert S.snap_at(5.3, [(4.6, 5.5)], [5.0], fps, 10) == 5.0
+    # 경계 없는 잘린 구간 → 구간 시작 (지금 넣기 규칙)
+    assert S.snap_at(3.0, [(2.6, 3.4)], [5.0], fps, 10) == pytest.approx(2.6)
+    # 잘린 구간 밖 → 격자만
+    assert S.snap_at(4.01, [], [], fps, 10) == pytest.approx(4.0)
+    # 범위 밖은 [0, total]
+    assert S.snap_at(-1, [], [], fps, 10) == 0 and S.snap_at(99, [], [], fps, 10) == 10
+    # 한 잘린 구간 안 경계 둘 → t 에 가까운 쪽
+    assert S.snap_at(6.9, [(4.5, 7.5)], [5.0, 7.0], fps, 10) == 7.0
