@@ -272,6 +272,20 @@ def test_undo_insert_reuses_file_cache(seq_env):
 
 
 @needs_ffmpeg
+def test_reordered_sequence_does_not_retranscribe(seq_env):
+    """조각 순서를 바꿔(B 를 맨 앞으로) 다시 돌려도 파일별 캐시를 써 전사를 다시 하지 않는다."""
+    out = seq_env.tmp / "out"
+    seq_env.run(seq_env.a, out, "--sequence", seq_env.sq)
+    assert seq_env.calls == [5.0, 2.0]
+    items = json.loads(seq_env.sq.read_text(encoding="utf-8"))
+    sq = seq_env.tmp / "seq_moved.json"
+    sq.write_text(json.dumps([items[1], items[0], items[2]]), encoding="utf-8")
+    moved = seq_env.run(seq_env.a, out, "--sequence", sq)
+    assert seq_env.calls == [5.0, 2.0]   # 새 전사 없음
+    assert [p["id"] for p in moved["pieces"]] == ["b1", "a1", "a2"]
+
+
+@needs_ffmpeg
 def test_symlinked_folder_shares_file_cache(seq_env):
     """입력 폴더를 심볼릭 링크로 가리켜도(맥 별칭 폴더·윈도우 subst 드라이브) 단독·이어 붙이기·되돌리기가 같은 캐시를 쓴다."""
     lnk = seq_env.tmp / "lnk"
