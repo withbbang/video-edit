@@ -169,6 +169,7 @@ tests/                pytest (requirements-dev.txt)
   옮겼다가 새 전사 키로 푼다. 넣기·빼기도 실행 취소 대상이고 파일별 캐시라 되돌려도 전사를 다시 하지 않는다. 다시 판정이 실패한(FAILED) 넣기도
   실행 취소·빼기가 된다. 보관함은 `<데이터>/clip_presets/`(presets.json, `<id>/<sha16><ext>`, 분석 캐시 `<id>/files/`): 그 영상 안의 편집
   (파일 안 초)도 같이 저장되고, 넣을 때 캐시를 작업 복사본 서명으로 옮겨(`rebase_file_cache`) 바로 들어간다.
+  옮기기는 `Api.move_clip`(덩어리 = 첫~마지막 조각, 그 안에 끼운 영상 포함, `sequence.move_block`/`shift_for_move` 가 편집 시간을 옮김): 타임라인 머리 줄의 `옮기기`·`제거`(고른 끼운 영상이 있을 때만)나 띠를 4px 넘게 끌어 옮긴다. 넣기·옮기기의 자리 맞춤은 `sequence.snap_at`(잘린 구간 안에 조각 경계가 있으면 가장 가까운 경계, 아니면 구간 시작) — 화면은 `TL.snapAt`/`dropTarget`. 실행 취소 대상.
   자막은 영상 화면 아래쪽에 겹쳐 그린다(새기는 자리·크기 그대로). 글자 꾸미기는 줄 고치는 칸 안 선택(없으면 줄 전체) 또는 자막 탭 목록에서
   음절(span.c)을 끌어 선택하면(브라우저 선택이 있는 동안만 켜짐, 꾸민 뒤엔 같은 글자를 다시 선택) 꾸밈 막대(목록 위 — 꺼지면 흐리게·inert, 영상 위에서 고칠 땐 자막 위에 뜨는 한 벌 더)로 글자마다 글꼴·크기·색·굵기를 바꾼다 (Api.set_style, Job.word_styles, 실행 취소 대상). 글꼴은 `app/ui/fonts`(OFL) — 화면 @font-face 와 새기기가 같은 파일을 쓴다.
 - 사용자 데이터: 맥 `~/Library/Application Support/youtube-edit`, 윈도우 `%APPDATA%\youtube-edit` (`YTEDIT_DATA_DIR` 로 덮어씀).
