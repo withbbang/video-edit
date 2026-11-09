@@ -35,7 +35,7 @@ def _steps_text(job: dict) -> str:
 def test_trigger_and_runners(wf):
     on = wf.get("on", wf.get(True))  # PyYAML 은 키 on 을 True 로 읽는다
     assert on == {"push": {"tags": ["v*"]}}
-    assert wf["jobs"]["mac"]["runs-on"] == "macos-14"
+    assert wf["jobs"]["mac"]["runs-on"] == "macos-15"
     assert wf["jobs"]["win"]["runs-on"] == "windows-latest"
     assert set(wf["jobs"]["release"]["needs"]) == {"mac", "win", "sources"}
 
