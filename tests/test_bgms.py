@@ -138,8 +138,9 @@ def test_add_bgm_imports_and_defaults(tmp_path):
     data = json.loads(save_bgms(job).read_text(encoding="utf-8"))
     assert Path(data[0]["path"]).is_file() and Path(data[0]["path"]).name == b["file"]
     a._dialogs.audio = str(tone(tmp_path, "둘.mp3", 2))
-    b2 = a.add_bgm(job.id, 999.0)["bgms"][1]                      # 결과 길이 밖은 끝으로
-    assert b2["at"] <= 20.0 and b2["at"] >= b["at"]
+    b2 = a.add_bgm(job.id, 999.0)["bgms"][1]                      # 결과 끝(재생 위치가 영상 끝)에서 넣으면 곡 끝을 결과 끝에 맞춤
+    end = bgm.out_total(a._bgm_context(job)[0])
+    assert b2["at"] < end - bgm.MIN_LEN and math.isclose(b2["at"] + b2["dur"], end, abs_tol=0.05)
     assert a.add_bgm(job.id, float("nan")) is None
 
 

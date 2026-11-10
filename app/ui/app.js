@@ -1497,7 +1497,8 @@ const clp = (() => {
 
   // ---- 타임라인 머리 줄 버튼 (옮기기·제거). 비활성 버튼은 마우스를 받지 않으므로 말풍선은 감싼 span 에 단다 ----
   const moveBtn = h('button', { type: 'button', class: 'btn', onclick: () => { if (S.clipSel) move(S.clipSel, at()); } }, '옮기기');
-  const delBtn = h('button', { type: 'button', class: 'btn', onclick: remove }, '제거');
+  // 제거: 고른 음원이 있으면 그 음원, 아니면 고른 끼워 넣은 영상 (bgl 은 아래에서 만들어지므로 누를 때 찾는다)
+  const delBtn = h('button', { type: 'button', class: 'btn', onclick: () => (S.bgmSel ? bgl.remove() : remove()) }, '제거');
   const moveTip = h('span', { class: 'tipw' }, moveBtn), delTip = h('span', { class: 'tipw' }, delBtn);
   const acts = h('span', { class: 'lt clip-acts' }, moveTip, delTip);
   // 재생 위치·고르기·처리 중이 바뀔 때 켜짐·말풍선을 다시 정한다
@@ -1506,10 +1507,11 @@ const clp = (() => {
     const ok = !!c && editable() && !busy;
     const inside = !!c && dropAt(c.clip, at()) === null;
     moveBtn.disabled = !ok || inside;
-    delBtn.disabled = !ok;
-    const pickTip = '타임라인 띠나 영상 탭에서 끼워 넣은 영상을 고르세요';
-    const mt = !c ? pickTip : inside ? '재생 위치를 고른 영상 밖으로 옮기세요' : '재생 위치로 선택한 영상 옮기기';
-    const dt = !c ? pickTip : TIP_REMOVE;
+    const bgmOn = !!S.bgmSel && editable();
+    delBtn.disabled = !(ok || bgmOn);
+    const pickTip = '타임라인 띠나 영상·음원 탭에서 끼워 넣은 영상이나 음원을 고르세요';
+    const mt = !c ? '타임라인 띠나 영상 탭에서 끼워 넣은 영상을 고르세요' : inside ? '재생 위치를 고른 영상 밖으로 옮기세요' : '재생 위치로 선택한 영상 옮기기';
+    const dt = S.bgmSel ? '선택한 음원 제거 (Delete)' : !c ? pickTip : TIP_REMOVE;
     if (moveTip.title !== mt) moveTip.title = mt;   // 재생 중 매 프레임 불린다 — 바뀔 때만
     if (delTip.title !== dt) delTip.title = dt;
   }
@@ -1782,10 +1784,12 @@ const bgl = (() => {
   function refresh() {
     renderTools();
     zoomTl.draw();
+    clp.drawActs();   // 머리 줄 제거 버튼이 고른 음원도 지운다
   }
   function select(id) {
     if (S.bgmSel === id) return;
     if (renaming && renaming.kind === 'bgm' && field) field.finish(true);   // 칸 밖을 누르면 반영 (다시 그리기 전에)
+    if (id) S.clipSel = null;   // 음원과 끼워 넣은 영상은 하나만 골라 둔다 (머리 줄 제거가 무엇을 지울지 분명하게)
     S.bgmSel = id; ptSel = null; naming = false; saveErr = null; renaming = null; itemErr = null;
     refresh();
   }
@@ -2048,7 +2052,7 @@ const bgl = (() => {
     } else {
       const dt = TL.xToOutT(x, d.m, S.view, cw) - TL.xToOutT(d.x0 - d.lx, d.m, S.view, cw);
       let live = TL.bgmDrag(d.kind, d.b, dt, total());
-      if (d.kind === 'move') live = { ...live, at: TL.bgmSnap(live.at, lenOf(d.b), total(), snapTargets(d.id), cw / S.view.spc) };
+      if (d.kind === 'move') live = { ...live, at: Math.min(TL.bgmSnap(live.at, lenOf(d.b), total(), snapTargets(d.id), cw / S.view.spc), Math.max(0, total() - 0.1)) };
       d.live = live;
     }
     zoomTl.draw();
@@ -2257,19 +2261,21 @@ const bgl = (() => {
 
   // 음원 막대·점·음원 탭 밖을 누르면 고르기를 푼다
   document.addEventListener('pointerdown', (e) => {
-    if (S.bgmSel && !(e.target.closest && e.target.closest('.bg-bar, .bg-hit, .bg-auto, .bg-panel, .bg-tab'))) select(null);
+    if (S.bgmSel && !(e.target.closest && e.target.closest('.bg-bar, .bg-hit, .bg-auto, .bg-panel, .bg-tab, .clip-acts'))) select(null);
   }, true);
-  // 고른 점이 있으면 Delete·Backspace 로 지운다 (음원 자체는 탭의 제거 버튼으로만). Esc 는 점 → 음원 순서로 고르기를 푼다
+  // Delete·Backspace: 고른 점이 있으면 그 점, 없으면 고른 음원을 지운다. Esc 는 점 → 음원 순서로 고르기를 푼다
   document.addEventListener('keydown', (e) => {
     if (!S.bgmSel || drag || S.editing || typingIn(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === 'Delete' || e.key === 'Backspace') {
-      if (ptSel && ptSel.id === S.bgmSel) { e.preventDefault(); deletePoint(ptSel.id, ptSel.i); }
+      e.preventDefault();
+      if (ptSel && ptSel.id === S.bgmSel) deletePoint(ptSel.id, ptSel.i);
+      else if (editable()) remove();
     } else if (e.key === 'Escape') {
       if (ptSel) { ptSel = null; zoomTl.draw(); } else select(null);
     }
   });
 
-  return { panel, tabText, paintLanes, reveal, renderTools, syncMixer,
+  return { panel, tabText, paintLanes, reveal, renderTools, syncMixer, remove,
     available: () => !!result(),
     reset() {
       if (drag) finish(false);

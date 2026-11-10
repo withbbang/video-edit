@@ -263,6 +263,7 @@ def test_bgm_drag():
     r = run("out = T.bgmDrag('start', {at:1,in:2,out:6,dur:10}, -5, 30);")   # at >= 0 에서 막힘
     assert (r["in"], r["at"]) == (1, 0)
     assert run(f"out = T.bgmDrag('move', {b}, -9, 30);")["at"] == 0
+    assert run(f"out = T.bgmDrag('move', {b}, 99, 30);")["at"] == pytest.approx(29.9)   # 결과 끝 밖으로 빠져 안 보이게 되지 않음
 
 
 def test_bgm_axis_and_x():

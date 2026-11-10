@@ -177,7 +177,8 @@ tests/                pytest (requirements-dev.txt)
   고른 파일은 작업 폴더 `bgm/<sha16>.m4a`(AAC 48kHz 로 다시 인코딩), 보관함은 `<데이터>/bgm_presets/`(presets.json + `<sha16>.m4a`, 파일·이름·길이·gain 만).
   저장 때 `out/<이름>.bgm.json` → `--bgm`. 화면은 `음원` 탭(이미지·영상 탭과 같은 구성, 소리만 있는 파일에도)과 이미지 줄 아래 같은 패널의 음원 줄(`bgl` in app.js):
   막대 = `TL.bgmSpan`(원본 축), 음량 선 = `TL.bgmPolyline`(svg, 잘린 곳 위 평평), 끌기 `TL.bgmDrag`/`bgmSnap`, 점은 결과 시간 `TL.xToOutT` 로 계산해
-  손을 뗄 때 `update_bgm` 한 번. 미리보기는 `app/ui/bgmmix.js` 의 `BgmMixer` 를 이어 붙인 재생기(`player.mse`, 결과 시간)에 붙여 Web Audio 로 섞는다
+  손을 뗄 때 `update_bgm` 한 번. 음원 지우기는 탭 `제거`·타임라인 머리 줄 `제거`(고른 음원이 끼워 넣은 영상보다 먼저)·점 안 고른 Delete.
+  넣는 자리가 결과 끝이면 곡 끝을 결과 끝에 맞추고(`Api._bgm_place`), 끌어 옮겨도 결과 끝에서 MIN_LEN 은 남긴다 (막대가 안 보이게 빠지지 않게). 미리보기는 `app/ui/bgmmix.js` 의 `BgmMixer` 를 이어 붙인 재생기(`player.mse`, 결과 시간)에 붙여 Web Audio 로 섞는다
   (예전 방식(fallback) 재생에선 안 섞임).
   자막은 영상 화면 아래쪽에 겹쳐 그린다(새기는 자리·크기 그대로). 글자 꾸미기는 줄 고치는 칸 안 선택(없으면 줄 전체) 또는 자막 탭 목록에서
   음절(span.c)을 끌어 선택하면(브라우저 선택이 있는 동안만 켜짐, 꾸민 뒤엔 같은 글자를 다시 선택) 꾸밈 막대(목록 위 — 꺼지면 흐리게·inert, 영상 위에서 고칠 땐 자막 위에 뜨는 한 벌 더)로 글자마다 글꼴·크기·색·굵기를 바꾼다 (Api.set_style, Job.word_styles, 실행 취소 대상). 글꼴은 `app/ui/fonts`(OFL) — 화면 @font-face 와 새기기가 같은 파일을 쓴다.

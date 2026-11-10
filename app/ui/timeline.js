@@ -279,7 +279,8 @@ function bgmSnap(at, len, total, others, pxPerSec, thr = 8) {
 
 // 음원 끌기 {at, in, out}: move 는 자리만, start/end 는 곡 안쪽 가장자리 (start 는 at 도 같은 양 움직여 곡이 제자리에 남음)
 function bgmDrag(kind, b, dt, total) {
-  if (kind === 'move') return { at: Math.max(0, b.at + dt), in: b.in, out: b.out };
+  // move: 결과 끝 뒤로 빠지면 막대가 안 보여 다시 잡을 수 없다 — 끝에서 MIN_LEN 은 남긴다
+  if (kind === 'move') return { at: clamp(b.at + dt, 0, Math.max(0, total - BGM_MIN_LEN)), in: b.in, out: b.out };
   if (kind === 'start') {
     const nin = Math.max(clamp(b.in + dt, 0, b.out - BGM_MIN_LEN), b.in - b.at);   // at >= 0 이 되게
     return { at: b.at + (nin - b.in), in: nin, out: b.out };

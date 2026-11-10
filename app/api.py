@@ -996,6 +996,14 @@ class Api:
         t = min(max(float(at), 0.0), out_total)
         return min(max(_grid(t, Fraction(fps).limit_denominator(100000)), 0.0), out_total)
 
+    @classmethod
+    def _bgm_place(cls, at: float, dur: float, out_total: float, fps) -> float:
+        """넣을 자리: 재생 위치 at. 결과 끝에 붙어 들리는 곳이 없으면(영상 끝에서 넣음) 곡 끝을 결과 끝에 맞춘다."""
+        place = cls._bgm_at(at, out_total, fps)
+        if place > out_total - bgm.MIN_LEN:
+            place = cls._bgm_at(max(0.0, out_total - dur), out_total, fps)
+        return place
+
     def add_bgm(self, job_id: str, at: float) -> dict | None:
         """음원을 골라 결과 위치 at(초)에 넣는다. 취소·소리 파일 아님·편집할 수 없는 상태면 None."""
         if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at):
@@ -1011,7 +1019,7 @@ class Api:
         if job is None:
             return None
         ctx = self._bgm_context(job)
-        place = self._bgm_at(at, bgm.out_total(ctx[0]), ctx[2])
+        place = self._bgm_place(at, got["dur"], bgm.out_total(ctx[0]), ctx[2])
 
         def change(job: Job, _d: float) -> bool:
             job.bgms = [*job.bgms, {"id": secrets.token_hex(4), "file": got["file"], "name": Path(picked).stem,
@@ -1192,7 +1200,7 @@ class Api:
         if job is None:
             return None
         ctx = self._bgm_context(job)
-        place = self._bgm_at(at, bgm.out_total(ctx[0]), ctx[2])
+        place = self._bgm_place(at, p["dur"], bgm.out_total(ctx[0]), ctx[2])
 
         def change(job: Job, _d: float) -> bool:
             job.bgms = [*job.bgms, {"id": secrets.token_hex(4), "file": p["file"], "name": p["name"], "dur": p["dur"],
