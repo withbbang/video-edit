@@ -20,6 +20,7 @@ function timeMap(keeps) {
   const total = o;
   return {
     total,
+    pieces: ks,   // [{s, e, o}] 읽기 전용 (음원 곡선이 구간별로 걷는다)
     // 잘린 구간 안의 원본 시간은 그 구간 끝(다음 남길 구간 시작), 마지막 잘린 구간이면 total
     toOut(t) {
       for (const k of ks) {

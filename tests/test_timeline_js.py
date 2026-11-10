@@ -277,3 +277,22 @@ def test_db_at_matches_python():
             [([[4, -3], [1, 2], [2, -8]], t) for t in (0, 1, 1.5, 2, 3, 4, 9)] + [([], 1), ([[1, -5]], 0), ([[1, -5], [1, 3]], 1)]
     got = run("out = " + json.dumps(cases) + ".map(([p, t]) => T.dbAt(p, t));")
     assert got == pytest.approx([bgm.db_at(p, t) for p, t in cases])
+
+
+def test_time_map_pieces():
+    assert run_bgm("out = map.pieces;") == [{"s": 0, "e": 1, "o": 0}, {"s": 3, "e": 10, "o": 1}]
+
+
+def test_bgm_polyline_many_keeps():
+    # 1000 개 남길 구간: [2i, 2i+1], 결과 시간 i 초가 원본 2i. 곡 0~1000초 0dB → -40dB 직선, 1초 = 10px
+    body = ("const keeps = Array.from({length: 1000}, (_, i) => [2 * i, 2 * i + 1]);"
+            "const m = timeMap(keeps); const v = {t0: 500, spc: 1};"
+            "out = T.bgmPolyline({at: 0, in: 0, out: 1000}, [[0, 0], [1000, -40]], m, v, 10, 46, 100);")
+    pts = run_bgm(body)
+    xs = [p[0] for p in pts]
+    assert xs == sorted(xs) and len(pts) < 100                      # 보이는 구간 [500, 510) 만
+    # 원본 501~502 는 잘린 구간: x(501)=10 과 x(502)=20 에서 y 가 같다
+    y = lambda x: [q[1] for q in pts if abs(q[0] - x) < 1e-6]
+    assert y(10)[-1] == pytest.approx(y(20)[0])
+    assert y(30)[-1] == pytest.approx(y(40)[0])
+    assert y(30)[0] > y(20)[-1]                                     # 구간 안(20 → 30)에서는 곡선이 내려감 (y 는 아래로 커짐)

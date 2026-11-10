@@ -191,7 +191,10 @@ const bgmLen = (b) => b.out - b.in;
 // 곡 초 t 의 dB: 점 사이는 직선, 첫 점 앞·마지막 점 뒤는 그 점 값, 점이 없으면 0 (bgm.db_at)
 function dbAt(points, t) {
   if (!points || !points.length) return 0;
-  const pts = points.map(([a, b]) => [+a, +b]).sort((p, q) => p[0] - q[0]);
+  return dbAtSorted(points.map(([a, b]) => [+a, +b]).sort((p, q) => p[0] - q[0]), t);
+}
+function dbAtSorted(pts, t) {
+  if (!pts.length) return 0;
   if (t <= pts[0][0]) return pts[0][1];
   const last = pts[pts.length - 1];
   if (t >= last[0]) return last[1];
@@ -226,30 +229,40 @@ function bgmSpan(b, map) {
   return { o0: map.toOrig(b.at), o1: map.toOrig(Math.min(end, total)), cut: end > total };
 }
 
-// 곡선의 화면 꺾은선 [[x, y], …]: 결과 시간을 남길 구간별로 원본 축에 펼치고, 잘린 구간 위는 앞 구간 끝 값으로 평평하게.
-// map 은 구간 목록을 내놓지 않아, 원본이 결과와 같은 속도로 이어지는 끝을 이분법으로 찾는다.
-function bgmPolyline(b, points, map, v, cw, h) {
-  const len = bgmLen(b), rEnd = Math.min(b.at + len, map.total);
+// 곡선의 화면 꺾은선 [[x, y], …]: 결과 시간을 map.pieces(남길 구간)별로 원본 축에 펼치고, 잘린 구간 위는 앞 구간 끝 값으로 평평하게.
+// 보기 v(원본 초, 줄 너비 w px — 없으면 오른쪽 제한 없음)와 겹치는 구간만 내놓고, 보기 밖 앞 구간은 연결선 시작점 하나만 둔다
+function bgmPolyline(b, points, map, v, cw, h, w = Infinity) {
+  const pieces = map.pieces, rEnd = Math.min(b.at + bgmLen(b), map.total);
+  const pts = (points || []).map(([a, c]) => [+a, +c]).sort((p, q) => p[0] - q[0]);
+  const vEnd = v.t0 + (v.spc * w) / cw;
+  const y = (r) => dbToY(dbAtSorted(pts, b.in + (r - b.at)), h);
   const out = [];
-  const song = (r) => b.in + (r - b.at);
-  const push = (o, r) => out.push([tToX(v, o, cw), dbToY(dbAt(points, song(r)), h)]);
-  let r = b.at;
-  while (r < rEnd - 1e-9) {
-    const o = map.toOrig(r), same = (q) => Math.abs(map.toOrig(q) - o - (q - r)) < 1e-9;
-    let r2 = rEnd, nxt = rEnd;
-    if (!same(rEnd)) {
-      let lo = r, hi = rEnd;
-      for (let i = 0; i < 50; i++) { const m = (lo + hi) / 2; if (same(m)) lo = m; else hi = m; }
-      r2 = lo; nxt = hi;
+  let lo = 0, hi = pieces.length;   // b.at 이 속한 첫 구간
+  while (lo < hi) { const m = (lo + hi) >> 1; if (pieces[m].o + (pieces[m].e - pieces[m].s) > b.at) hi = m; else lo = m + 1; }
+  let j = 0, prevO = null, prevY = 0;
+  for (let i = lo; i < pieces.length; i++) {
+    const k = pieces[i], ra = Math.max(b.at, k.o), rb = Math.min(rEnd, k.o + (k.e - k.s));
+    if (ra >= rb) break;
+    const oa = k.s + (ra - k.o), ob = k.s + (rb - k.o);
+    if (oa > vEnd) {   // 보기 오른쪽 밖: 앞 구간 끝 값으로 이어지는 연결선만 보기 끝 너머까지
+      if (prevO !== null) out.push([tToX(v, oa, cw), prevY]);
+      break;
     }
-    if (out.length && tToX(v, o, cw) > out[out.length - 1][0]) out.push([tToX(v, o, cw), out[out.length - 1][1]]);   // 잘린 구간 위는 평평
-    push(o, r);
-    for (const [ps] of [...(points || [])].sort((p, q) => p[0] - q[0])) {
-      const pr = b.at + (ps - b.in);
-      if (pr > r + 1e-9 && pr < r2 - 1e-9) push(o + (pr - r), pr);
+    if (ob >= v.t0) {
+      if (prevO !== null) {
+        if (!out.length) out.push([tToX(v, prevO, cw), prevY]);
+        if (oa > prevO + 1e-9) out.push([tToX(v, oa, cw), prevY]);
+      }
+      out.push([tToX(v, oa, cw), y(ra)]);
+      while (j < pts.length && b.at + (pts[j][0] - b.in) <= ra + 1e-9) j++;
+      for (; j < pts.length; j++) {
+        const pr = b.at + (pts[j][0] - b.in);
+        if (pr >= rb - 1e-9) break;
+        out.push([tToX(v, k.s + (pr - k.o), cw), dbToY(pts[j][1], h)]);
+      }
+      out.push([tToX(v, ob, cw), y(rb)]);
     }
-    push(o + (r2 - r), r2);
-    r = nxt;
+    prevO = ob; prevY = y(rb);
   }
   return out;
 }
