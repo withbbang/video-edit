@@ -842,8 +842,8 @@ const ovl = (() => {
   // 이미지 줄 높이 손잡이 (타임라인 패널 위 테두리): 위로 끌면 줄이 늘고 영상이 준다. 고른 높이는 기억한다
   const LANE = 20, LANE_STEP = 24, MIN_VID = 120, DEF_H = 3.5 * LANE_STEP - 4;   // MIN_VID = .pv 최소 높이, DEF_H = style.css 기본값
   const grip = h('div', { class: 'tlp-grip', role: 'separator', 'aria-orientation': 'horizontal',
-    'aria-label': '이미지 줄 높이', tabindex: '0', hidden: true });
-  grip.title = '끌어서 이미지 줄 높이 조절 · 두 번 누르면 기본 높이';
+    'aria-label': '이미지·음원 줄 높이', tabindex: '0', hidden: true });
+  grip.title = '끌어서 이미지·음원 줄 높이 조절 · 두 번 누르면 기본 높이';
   let gdrag = null;          // {y0, h0, content, vid0}
   function setLanesH(v, save) {
     rows.style.maxHeight = names.style.maxHeight = `${v}px`;
@@ -1664,16 +1664,19 @@ const bgl = (() => {
   const tabText = h('span', {}, '음원');                     // 음원 탭 이름 (개수는 탭을 다시 그리지 않고 바꾼다)
   const lanes = [];          // 줄마다 {name, lane, cuts, svg}
   const bars = new Map();    // id → {bar, label}
-  const autoBtn = h('button', { type: 'button', class: 'btn', onclick: () => { if (S.bgmSel) send('reset_bgm', S.bgmSel); } }, '음원 자동 조절');
+  const autoBtn = h('button', { type: 'button', class: 'btn', onclick: () => { if (S.bgmSel) edit('reset_bgm', S.bgmSel, null, { touched: false }); } }, '음원 자동 조절');
   // 비활성 버튼은 마우스를 받지 않으므로 말풍선은 감싼 span 에 단다
   const autoWrap = h('span', { class: 'tipw bg-auto', title: BGM_TIP_AUTO, hidden: true }, autoBtn);
   autoWrap.addEventListener('pointerdown', (e) => e.stopPropagation());   // 줄의 구간 고르기·이동으로 넘기지 않는다
   let busy = false, naming = false, presets = null, loading = false, saveErr = null;
   let renaming = null;       // 이름 바꾸는 중 {kind: 'bgm' | 'preset', id, bad, value, err}
-  let itemErr = null;        // 넣은 음원 이름 바꾸기가 거절됨 {id, text}
+  let itemErr = null;        // 넣은 음원 편집·이름 바꾸기가 거절됨 {id, text}
   let field = null;          // 열린 이름 칸 (renameField)
   let drag = null;           // 끌기 {id, kind: 'move'|'start'|'end'|'pt', b, x0, y0, lx, ly, g, m, on, live, i, pts, added}
-  let held = null;           // 손을 뗀 뒤 서버 답을 기다리는 동안 보여 줄 값 {id, live} (막대가 옛 자리로 튀지 않게)
+  // 손을 뗀 뒤 서버 답을 기다리는 동안 보여 줄 값 id → live (막대가 옛 자리로 튀지 않게, 다음 편집도 이 값에서 시작).
+  // 답을 기다리는 중에 들어온 편집은 queue 에 두었다가 앞 요청이 끝나면 보낸다 (같은 음원의 연이은 update_bgm 은 합침)
+  const held = new Map();
+  let queue = [];            // [{job, name, id, patch}]
   let ptSel = null;          // 고른 점 {id, i} (Delete·Backspace 로 지움)
   let lastPress = null;      // 점 두 번 누르기 {id, i, t}
   let nearId = null;         // 마우스가 선 위에 있는 (고른) 음원
@@ -1697,9 +1700,12 @@ const bgl = (() => {
   const ptsOf = (b) => (b.points || []).map(([t, db]) => [+t, +db]).sort((p, q) => p[0] - q[0]);
   // 끄는 중·답을 기다리는 중이면 그 값을 덧씌운 항목
   function cur(b) {
-    const live = drag && drag.id === b.id && drag.live ? drag.live : held && held.id === b.id ? held.live : null;
-    return live ? { ...b, ...live } : b;
+    const hv = held.get(b.id);
+    const base = hv ? { ...b, ...hv } : b;
+    return drag && drag.id === b.id && drag.live ? { ...base, ...drag.live } : base;
   }
+  // 지금 보이는(곧 저장될) 값 — 새 끌기·점 편집은 이 값에서 시작한다
+  const curOf = (id) => { const b = list().find((x) => x.id === id); return b ? cur(b) : null; };
   // 재생 위치 (결과 초)
   function outNow() {
     const m = map();
@@ -1708,7 +1714,7 @@ const bgl = (() => {
 
   async function send(name, ...args) {
     const j = selected();
-    if (!j || busy) { held = null; zoomTl.draw(); return null; }
+    if (!j || busy) return null;
     busy = true;
     renderTools();
     try {
@@ -1721,12 +1727,33 @@ const bgl = (() => {
       return res;
     } finally {
       busy = false;
-      held = null;
-      const b = ptSel && list().find((x) => x.id === ptSel.id);
+      const b = ptSel && curOf(ptSel.id);
       if (ptSel && (!b || ptSel.i >= ptsOf(b).length)) ptSel = null;
       syncMixer();
       refresh();
+      pump();   // 기다리던 편집 (이름 바꾸기 등 다른 요청 뒤에도)
     }
+  }
+  // 음원 하나의 편집 (update_bgm·reset_bgm·delete_bgm): live 는 답을 기다리는 동안 덧씌워 보여 줄 값
+  const EDIT_ERR = { update_bgm: '바꾸지 못했습니다', reset_bgm: '음원 자동 조절을 하지 못했습니다', delete_bgm: '제거하지 못했습니다' };
+  function edit(name, id, patch, live) {
+    if (live) held.set(id, { ...(held.get(id) || {}), ...live });
+    const last = queue[queue.length - 1];
+    if (last && name === 'update_bgm' && last.name === name && last.id === id) last.patch = { ...last.patch, ...patch };
+    else queue.push({ job: S.sel, name, id, patch });
+    syncMixer();   // 다시 그리기·답을 기다리지 않고 바로 들리게
+    zoomTl.draw();
+    pump();
+  }
+  async function pump() {
+    if (busy || !queue.length) return;
+    const e = queue.shift();
+    if (e.job !== S.sel) { queue = []; held.clear(); return; }   // 다른 작업으로 넘어감
+    const res = await send(e.name, e.id, ...(e.patch ? [e.patch] : []));
+    if (res) { if (itemErr && itemErr.id === e.id) itemErr = null; } else if (S.sel === e.job) itemErr = { id: e.id, text: EDIT_ERR[e.name] };
+    if (!queue.length && !busy) held.clear();   // 모두 끝남: 서버 값으로 (거절됐으면 되돌림)
+    syncMixer();
+    refresh();
   }
   function refresh() {
     renderTools();
@@ -1898,7 +1925,7 @@ const bgl = (() => {
       const rect = B.bar.getBoundingClientRect();
       if (e.clientX - rect.left <= BAR_END || rect.right - e.clientX <= BAR_END) cursor = 'ew-resize';
       else if (id === S.bgmSel && editable()) {
-        const g = zoomTl.geom(), m = map(), b = list().find((x) => x.id === id), lr = B.bar.parentNode.getBoundingClientRect();
+        const g = zoomTl.geom(), m = map(), b = curOf(id), lr = B.bar.parentNode.getBoundingClientRect();
         near = !!(g && m && b && S.view && nearLine(b, e.clientX - lr.left, e.clientY - lr.top - PAD, g, m));
         if (near) cursor = 'copy';
       }
@@ -1912,7 +1939,7 @@ const bgl = (() => {
     if (e.button !== 0 || !g || !S.view || !m) return;
     e.preventDefault();
     e.stopPropagation();
-    const b = list().find((x) => x.id === id);
+    const b = curOf(id);
     if (!b) return;
     const wasSel = S.bgmSel === id;
     select(id);
@@ -1950,7 +1977,7 @@ const bgl = (() => {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    const g = zoomTl.geom(), m = map(), b = list().find((x) => x.id === id), B = bars.get(id);
+    const g = zoomTl.geom(), m = map(), b = curOf(id), B = bars.get(id);
     if (!g || !S.view || !m || !b || !B || !editable()) return;
     const lr = B.bar.parentNode.getBoundingClientRect();
     ptSel = { id, i };
@@ -1972,7 +1999,7 @@ const bgl = (() => {
   function snapTargets(id) {
     const m = map(), out = new Set();
     for (const p of clp.pieces()) { out.add(m.toOut(p.start)); out.add(m.toOut(p.end)); }
-    for (const b of list()) if (b.id !== id) { out.add(b.at); out.add(b.at + lenOf(b)); }
+    for (const b of list().map(cur)) if (b.id !== id) { out.add(b.at); out.add(b.at + lenOf(b)); }
     return [...out];
   }
   function onMove(e) {
@@ -2031,15 +2058,13 @@ const bgl = (() => {
     commitLive(d.id, L, d.kind === 'move' ? { at: L.at } : { at: L.at, in: L.in, out: L.out });
   }
   function commitLive(id, live, patch) {
-    held = { id, live };
-    syncMixer();   // 다시 그리기를 기다리지 않고 바로 들리게
-    send('update_bgm', id, patch);
+    edit('update_bgm', id, patch, live);
   }
   function commitPoints(id, points) {
     commitLive(id, { points, touched: true }, { points });
   }
   function deletePoint(id, i) {
-    const b = list().find((x) => x.id === id);
+    const b = curOf(id);
     if (!b || !editable()) return;
     const pts = ptsOf(b);
     if (pts.length <= 1 || i >= pts.length) return;   // 점이 하나는 있어야 한다 (모두 없애려면 음원 자동 조절)
@@ -2064,7 +2089,7 @@ const bgl = (() => {
     if (fresh) select(fresh.id); else renderTools();
   }
   async function remove() {
-    if (S.bgmSel) await send('delete_bgm', S.bgmSel);
+    if (S.bgmSel) edit('delete_bgm', S.bgmSel, null, null);
   }
   async function savePreset(nm) {
     const j = selected();
@@ -2225,7 +2250,7 @@ const bgl = (() => {
       if (mixer) mixer.dispose();
       mixer = null; mixKey = null; mixSig = null; mapKeeps = null; mapVal = null;
       S.bgmSel = null; naming = false; renaming = null; presets = null; saveErr = null; itemErr = null; field = null;
-      held = null; ptSel = null; lastPress = null; nearId = null; shownSel = null;
+      held.clear(); queue = []; ptSel = null; lastPress = null; nearId = null; shownSel = null;
     } };
 })();
 
@@ -3352,6 +3377,7 @@ const player = {
     this.close();
     this.mode = null; this.key = null; this.wait = keep;
     if (S.result && S.resultFor === S.sel) this.attach(S.result);
+    bgl.syncMixer();   // 이어 붙인 재생기를 떠났다: 섞개를 놓는다 (예전 방식 재생에는 섞지 않는다)
   },
   close() {
     cancelAnimationFrame(this.raf);
