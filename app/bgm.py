@@ -20,6 +20,17 @@ SPEECH_JOIN = 0.5      # 이보다 짧은 말 사이 틈은 한 덩어리로 봄
 DB_MIN = -40.0         # 음량 점 하한 (pipeline.BGM_FLOOR_DB 와 같음 — 이 아래는 무음)
 DB_MAX = 6.0
 MIN_LEN = 0.1          # BGM 구간 최소 길이(초)
+VOL_DEFAULT = 100      # 음원 전체 음량(%) — 화면 슬라이더. 100 = 불러올 때 맞춘 음량 그대로
+VOL_MAX = 200
+MUTE_GAIN = -120.0     # 음량 0% 일 때 넘기는 gain(dB) — 사실상 무음
+
+
+def eff_gain(b) -> float:
+    """렌더·미리보기에 쓰는 gain(dB) = 불러올 때 맞춘 gain + 전체 음량(%)."""
+    vol = b.get("vol", VOL_DEFAULT)
+    if vol <= 0:
+        return MUTE_GAIN
+    return float(b["gain"]) + 20 * math.log10(vol / 100)
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus"}   # 불러올 수 있는 음원
 TARGET_LUFS = -24.0    # 불러올 때 맞추는 기본 음량(적분 라우드니스)
 GAIN_MIN, GAIN_MAX = -30.0, 12.0

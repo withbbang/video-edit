@@ -1646,10 +1646,11 @@ const clp = (() => {
 // 항목 {id, name, url, at, in, out, dur, gain, points, touched}: at 은 결과 초, in/out·점은 곡 초. points 는 서버가 풀어 준 값
 // (손대지 않았으면 말소리에 맞춘 자동 곡선). 음원 탭 (잘린 곳·자막·이미지·영상 옆): 사용 중·보관함, 불러오기, 고른 음원 이름 변경·보관·제거,
 // 보관함 삽입. 확대 타임라인: 이미지 줄 아래(같은 패널·높이 손잡이·스크롤)에 겹치지 않게 나눈 음원 줄. 막대는 원본 축에서
-// toOrig(at) ~ toOrig(끝)이고 음량 선은 잘린 곳 위에서 평평하게 지난다. 고른 막대만 점·`음원 자동 조절`.
+// toOrig(at) ~ toOrig(끝)이고 음량 선은 잘린 곳 위에서 평평하게 지난다. 고른 막대만 점·`자동 음량 조절`.
 // 끌기(4px 넘게 = 옮기기, 양 끝 6px = 자르기)·점 편집은 결과 시간으로 계산하고 손을 뗄 때 한 번만 서버에 알린다.
 // 미리보기: 이어 붙인 재생기(결과 시간)에 BgmMixer 로 섞는다.
 const BGM_TIP_AUTO = '말소리가 나오는 구간은 BGM을 낮추고, 말이 없는 구간은 다시 올리는 음량 선을 새로 깔아요. 손으로 고친 점은 지워져요.';
+const BGM_TIP_FLAT = '음량 선을 평평하게 펴서 음원을 원래 음량 그대로 내보내요. 손으로 고친 점은 지워져요.';
 const bgl = (() => {
   const LANE_H = 36, PAD = 2, CH = LANE_H - 2 * PAD;   // 줄 높이(style.css .bg-lane), 막대 위아래 여백, 곡선 높이
   const BAR_END = 6;   // 막대 양 끝 이만큼(px)은 자르기 손잡이
@@ -1667,10 +1668,19 @@ const bgl = (() => {
   const tabText = h('span', {}, '음원');                     // 음원 탭 이름 (개수는 탭을 다시 그리지 않고 바꾼다)
   const lanes = [];          // 줄마다 {name, lane, cuts, svg}
   const bars = new Map();    // id → {bar, label}
-  const autoBtn = h('button', { type: 'button', class: 'btn', onclick: () => { if (S.bgmSel) edit('reset_bgm', S.bgmSel, null, { touched: false }); } }, '음원 자동 조절');
+  const autoBtn = h('button', { type: 'button', class: 'btn', onclick: () => { if (S.bgmSel) edit('reset_bgm', S.bgmSel, null, { touched: false }); } }, '자동 음량 조절');
+  // 음량 원복: 곡 전체를 0dB 평평한 선으로 (원래 음량 그대로)
+  const flatBtn = h('button', { type: 'button', class: 'btn', onclick: () => {
+    const b = S.bgmSel && curOf(S.bgmSel);
+    if (!b) return;
+    const pts = [[0, 0], [b.dur, 0]];
+    edit('update_bgm', b.id, { points: pts }, { points: pts, touched: true });
+  } }, '음량 원복');
   // 비활성 버튼은 마우스를 받지 않으므로 말풍선은 감싼 span 에 단다
-  const autoWrap = h('span', { class: 'tipw bg-auto', title: BGM_TIP_AUTO, hidden: true }, autoBtn);
+  const autoWrap = h('span', { class: 'bg-auto', hidden: true },
+    h('span', { class: 'tipw', title: BGM_TIP_AUTO }, autoBtn), h('span', { class: 'tipw', title: BGM_TIP_FLAT }, flatBtn));
   autoWrap.addEventListener('pointerdown', (e) => e.stopPropagation());   // 줄의 구간 고르기·이동으로 넘기지 않는다
+  const isFlat = (b) => b.touched && (b.points || []).every(([, db]) => Math.abs(db) < 1e-9);
   let busy = false, naming = false, presets = null, loading = false, saveErr = null;
   let renaming = null;       // 이름 바꾸는 중 {kind: 'bgm' | 'preset', id, bad, value, err}
   let itemErr = null;        // 넣은 음원 편집·이름 바꾸기가 거절됨 {id, text}
@@ -1738,11 +1748,11 @@ const bgl = (() => {
     }
   }
   // 음원 하나의 편집 (update_bgm·reset_bgm·delete_bgm): live 는 답을 기다리는 동안 덧씌워 보여 줄 값
-  const EDIT_ERR = { update_bgm: '바꾸지 못했습니다', reset_bgm: '음원 자동 조절을 하지 못했습니다', delete_bgm: '제거하지 못했습니다' };
+  const EDIT_ERR = { update_bgm: '바꾸지 못했습니다', reset_bgm: '자동 음량 조절을 하지 못했습니다', delete_bgm: '제거하지 못했습니다' };
   function edit(name, id, patch, live) {
     if (live || name === 'reset_bgm') {
       const hv = { ...(held.get(id) || {}), ...live };
-      // 음원 자동 조절: 답(서버가 계산할 자동 곡선)이 올 때까지 손댄 점을 보여 주지도, 다시 보내지도 않는다 (점 편집은 그동안 막음)
+      // 자동 음량 조절: 답(서버가 계산할 자동 곡선)이 올 때까지 손댄 점을 보여 주지도, 다시 보내지도 않는다 (점 편집은 그동안 막음)
       if (name === 'reset_bgm') { delete hv.points; hv.resetting = true; hv.touched = false; }
       held.set(id, hv);
     }
@@ -1901,10 +1911,10 @@ const bgl = (() => {
       label.textContent = b.name;
       kids[k].push(clip, label);
       if (!sel) continue;
-      // 고른 막대: 0dB 기준선, 점, 음원 자동 조절
+      // 고른 막대: 0dB 기준선, 점, 자동 음량 조절
       const y0 = TL.dbToY(0, CH).toFixed(1);
       kids[k].push(sv('line', { class: 'bg-zero', x1: a, x2: z, y1: y0, y2: y0 }));
-      if (editable() && !b.resetting) {   // 음원 자동 조절 답을 기다리는 동안은 점을 숨긴다
+      if (editable() && !b.resetting) {   // 자동 음량 조절 답을 기다리는 동안은 점을 숨긴다
         const end = Math.min(b.at + lenOf(b), m.total);
         ptsOf(b).forEach(([t, db], i) => {
           const r = b.at + (t - b.in);
@@ -1921,9 +1931,10 @@ const bgl = (() => {
       }
       if (live !== b.id) {
         if (autoWrap.parentNode !== L.lane) L.lane.append(autoWrap);
-        autoWrap.style.left = `${Math.max(a + 60, z - 4)}px`;   // 보이는 막대 오른쪽 끝 (이름 칸은 비켜서)
+        autoWrap.style.left = `${Math.min(L.lane.clientWidth - 4, Math.max(a + 150, z - 4))}px`;   // 보이는 막대 오른쪽 끝 (이름 칸은 비켜서, 줄 밖으로는 안 나가게)
         autoWrap.hidden = false;
         autoBtn.disabled = !editable() || busy || !b.touched;   // 손대지 않았으면 이미 자동 곡선
+        flatBtn.disabled = !editable() || busy || !!b.resetting || isFlat(b);   // 이미 평평하면 끔
       }
     }
     Ls.forEach((L, k) => {
@@ -2101,7 +2112,7 @@ const bgl = (() => {
     const b = curOf(id);
     if (!b || !editable() || b.resetting) return;
     const pts = ptsOf(b);
-    if (pts.length <= 1 || i >= pts.length) return;   // 점이 하나는 있어야 한다 (모두 없애려면 음원 자동 조절)
+    if (pts.length <= 1 || i >= pts.length) return;   // 점이 하나는 있어야 한다 (모두 없애려면 자동 음량 조절)
     pts.splice(i, 1);
     ptSel = null;
     commitPoints(id, pts);
@@ -2209,9 +2220,28 @@ const bgl = (() => {
           onclick: () => { renaming = null; naming = true; saveErr = null; renderTools(); } }, '보관'),
         h('button', { type: 'button', class: 'btn', disabled: !can || busy, onclick: remove }, '제거')];
     }
-    const out = [row, renameErr('bgm', b.id), h('div', { class: 'ov-acts' }, acts)];
+    const out = [row, renameErr('bgm', b.id), volRow(b, can), h('div', { class: 'ov-acts' }, acts)];
     if (naming && saveErr) out.push(h('div', { class: 'ov-err err' }, saveErr));
     return out;
+  }
+  // 음원 전체 음량 (0~200%, 100 = 불러올 때 맞춘 음량). 끄는 동안은 미리보기에만, 놓으면 저장
+  const VOL_MAX = 200;
+  const volGain = (b, vol) => (vol <= 0 ? -120 : b.base_gain + 20 * Math.log10(vol / 100));
+  function volRow(b0, can) {
+    const b = cur(b0), vol = Math.round(b.vol != null ? b.vol : 100);
+    const num = h('span', { class: 'bg-vol-num' }, `${vol}%`);
+    const live = (v) => ({ vol: v, gain: volGain(b0, v) });
+    const range = h('input', { type: 'range', min: '0', max: String(VOL_MAX), step: '1', value: String(vol), 'aria-label': '음원 음량',
+      disabled: !can, title: '음원 전체 음량 (100% = 처음 불러온 음량)' });
+    range.addEventListener('input', () => {
+      const v = +range.value;
+      num.textContent = `${v}%`;
+      held.set(b0.id, { ...(held.get(b0.id) || {}), ...live(v) });   // 놓기 전에도 바로 들리게
+      syncMixer();
+    });
+    range.addEventListener('change', () => { const v = +range.value; edit('update_bgm', b0.id, { vol: v }, live(v)); });
+    range.addEventListener('dblclick', () => { if (can) { range.value = '100'; num.textContent = '100%'; edit('update_bgm', b0.id, { vol: 100 }, live(100)); } });
+    return h('div', { class: 'bg-vol' }, h('span', { class: 'bg-vol-lbl' }, '음량'), range, num);
   }
   function presetRow(p, can) {
     const row = h('div', { class: 'opt ov-item' },

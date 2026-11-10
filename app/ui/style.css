@@ -515,6 +515,11 @@ body.ns-drag, body.ns-drag * { cursor: ns-resize !important; }   /* 끄는 동�
 .bg-auto { position: absolute; bottom: 3px; z-index: 3; transform: translateX(-100%); }
 .bg-auto[hidden] { display: none; }
 .bg-auto .btn { min-height: 0; padding: 0 6px; font-size: 10px; line-height: 15px; background: var(--bg); }
+.bg-auto { display: inline-flex; gap: 4px; }
+.bg-vol { display: flex; align-items: center; gap: 8px; padding: 2px 8px 6px 8px; background: #4a7dff12; }
+.bg-vol input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent, #4a7dff); }
+.bg-vol-lbl { font-size: 12px; color: var(--muted, #6b7280); flex-shrink: 0; }
+.bg-vol-num { font-size: 12px; min-width: 38px; text-align: right; font-variant-numeric: tabular-nums; flex-shrink: 0; }
 /* 음원 탭: 이미지 탭 줄 모양 그대로, 그림 자리에 작은 음량 선 */
 .bg-glyph { display: block; width: 40px; height: 24px; flex-shrink: 0; background: var(--tl-lane); border-radius: 3px; }
 .bg-glyph polyline { fill: none; stroke: var(--muted); stroke-width: 1.25; stroke-linejoin: round; }

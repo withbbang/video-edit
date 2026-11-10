@@ -173,7 +173,8 @@ tests/                pytest (requirements-dev.txt)
   (파일 안 초)도 같이 저장되고, 넣을 때 캐시를 작업 복사본 서명으로 옮겨(`rebase_file_cache`) 바로 들어간다.
   옮기기는 `Api.move_clip`(덩어리 = 첫~마지막 조각, 그 안에 끼운 영상 포함, `sequence.move_block`/`shift_for_move` 가 편집 시간을 옮김): 타임라인 머리 줄의 `옮기기`·`제거`(고른 끼운 영상이 있을 때만)나 띠를 4px 넘게 끌어 옮긴다. 넣기·옮기기의 자리 맞춤은 `sequence.snap_at`(잘린 구간 안에 조각 경계가 있으면 가장 가까운 경계, 아니면 구간 시작) — 화면은 `TL.snapAt`/`dropTarget`. 실행 취소 대상.
   음원(BGM) 넣기: `Job.bgms`(`[{id, file, name, dur, gain, at, in, out, points}]`, `points=None` 이면 자동 곡선 — 결과 시간이 바뀌는 편집 뒤
-  `app/bgm.auto_points` 로 다시 계산, 점을 손대면(`update_bgm` 의 `points`) 그대로 둔다. 옮기기·자르기·이름은 손댐 아님, `reset_bgm` = `음원 자동 조절`).
+  `app/bgm.auto_points` 로 다시 계산, 점을 손대면(`update_bgm` 의 `points`) 그대로 둔다. 옮기기·자르기·이름은 손댐 아님, `reset_bgm` = `자동 음량 조절`, `음량 원복` = 0dB 평평한 점 두 개).
+  전체 음량 `vol`(0~200%, 기본 100) 은 음원 탭 고른 줄의 슬라이더 — 렌더·미리보기 gain 은 `bgm.eff_gain`(불러올 때 gain + 20·log10(vol/100), 0% 는 무음).
   고른 파일은 작업 폴더 `bgm/<sha16>.m4a`(AAC 48kHz 로 다시 인코딩), 보관함은 `<데이터>/bgm_presets/`(presets.json + `<sha16>.m4a`, 파일·이름·길이·gain 만).
   저장 때 `out/<이름>.bgm.json` → `--bgm`. 화면은 `음원` 탭(이미지·영상 탭과 같은 구성, 소리만 있는 파일에도)과 이미지 줄 아래 같은 패널의 음원 줄(`bgl` in app.js):
   막대 = `TL.bgmSpan`(원본 축), 음량 선 = `TL.bgmPolyline`(svg, 잘린 곳 위 평평), 끌기 `TL.bgmDrag`/`bgmSnap`, 점은 결과 시간 `TL.xToOutT` 로 계산해

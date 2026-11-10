@@ -208,6 +208,23 @@ def test_update_bgm_tied_points_stored_strictly_increasing(tmp_path):
     assert job.bgms[0]["points"][-1] == [dur, -6.0]
 
 
+def test_update_bgm_volume(tmp_path):
+    a, store, job = _with_bgm(tmp_path)
+    bid, g = B["id"], B["gain"]
+    v = a.update_bgm(job.id, bid, {"points": [[0, 0]]})["bgms"][0]
+    assert (v["vol"], v["gain"], v["base_gain"]) == (100, g, g)        # 처음엔 100% = 불러올 때 맞춘 음량
+    for bad in ({"vol": -1}, {"vol": 201}, {"vol": float("inf")}, {"vol": True}):
+        assert a.update_bgm(job.id, bid, bad) is None, bad
+    v = a.update_bgm(job.id, bid, {"vol": 50})["bgms"][0]
+    assert v["vol"] == 50 and v["gain"] == pytest.approx(g - 6.0206, abs=1e-3) and v["base_gain"] == g
+    assert v["touched"] is True and job.bgms[0]["gain"] == g          # 불러올 때 gain 은 그대로, 점도 그대로
+    data = json.loads(save_bgms(job).read_text(encoding="utf-8"))
+    assert data[0]["gain"] == pytest.approx(g - 6.0206, abs=1e-3)     # 렌더도 같은 값
+    assert a.update_bgm(job.id, bid, {"vol": 0})["bgms"][0]["gain"] == bgm.MUTE_GAIN
+    a.undo(job.id)
+    assert job.bgms[0]["vol"] == 50
+
+
 def test_strict_points():
     assert bgm.strict_points([[1, 0], [1, -5], [1, -10]], 0, 10) == [[1.0, 0.0], [pytest.approx(1.001), -5.0], [pytest.approx(1.002), -10.0]]
     assert bgm.strict_points([[-3, 1], [-1, 2]], 0, 10) == [[0.0, 1.0], [pytest.approx(0.001), 2.0]]

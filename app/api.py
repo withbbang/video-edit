@@ -245,7 +245,7 @@ def save_bgms(job: Job, lock=None, context=None) -> Path | None:
         return None
     _, speech, _ = context or _bgm_inputs(src, restored, ops, summary)
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = [{"path": str(jd / "bgm" / b["file"]), "at": b["at"], "in": b["in"], "out": b["out"], "gain": b["gain"],
+    data = [{"path": str(jd / "bgm" / b["file"]), "at": b["at"], "in": b["in"], "out": b["out"], "gain": bgm.eff_gain(b),
              "points": bgm.resolve_points(b, speech)} for b in items]
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
@@ -1033,9 +1033,11 @@ class Api:
         return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
     def update_bgm(self, job_id: str, bid: str, patch: dict) -> dict | None:
-        """at·in·out·points 만 바꾼다. at >= 0, 0 <= in < out <= dur, out - in >= MIN_LEN.
+        """at·in·out·points·vol(전체 음량 %, 0~200) 만 바꾼다. at >= 0, 0 <= in < out <= dur, out - in >= MIN_LEN.
         points = [[곡 초, dB], …] — 곡 초는 [0, dur], dB 는 [DB_MIN, DB_MAX] 로 고정하고 시간순으로, 같은 시간은 1ms 씩 밀어 저장 (최대 500개). 주면 손댄 것."""
-        if not isinstance(patch, dict) or not patch or set(patch) - {"at", "in", "out", "points"}:
+        if not isinstance(patch, dict) or not patch or set(patch) - {"at", "in", "out", "points", "vol"}:
+            return None
+        if "vol" in patch and not (self._num(patch["vol"]) and 0 <= patch["vol"] <= bgm.VOL_MAX):
             return None
         if not all(self._num(v) for k, v in patch.items() if k != "points"):
             return None
@@ -1915,7 +1917,9 @@ class Api:
         return _bgm_inputs(src, restored, ops, summary)
 
     def _bgm_views(self, job: Job, speech: list) -> list[dict]:
-        return [{**b, "url": f"{self._preview_base}/{job.id}/bgm/{b['file']}",
+        # gain = 전체 음량까지 더한 값(미리보기 섞개가 그대로 씀), base_gain = 불러올 때 맞춘 값, vol = 전체 음량(%)
+        return [{**b, "url": f"{self._preview_base}/{job.id}/bgm/{b['file']}", "vol": b.get("vol", bgm.VOL_DEFAULT),
+                 "base_gain": b["gain"], "gain": bgm.eff_gain(b),
                  "points": bgm.resolve_points(b, speech), "touched": b.get("points") is not None} for b in job.bgms]
 
     def _preview(self, job: Job, status: str, cuts: dict | None, settings: dict) -> dict:
