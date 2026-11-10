@@ -2052,7 +2052,7 @@ const bgl = (() => {
     } else {
       const dt = TL.xToOutT(x, d.m, S.view, cw) - TL.xToOutT(d.x0 - d.lx, d.m, S.view, cw);
       let live = TL.bgmDrag(d.kind, d.b, dt, total());
-      if (d.kind === 'move') live = { ...live, at: Math.min(TL.bgmSnap(live.at, lenOf(d.b), total(), snapTargets(d.id), cw / S.view.spc), Math.max(0, total() - 0.1)) };
+      if (d.kind === 'move') live = { ...live, at: Math.min(TL.bgmSnap(live.at, lenOf(d.b), total(), snapTargets(d.id), cw / S.view.spc), Math.max(0, total() - lenOf(d.b))) };
       d.live = live;
     }
     zoomTl.draw();
