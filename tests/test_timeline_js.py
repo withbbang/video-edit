@@ -205,3 +205,75 @@ def test_snap_and_drop_target():
     # 겹치거나 맞닿은 잘린 구간은 합쳐서 본다 (서버 snap_at 은 합친 컷을 받음)
     assert run("out = T.snapAt(5.75, [[5.0, 5.8], [5.7, 6.4]], [6.0], 30, 100);") == pytest.approx(6.0)
     assert run("out = T.snapAt(5.5, [[5.0, 6.0], [6.0, 6.4]], [6.0], 30, 100);") == pytest.approx(6.0)
+
+
+# ---- 음원(BGM) 줄 ----
+PLAYER = Path(__file__).resolve().parent.parent / "app" / "ui" / "player.js"
+
+
+def run_bgm(body: str):
+    """timeline.js(T)와 player.js 의 timeMap(map) 을 불러 body 를 돌린다."""
+    return run(f"const {{ timeMap }} = require({json.dumps(str(PLAYER))});\n"
+               "const map = timeMap([[0, 1], [3, 10]]);\n" + body)
+
+
+def test_bgm_lanes():
+    out = run('out = T.bgmLanes([{id:"c",at:6,in:0,out:3},{id:"b",at:3,in:0,out:5},{id:"a",at:0,in:0,out:5}]);')
+    assert out == {"a": 0, "b": 1, "c": 0}
+    out = run('out = T.bgmLanes([{id:"y",at:0,in:0,out:2},{id:"x",at:0,in:0,out:2}]);')   # 같은 at 은 id 순
+    assert out == {"x": 0, "y": 1}
+
+
+def test_bgm_span():
+    # keeps [[0,1],[3,10]] → 결과 길이 8
+    assert run_bgm("out = T.bgmSpan({at:0.5,in:0,out:2}, map);") == {"o0": 0.5, "o1": 4.5, "cut": False}
+    r = run_bgm("out = T.bgmSpan({at:7.5,in:0,out:3}, map);")
+    assert r["cut"] is True and r["o1"] == 10 and r["o0"] == pytest.approx(9.5)
+    assert run_bgm("out = T.bgmSpan({at:9,in:0,out:3}, map);") is None
+
+
+def test_bgm_polyline_flat_over_cut():
+    # w 1000, cw 100, 보기 [0,10) → 1초 = 100px. 곡 0~2초: 0dB → -20dB, 결과 0~2 = 원본 0~1, 3~4
+    pts = run_bgm("const v = {t0: 0, spc: 1};"
+                  "out = T.bgmPolyline({at:0,in:0,out:2}, [[0,0],[2,-20]], map, v, 100, 46);")
+    first = [p for p in pts if p[0] <= 100 + 1e-6]
+    # 원본 1초(앞 조각 끝)와 3초(다음 조각 시작) 사이는 평평: x=100 점과 x=300 점의 y 가 같다
+    y_at_100 = [y for x, y in pts if abs(x - 100) < 1e-6]
+    y_at_300_first = [y for x, y in pts if abs(x - 300) < 1e-6][0]
+    assert y_at_100[-1] == pytest.approx(y_at_300_first)
+    assert first[0][0] == 0 and first[0][1] == pytest.approx(run("out = T.dbToY(0, 46);"))
+    assert pts[-1][0] == pytest.approx(400) and pts[-1][1] == pytest.approx(run("out = T.dbToY(-20, 46);"))
+
+
+def test_bgm_snap():
+    assert run("out = T.bgmSnap(15.9, 4, 20, [], 10);") == pytest.approx(16)     # 끝 맞춤
+    assert run("out = T.bgmSnap(0.5, 4, 20, [], 10);") == 0
+    assert run("out = T.bgmSnap(2.95, 4, 20, [7], 10);") == pytest.approx(3)     # 끝이 7 에 붙음
+    assert run("out = T.bgmSnap(9, 4, 20, [7], 10);") == 9                       # 멀면 그대로
+    assert run("out = T.bgmSnap(0.5, 4, 20, [], 10, 2);") == 0.5                 # thr 보다 멀면 그대로
+
+
+def test_bgm_drag():
+    b = "{at:5,in:2,out:6,dur:10}"
+    assert run(f"out = T.bgmDrag('end', {b}, 9, 30);")["out"] == 10
+    assert run(f"out = T.bgmDrag('end', {b}, -9, 30);")["out"] == pytest.approx(2.1)
+    r = run(f"out = T.bgmDrag('start', {b}, -5, 30);")
+    assert (r["in"], r["at"], r["out"]) == (0, 3, 6)
+    assert run(f"out = T.bgmDrag('start', {b}, 9, 30);")["in"] == pytest.approx(5.9)
+    r = run("out = T.bgmDrag('start', {at:1,in:2,out:6,dur:10}, -5, 30);")   # at >= 0 에서 막힘
+    assert (r["in"], r["at"]) == (1, 0)
+    assert run(f"out = T.bgmDrag('move', {b}, -9, 30);")["at"] == 0
+
+
+def test_bgm_axis_and_x():
+    assert run("out = [T.dbToY(6, 92), T.dbToY(-40, 92), T.yToDb(-5, 92), T.yToDb(999, 92), T.yToDb(46, 92)];") == [0, 92, 6, -40, -17]
+    # 보기 [0,10): x 300 → 원본 3초 → 결과 1초, 잘린 구간 안(x 200 = 원본 2초)은 그 구간 끝(결과 1초)
+    assert run_bgm("const v = {t0: 0, spc: 1}; out = [T.xToOutT(300, map, v, 100), T.xToOutT(200, map, v, 100)];") == [1, 1]
+
+
+def test_db_at_matches_python():
+    from app import bgm
+    cases = [([[0, 0], [2, -20]], t) for t in (-1, 0, 1, 2, 3)] + \
+            [([[4, -3], [1, 2], [2, -8]], t) for t in (0, 1, 1.5, 2, 3, 4, 9)] + [([], 1), ([[1, -5]], 0), ([[1, -5], [1, 3]], 1)]
+    got = run("out = " + json.dumps(cases) + ".map(([p, t]) => T.dbAt(p, t));")
+    assert got == pytest.approx([bgm.db_at(p, t) for p, t in cases])

@@ -183,7 +183,102 @@ function tlDataKey(id, r) {
   return JSON.stringify([id, (r && r.duration) || 0, (r && r.layout) || []]);
 }
 
+// ---- 음원(BGM) 줄 (app/bgm.py 와 같은 규칙) ----
+// map = player.js 의 timeMap(keeps). 음원 b = {at(결과 초), in, out(곡 초), dur}, points = [[곡 초, dB], …]
+const BGM_DB_MAX = 6, BGM_DB_MIN = -40, BGM_MIN_LEN = 0.1;
+const bgmLen = (b) => b.out - b.in;
+
+// 곡 초 t 의 dB: 점 사이는 직선, 첫 점 앞·마지막 점 뒤는 그 점 값, 점이 없으면 0 (bgm.db_at)
+function dbAt(points, t) {
+  if (!points || !points.length) return 0;
+  const pts = points.map(([a, b]) => [+a, +b]).sort((p, q) => p[0] - q[0]);
+  if (t <= pts[0][0]) return pts[0][1];
+  const last = pts[pts.length - 1];
+  if (t >= last[0]) return last[1];
+  for (let i = 1; i < pts.length; i++) {
+    const [x0, y0] = pts[i - 1], [x1, y1] = pts[i];
+    if (t <= x1) return x1 === x0 ? y1 : y0 + ((y1 - y0) * (t - x0)) / (x1 - x0);
+  }
+  return last[1];
+}
+
+// 줄 높이 h: 위 +6dB, 아래 -40dB 의 dB 직선 축
+const dbToY = (db, h) => ((BGM_DB_MAX - db) / (BGM_DB_MAX - BGM_DB_MIN)) * h;
+const yToDb = (y, h) => clamp(BGM_DB_MAX - (y / h) * (BGM_DB_MAX - BGM_DB_MIN), BGM_DB_MIN, BGM_DB_MAX);
+
+// 겹치지 않는 가장 위 줄 번호 {id: lane}: at 순(같으면 id 순), 겹침은 결과 구간 [at, at+길이)
+function bgmLanes(bgms) {
+  const order = [...bgms].sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const ends = [], out = {};
+  for (const b of order) {
+    let k = ends.findIndex((e) => e <= b.at + 1e-9);
+    if (k < 0) { k = ends.length; ends.push(0); }
+    ends[k] = b.at + bgmLen(b);
+    out[b.id] = k;
+  }
+  return out;
+}
+
+// 원본 축 구간 {o0, o1, cut}: 결과 끝을 넘으면 cut(넘침 표시). 시작이 결과 끝 이후면 null
+function bgmSpan(b, map) {
+  const total = map.total, end = b.at + bgmLen(b);
+  if (b.at >= total) return null;
+  return { o0: map.toOrig(b.at), o1: map.toOrig(Math.min(end, total)), cut: end > total };
+}
+
+// 곡선의 화면 꺾은선 [[x, y], …]: 결과 시간을 남길 구간별로 원본 축에 펼치고, 잘린 구간 위는 앞 구간 끝 값으로 평평하게.
+// map 은 구간 목록을 내놓지 않아, 원본이 결과와 같은 속도로 이어지는 끝을 이분법으로 찾는다.
+function bgmPolyline(b, points, map, v, cw, h) {
+  const len = bgmLen(b), rEnd = Math.min(b.at + len, map.total);
+  const out = [];
+  const song = (r) => b.in + (r - b.at);
+  const push = (o, r) => out.push([tToX(v, o, cw), dbToY(dbAt(points, song(r)), h)]);
+  let r = b.at;
+  while (r < rEnd - 1e-9) {
+    const o = map.toOrig(r), same = (q) => Math.abs(map.toOrig(q) - o - (q - r)) < 1e-9;
+    let r2 = rEnd, nxt = rEnd;
+    if (!same(rEnd)) {
+      let lo = r, hi = rEnd;
+      for (let i = 0; i < 50; i++) { const m = (lo + hi) / 2; if (same(m)) lo = m; else hi = m; }
+      r2 = lo; nxt = hi;
+    }
+    if (out.length && tToX(v, o, cw) > out[out.length - 1][0]) out.push([tToX(v, o, cw), out[out.length - 1][1]]);   // 잘린 구간 위는 평평
+    push(o, r);
+    for (const [ps] of [...(points || [])].sort((p, q) => p[0] - q[0])) {
+      const pr = b.at + (ps - b.in);
+      if (pr > r + 1e-9 && pr < r2 - 1e-9) push(o + (pr - r), pr);
+    }
+    push(o + (r2 - r), r2);
+    r = nxt;
+  }
+  return out;
+}
+
+// 끌어 옮길 때 자리 맞춤: 시작/끝 중 하나가 대상(시작은 0, 끝은 결과 끝, 다른 음원 경계)과 thr px 안이면 붙임(가장 가까운 것)
+function bgmSnap(at, len, total, others, pxPerSec, thr = 8) {
+  let best = at, bestD = Infinity;
+  const tryAt = (cand, d) => { if (d * pxPerSec <= thr && d < bestD) { best = cand; bestD = d; } };
+  tryAt(0, Math.abs(at));
+  tryAt(total - len, Math.abs(at + len - total));
+  for (const t of others) { tryAt(t, Math.abs(at - t)); tryAt(t - len, Math.abs(at + len - t)); }
+  return Math.max(0, best);
+}
+
+// 음원 끌기 {at, in, out}: move 는 자리만, start/end 는 곡 안쪽 가장자리 (start 는 at 도 같은 양 움직여 곡이 제자리에 남음)
+function bgmDrag(kind, b, dt, total) {
+  if (kind === 'move') return { at: Math.max(0, b.at + dt), in: b.in, out: b.out };
+  if (kind === 'start') {
+    const nin = Math.max(clamp(b.in + dt, 0, b.out - BGM_MIN_LEN), b.in - b.at);   // at >= 0 이 되게
+    return { at: b.at + (nin - b.in), in: nin, out: b.out };
+  }
+  return { at: b.at, in: b.in, out: clamp(b.out + dt, b.in + BGM_MIN_LEN, b.dur) };
+}
+
+// 화면 x → 원본 초 → 결과 초 (잘린 구간 안이면 그 구간 끝의 결과 시간)
+const xToOutT = (x, map, v, cw) => map.toOut(xToT(v, x, cw));
+
 const TL = { fitView, clampView, tToX, xToT, zoomAt, followT, playFollow, playSpc, cells, sheetCell, waveMax, spcToSlider, sliderToSpc,
-  ovRect, ovMove, ovResizeEdge, barDrag, lanesDrag, clipBands, snapAt, dropTarget, isDrag, tlDataKey };
+  ovRect, ovMove, ovResizeEdge, barDrag, lanesDrag, clipBands, snapAt, dropTarget, isDrag, tlDataKey,
+  dbAt, dbToY, yToDb, bgmLanes, bgmSpan, bgmPolyline, bgmSnap, bgmDrag, xToOutT };
 if (typeof window !== 'undefined') window.TL = TL;
 if (typeof module !== 'undefined') module.exports = TL;
