@@ -20,7 +20,7 @@ SPEECH_JOIN = 0.5      # 이보다 짧은 말 사이 틈은 한 덩어리로 봄
 DB_MIN = -40.0         # 음량 점 하한 (pipeline.BGM_FLOOR_DB 와 같음 — 이 아래는 무음)
 DB_MAX = 6.0
 MIN_LEN = 0.1          # BGM 구간 최소 길이(초)
-AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".aif", ".aiff"}   # 불러올 수 있는 음원
+AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus"}   # 불러올 수 있는 음원
 TARGET_LUFS = -24.0    # 불러올 때 맞추는 기본 음량(적분 라우드니스)
 GAIN_MIN, GAIN_MAX = -30.0, 12.0
 
@@ -181,6 +181,8 @@ def import_audio(src: Path, folder: Path) -> dict | None:
     소리가 없거나 영상이 들어 있거나(앨범 아트 제외) 못 읽으면 None. 이미 있으면 다시 만들지 않는다."""
     from . import runner
     src = Path(src)
+    if src.suffix.lower() not in AUDIO_EXTS:
+        return None
     try:
         res = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
                               "format=duration:stream=codec_type:stream_disposition=attached_pic", "-of", "json",

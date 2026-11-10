@@ -1007,7 +1007,10 @@ class Api:
         got = bgm.import_audio(Path(picked), folder) if picked else None
         if got is None:
             return None
-        ctx = self._bgm_context(self._job(job_id))
+        job = self._job(job_id)
+        if job is None:
+            return None
+        ctx = self._bgm_context(job)
         place = self._bgm_at(at, bgm.out_total(ctx[0]), ctx[2])
 
         def change(job: Job, _d: float) -> bool:
@@ -1088,7 +1091,8 @@ class Api:
 
     def _read_bgm_presets(self) -> list[dict]:
         data = _read_json(self._bgm_presets_dir() / "presets.json")
-        return [p for p in data if isinstance(p, dict) and isinstance(p.get("id"), str)] if isinstance(data, list) else []
+        return [p for p in data if isinstance(p, dict) and isinstance(p.get("id"), str)
+                and self._num(p.get("dur")) and p["dur"] > 0 and self._num(p.get("gain"))] if isinstance(data, list) else []
 
     def _write_bgm_presets(self, items: list[dict]) -> None:
         d = self._bgm_presets_dir()
@@ -1183,7 +1187,10 @@ class Api:
         except OSError:
             log.exception("저장한 음원 복사 실패")
             return None
-        ctx = self._bgm_context(self._job(job_id))
+        job = self._job(job_id)
+        if job is None:
+            return None
+        ctx = self._bgm_context(job)
         place = self._bgm_at(at, bgm.out_total(ctx[0]), ctx[2])
 
         def change(job: Job, _d: float) -> bool:

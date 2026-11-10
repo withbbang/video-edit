@@ -246,3 +246,21 @@ def test_bgm_presets_roundtrip(tmp_path, monkeypatch):
     a.delete_bgm_preset(x["id"])
     assert (a._bgm_presets_dir() / p["file"]).is_file()           # 같은 파일을 다른 항목이 씀
     assert a.delete_bgm_preset(y["id"]) == [] and not (a._bgm_presets_dir() / p["file"]).exists()
+
+
+def test_import_audio_rejects_other_extension(tmp_path):
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg 필요")
+    p = tmp_path / "s.mka"
+    _ff("-f", "lavfi", "-i", "sine=frequency=440:duration=1", str(p))
+    assert bgm.import_audio(p, tmp_path / "bgm") is None
+    assert ".aif" not in bgm.AUDIO_EXTS and ".aiff" not in bgm.AUDIO_EXTS
+
+
+def test_bad_bgm_preset_entries_skipped(tmp_path, monkeypatch):
+    a, store, job = _with_bgm(tmp_path)
+    monkeypatch.setenv("YTEDIT_DATA_DIR", str(tmp_path / "data"))
+    good = {"id": "a1", "name": "좋음", "file": "0123456789abcdef.m4a", "dur": 3.0, "gain": 0.0}
+    a._write_bgm_presets([good, {**good, "id": "a2", "dur": 0}, {**good, "id": "a3", "gain": None},
+                          {**good, "id": "a4", "dur": "x"}])
+    assert [p["id"] for p in a.list_bgm_presets()] == ["a1"]
