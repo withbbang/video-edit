@@ -28,7 +28,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Callable, Protocol
 
-from . import __version__, diff, models, paths, preview, runner, sequence, subtitles, thumbs, updates
+from . import __version__, bgm, diff, models, paths, preview, runner, sequence, subtitles, thumbs, updates
 from .jobqueue import ANALYZE, RENDER
 from .options import FAST_KEYS, LEVEL_KEYS, JobOptions, parse_level
 from .progress import ANALYZE_WEIGHTS, RENDER_WEIGHTS
@@ -152,7 +152,8 @@ def pipeline_command(job: Job, kind: str, store: Store, manifest: dict, data_roo
         with lock or contextlib.nullcontext():
             settle_stable(job, tr, store)   # 화면이 아직 자막을 안 읽었어도 옛 전사 키 수정을 쓰지 않게
         cmd, weights = runner.render_command(job, model, device, media, save_cuts(job, lock), save_subs_edits(job, lock),
-                                         save_overlays(job, lock), save_sequence(job, lock)), RENDER_WEIGHTS
+                                         save_overlays(job, lock), save_sequence(job, lock),
+                                         save_bgms(job, lock)), RENDER_WEIGHTS
     else:
         raise ValueError(f"알 수 없는 작업 종류: {kind}")
     return cmd, weights, models.pipeline_env(manifest, data_root, store.settings)
@@ -195,8 +196,56 @@ def save_cuts(job: Job, lock=None) -> Path | None:
         return None
     tr = _read_json(out / f"{src.stem}.transcript.json")
     path = out / f"{src.stem}.save.cuts.json"
-    path.write_text(json.dumps(diff.effective_cuts(cur, restored, ops, tr), ensure_ascii=False, indent=1),
+    path.write_text(json.dumps(_effective_cuts(cur, restored, ops, tr), ensure_ascii=False, indent=1),
                     encoding="utf-8")
+    return path
+
+
+def _effective_cuts(cur: dict | None, restored: list, ops: list, transcript: dict | None) -> dict | None:
+    """되살린 곳·구간 작업을 반영한 컷 (저장·미리보기·요약·BGM 이 같은 목록을 쓴다). 반영할 게 없으면 cur 그대로."""
+    if cur is None or not (restored or ops):
+        return cur
+    return diff.effective_cuts(cur, restored, ops, transcript)
+
+
+def bgm_context_of(effective: dict | None, transcript: dict | None, duration: float) -> tuple[list, list, float]:
+    """effective 컷·전사 → (남길 구간 keeps, 결과 초 말 구간 speech, fps)."""
+    fps = float(subtitles._fps(effective or {}))
+    cuts = [(c["start"], c["end"]) for c in (effective or {}).get("cuts", [])]
+    keeps = bgm.keeps_from_cuts(cuts, duration, fps)
+    words = [w for seg in (transcript or {}).get("segments", []) for w in seg.get("words") or []]
+    return keeps, bgm.speech_spans(words, keeps), fps
+
+
+def _bgm_inputs(src: Path, restored: list, ops: list, summary: dict | None) -> tuple:
+    """파일에서 읽은 effective 컷·전사·길이로 BGM 계산용 (keeps, speech, fps) 를 만든다."""
+    out = paths.job_dir(src) / "out"
+    cur = _read_json(out / f"{src.stem}.cuts.json")
+    tr = _read_json(out / f"{src.stem}.transcript.json")
+    try:
+        duration = float((tr or {}).get("duration") or (summary or {}).get("orig_sec") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    return bgm_context_of(_effective_cuts(cur, restored, ops, tr), tr, duration)
+
+
+def save_bgms(job: Job, lock=None, context=None) -> Path | None:
+    """저장용 음원 목록 <이름>.bgm.json (파이프라인 --bgm). 없으면 낡은 파일을 지우고 None.
+    음량 점은 손대지 않은(points None) 항목만 지금 컷·말로 자동 곡선을 풀어 넣는다.
+    context=(keeps, speech, fps) 를 주면 그걸 쓰고, 아니면 지금 컷·전사에서 계산한다."""
+    with lock or contextlib.nullcontext():
+        src, items = Path(job.src), copy.deepcopy(job.bgms)
+        restored, ops, summary = [list(r) for r in job.restored], [dict(o) for o in job.range_ops], job.summary
+    jd = paths.job_dir(src)
+    path = jd / "out" / f"{src.stem}.bgm.json"
+    if not items:
+        path.unlink(missing_ok=True)
+        return None
+    _, speech, _ = context or _bgm_inputs(src, restored, ops, summary)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = [{"path": str(jd / "bgm" / b["file"]), "at": b["at"], "in": b["in"], "out": b["out"], "gain": b["gain"],
+             "points": bgm.resolve_points(b, speech)} for b in items]
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
 
 
@@ -486,12 +535,12 @@ class Api:
     @staticmethod
     def _snap(job: Job) -> tuple:
         return copy.deepcopy((job.restored, job.range_ops, job.word_edits, job.line_times, job.word_styles, job.edits_sha1,
-                              job.overlays, job.pieces, job.stable_edits))
+                              job.overlays, job.pieces, job.stable_edits, job.bgms))
 
     @staticmethod
     def _put(job: Job, snap: tuple) -> None:
         (job.restored, job.range_ops, job.word_edits, job.line_times, job.word_styles, job.edits_sha1,
-         job.overlays, job.pieces, job.stable_edits) = copy.deepcopy(snap)
+         job.overlays, job.pieces, job.stable_edits, job.bgms) = copy.deepcopy(snap)
 
     def _record(self, job: Job, before: tuple) -> None:
         """편집 뒤에 부른다 (queue.lock 안). 실제로 바뀌었으면 편집 전 상태를 쌓고 다시 실행 목록을 비운다."""
@@ -1570,7 +1619,7 @@ class Api:
         items = diff.cut_items(cur, restored, ops, transcript) if cur else []
         if (restored or ops) and cur is not None:
             # 되살린 곳은 미리보기에서 건너뛰지 않고 요약에서도 뺀다 (저장도 같은 목록으로 한다)
-            effective = diff.effective_cuts(cur, restored, ops, transcript)
+            effective = _effective_cuts(cur, restored, ops, transcript)
             kept = effective["cuts"]
             merged = _union(kept)
             removed = sum(b - a for a, b in merged)
@@ -1586,10 +1635,12 @@ class Api:
             # 슬라이더 설명의 "N초 이상" — 앱의 파이프라인이 쓰는 fillers.json 의 silence_min_sec
             summary = {**summary, "silence_min_sec": _silence_min_sec()}
         ov_views = self._ov_views(snap)
+        keeps, speech, _ = bgm_context_of(cur, transcript, duration)
         result = {"summary": summary, "cuts": diff.cut_ranges(cur) if cur else [], "cut_items": items,
                   "range_ops": ops, "history": self._hist(job_id),
                   "duration": duration, "fps": float(subtitles._fps(cur or {})),   # 화면의 프레임 단위 구간 다듬기
-                  "overlays": ov_views, "layout": _layout(transcript)}
+                  "overlays": ov_views, "layout": _layout(transcript),
+                  "bgms": self._bgm_views(snap, speech), "keeps": keeps, "out_total": bgm.out_total(keeps)}
         result.update(self._preview(snap, status, effective, settings))
         if status in (Status.REVIEW, Status.SAVED):
             self._request_thumbs(snap, duration)
@@ -1599,6 +1650,17 @@ class Api:
             names = [f"{src.stem}_clean.mp4", f"{src.stem}_clean.m4a", f"{src.stem}_clean.srt"]
             result["saved_paths"] = [str(save_dir / n) for n in names if (save_dir / n).is_file()]
         return result
+
+    def _bgm_context(self, job: Job) -> tuple[list, list, float]:
+        """지금 effective 컷·전사로 (keeps, speech, fps). get_result 와 같은 컷을 쓴다."""
+        with self._queue.lock:
+            src, summary = Path(job.src), job.summary
+            restored, ops = [list(r) for r in job.restored], [dict(o) for o in job.range_ops]
+        return _bgm_inputs(src, restored, ops, summary)
+
+    def _bgm_views(self, job: Job, speech: list) -> list[dict]:
+        return [{**b, "url": f"{self._preview_base}/{job.id}/bgm/{b['file']}",
+                 "points": bgm.resolve_points(b, speech), "touched": b.get("points") is not None} for b in job.bgms]
 
     def _preview(self, job: Job, status: str, cuts: dict | None, settings: dict) -> dict:
         """get_result 의 "preview"(새 미리보기 폴더) 와 "preview_url"(옛 preview.mp4 만 있는 작업).

@@ -42,6 +42,7 @@ class Job:
     range_ops: list = field(default_factory=list)   # 직접 자르기·남기기 구간 작업
     edits_sha1: str | None = None                   # 자막을 고칠 때의 받아쓰기 지문
     overlays: list = field(default_factory=list)    # 겹쳐 새길 이미지 [{id, img, name, aspect, x, y, w, start, end}] (비율·원본 초)
+    bgms: list = field(default_factory=list)        # 음원(BGM) [{id, file, name, dur, gain, at, in, out, points|None}] (at=결과 초, in/out=곡 초, points None=자동 음량)
     pieces: list = field(default_factory=list)      # 이어 붙인 조각 [{id, clip, src, name, in, out}] (비면 A 하나)
     stable_edits: dict | None = None                # 조각을 넣거나 뺀 직후 to_stable 결과 (다시 판정이 끝나면 풀어 씀)
 
