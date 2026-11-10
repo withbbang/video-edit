@@ -196,6 +196,23 @@ def test_update_bgm_validates(tmp_path):
     assert job.bgms[0]["points"] == [[0.0, bgm.DB_MIN], [5.0, bgm.DB_MAX], [30.0, 0.0]]
 
 
+def test_update_bgm_tied_points_stored_strictly_increasing(tmp_path):
+    a, store, job = _with_bgm(tmp_path)
+    dur = B["dur"]
+    # 잘린 곳 안·결과 끝 뒤를 누르면 같은 곡 초의 점이 생긴다 → 들어온 순서대로 1ms 씩 민다, dur 를 넘으면 버린다
+    a.update_bgm(job.id, B["id"], {"points": [[0, 0], [5, 0], [5, -20], [10, -20], [dur, -6], [dur, -40], [99, 0]]})
+    ts = [p[0] for p in job.bgms[0]["points"]]
+    assert all(t1 > t0 for t0, t1 in zip(ts, ts[1:]))
+    assert job.bgms[0]["points"][:4] == [[0.0, 0.0], [5.0, 0.0], [pytest.approx(5.001), -20.0], [10.0, -20.0]]
+    assert job.bgms[0]["points"][-1] == [dur, -6.0]
+
+
+def test_strict_points():
+    assert bgm.strict_points([[1, 0], [1, -5], [1, -10]], 0, 10) == [[1.0, 0.0], [pytest.approx(1.001), -5.0], [pytest.approx(1.002), -10.0]]
+    assert bgm.strict_points([[-3, 1], [-1, 2]], 0, 10) == [[0.0, 1.0], [pytest.approx(0.001), 2.0]]
+    assert bgm.strict_points([[10, 1], [12, 2]], 0, 10) == [[10.0, 1.0]]
+
+
 def test_reset_and_undo(tmp_path):
     a, store, job = _with_bgm(tmp_path)
     a.update_bgm(job.id, B["id"], {"points": [[0, -6], [5, -6]]})

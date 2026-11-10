@@ -279,6 +279,20 @@ def test_db_at_matches_python():
     assert got == pytest.approx([bgm.db_at(p, t) for p, t in cases])
 
 
+def test_db_at_matches_python_after_tie_fix():
+    # 같은 시간 점은 JS(정렬 순서)와 렌더(np.interp)가 다르게 보간한다 → 서버가 strict_points 로 풀어 저장한 점은 둘이 같다
+    import sys
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import pipeline
+    from app import bgm
+    pts = bgm.strict_points([[0, 0], [5, 0], [5, -20], [10, -20], [10, -3]], 0, 30)
+    ts = [0, 2.5, 5, 5.0005, 5.001, 7.5, 10, 10.0005, 20]
+    got = run("out = " + json.dumps(ts) + ".map((t) => T.dbAt(" + json.dumps(pts) + ", t));")
+    assert got == pytest.approx([bgm.db_at(pts, t) for t in ts])
+    assert got == pytest.approx(list(pipeline.bgm_db_at(pts, np.array(ts, dtype=float))))
+
+
 def test_time_map_pieces():
     assert run_bgm("out = map.pieces;") == [{"s": 0, "e": 1, "o": 0}, {"s": 3, "e": 10, "o": 1}]
 

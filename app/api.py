@@ -1026,7 +1026,7 @@ class Api:
 
     def update_bgm(self, job_id: str, bid: str, patch: dict) -> dict | None:
         """at·in·out·points 만 바꾼다. at >= 0, 0 <= in < out <= dur, out - in >= MIN_LEN.
-        points = [[곡 초, dB], …] — 곡 초는 [0, dur], dB 는 [DB_MIN, DB_MAX] 로 고정하고 시간순으로 저장 (최대 500개). 주면 손댄 것."""
+        points = [[곡 초, dB], …] — 곡 초는 [0, dur], dB 는 [DB_MIN, DB_MAX] 로 고정하고 시간순으로, 같은 시간은 1ms 씩 밀어 저장 (최대 500개). 주면 손댄 것."""
         if not isinstance(patch, dict) or not patch or set(patch) - {"at", "in", "out", "points"}:
             return None
         if not all(self._num(v) for k, v in patch.items() if k != "points"):
@@ -1046,8 +1046,8 @@ class Api:
             if not (b["at"] >= 0 and 0 <= b["in"] < b["out"] <= b["dur"] + EPS and b["out"] - b["in"] >= bgm.MIN_LEN - EPS):
                 return False
             if raw is not None:
-                b["points"] = sorted(([min(max(float(t), 0.0), b["dur"]), min(max(float(db), bgm.DB_MIN), bgm.DB_MAX)]
-                                      for t, db in raw), key=lambda p: p[0])
+                b["points"] = bgm.strict_points(([t, min(max(float(db), bgm.DB_MIN), bgm.DB_MAX)] for t, db in raw),
+                                                0.0, b["dur"])
             job.bgms = [*job.bgms[:i], b, *job.bgms[i + 1:]]
             return True
         return self._change_bgms(job_id, change)
@@ -1144,7 +1144,8 @@ class Api:
             items.append({"id": same["id"] if same else secrets.token_hex(4), "name": name, "file": b["file"],
                           "dur": b["dur"], "gain": b["gain"]})
             self._write_bgm_presets(items)
-            if same and same.get("file") != b["file"] and not any(q.get("file") == same.get("file") for q in items):
+            if (same and same.get("file") != b["file"] and _BGM_FILE.fullmatch(str(same.get("file")))
+                    and not any(q.get("file") == same.get("file") for q in items)):
                 (self._bgm_presets_dir() / str(same.get("file"))).unlink(missing_ok=True)
             return self._bgm_preset_views(items)
 

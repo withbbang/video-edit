@@ -137,6 +137,23 @@ def resolve_points(b, speech):
     return auto_points(b["at"], b["in"], b["out"], speech)
 
 
+TIE_GAP = 1e-3         # 같은 시간의 점을 이만큼 뒤로 민다 (app/ui 의 점 추가·끌기와 같은 값)
+
+
+def strict_points(points, lo, hi):
+    """점 [[곡 초, dB], …] 을 [lo, hi] 안으로 넣고 시간순(같은 시간은 들어온 순서)으로, 시간이 겹치지 않게 한다.
+    같은 시간이면 앞 점 + TIE_GAP 로 밀고, 밀어서 hi 를 넘으면 그 점은 버린다.
+    (같은 시간 점이 있으면 미리보기(JS)와 렌더(np.interp)의 보간이 달라지기 때문)"""
+    out = []
+    for t, db in sorted(([min(max(float(t), lo), hi), float(db)] for t, db in points), key=lambda p: p[0]):
+        if out and t <= out[-1][0]:
+            t = out[-1][0] + TIE_GAP
+            if t > hi:
+                continue
+        out.append([t, db])
+    return out
+
+
 def db_at(points, t):
     """곡 초 t → dB. 점 사이는 직선, 첫 점 앞·마지막 점 뒤는 그 점 값, 점이 없으면 0.
     (pipeline.bgm_db_at 의 스칼라 판)"""

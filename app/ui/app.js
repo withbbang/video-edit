@@ -1654,6 +1654,7 @@ const bgl = (() => {
   const NEAR = 6;      // 선에서 이만큼(px) 안을 누르면 점 추가
   const DBL_MS = 400;  // 같은 점을 이 안에 두 번 누르면 지우기 (누를 때 다시 그려 dblclick 이 안 온다)
   const PTS_MAX = 500; // 서버가 받는 점 수
+  const TIE_GAP = 1e-3; // 같은 곡 초의 점은 이만큼 뒤로 (app/bgm.py TIE_GAP — 같은 시간 점은 미리보기와 렌더 보간이 달라진다)
   const SVG = 'http://www.w3.org/2000/svg';
   const sv = (tag, attrs) => {
     const e = document.createElementNS(SVG, tag);
@@ -1737,23 +1738,46 @@ const bgl = (() => {
   // 음원 하나의 편집 (update_bgm·reset_bgm·delete_bgm): live 는 답을 기다리는 동안 덧씌워 보여 줄 값
   const EDIT_ERR = { update_bgm: '바꾸지 못했습니다', reset_bgm: '음원 자동 조절을 하지 못했습니다', delete_bgm: '제거하지 못했습니다' };
   function edit(name, id, patch, live) {
-    if (live) held.set(id, { ...(held.get(id) || {}), ...live });
+    if (live || name === 'reset_bgm') {
+      const hv = { ...(held.get(id) || {}), ...live };
+      // 음원 자동 조절: 답(서버가 계산할 자동 곡선)이 올 때까지 손댄 점을 보여 주지도, 다시 보내지도 않는다 (점 편집은 그동안 막음)
+      if (name === 'reset_bgm') { delete hv.points; hv.resetting = true; hv.touched = false; }
+      held.set(id, hv);
+    }
     const last = queue[queue.length - 1];
-    if (last && name === 'update_bgm' && last.name === name && last.id === id) last.patch = { ...last.patch, ...patch };
-    else queue.push({ job: S.sel, name, id, patch });
+    if (last && name === 'update_bgm' && last.name === name && last.args[0] === id) {
+      last.args = [id, { ...last.args[1], ...patch }];
+      return last.done;
+    }
+    const done = request(name, patch ? [id, patch] : [id], id);
     syncMixer();   // 다시 그리기·답을 기다리지 않고 바로 들리게
     zoomTl.draw();
+    return done;
+  }
+  // 서버 요청은 하나씩: 답을 기다리는 중에 온 요청(편집·불러오기·삽입·이름 바꾸기)은 줄을 세웠다가 보낸다. → 답(거절·버려지면 null)
+  function request(name, args, id) {
+    let resolve;
+    const done = new Promise((r) => { resolve = r; });
+    queue.push({ job: S.sel, name, args, id, done, resolve });
     pump();
+    return done;
   }
   async function pump() {
     if (busy || !queue.length) return;
     const e = queue.shift();
-    if (e.job !== S.sel) { queue = []; held.clear(); return; }   // 다른 작업으로 넘어감
-    const res = await send(e.name, e.id, ...(e.patch ? [e.patch] : []));
-    if (res) { if (itemErr && itemErr.id === e.id) itemErr = null; } else if (S.sel === e.job) itemErr = { id: e.id, text: EDIT_ERR[e.name] };
+    if (e.job !== S.sel) {   // 다른 작업으로 넘어감
+      for (const q of [e, ...queue]) q.resolve(null);
+      queue = []; held.clear();
+      return;
+    }
+    const res = await send(e.name, ...e.args);
+    if (EDIT_ERR[e.name]) {
+      if (res) { if (itemErr && itemErr.id === e.id) itemErr = null; } else if (S.sel === e.job) itemErr = { id: e.id, text: EDIT_ERR[e.name] };
+    }
     if (!queue.length && !busy) held.clear();   // 모두 끝남: 서버 값으로 (거절됐으면 되돌림)
     syncMixer();
     refresh();
+    e.resolve(res);
   }
   function refresh() {
     renderTools();
@@ -1872,7 +1896,7 @@ const bgl = (() => {
       // 고른 막대: 0dB 기준선, 점, 음원 자동 조절
       const y0 = TL.dbToY(0, CH).toFixed(1);
       kids[k].push(sv('line', { class: 'bg-zero', x1: a, x2: z, y1: y0, y2: y0 }));
-      if (editable()) {
+      if (editable() && !b.resetting) {   // 음원 자동 조절 답을 기다리는 동안은 점을 숨긴다
         const end = Math.min(b.at + lenOf(b), m.total);
         ptsOf(b).forEach(([t, db], i) => {
           const r = b.at + (t - b.in);
@@ -1926,7 +1950,7 @@ const bgl = (() => {
       if (e.clientX - rect.left <= BAR_END || rect.right - e.clientX <= BAR_END) cursor = 'ew-resize';
       else if (id === S.bgmSel && editable()) {
         const g = zoomTl.geom(), m = map(), b = curOf(id), lr = B.bar.parentNode.getBoundingClientRect();
-        near = !!(g && m && b && S.view && nearLine(b, e.clientX - lr.left, e.clientY - lr.top - PAD, g, m));
+        near = !!(g && m && b && !b.resetting && S.view && nearLine(b, e.clientX - lr.left, e.clientY - lr.top - PAD, g, m));
         if (near) cursor = 'copy';
       }
     }
@@ -1950,13 +1974,15 @@ const bgl = (() => {
     const x = e.clientX - lr.left, y = e.clientY - lr.top - PAD;
     const kind = e.clientX - br.left <= BAR_END ? 'start' : br.right - e.clientX <= BAR_END ? 'end' : 'move';
     const base = { id, b, x0: e.clientX, y0: e.clientY, lx: lr.left, ly: lr.top, g, m, on: false, live: null };
-    if (wasSel && kind === 'move' && nearLine(b, x, y, g, m)) {   // 선 위: 그 자리에 점을 넣고 바로 끌 수 있게
+    if (wasSel && kind === 'move' && !b.resetting && nearLine(b, x, y, g, m)) {   // 선 위: 그 자리에 점을 넣고 바로 끌 수 있게
       const pts = ptsOf(b);
       if (pts.length >= PTS_MAX) return;
-      const r = TL.xToOutT(x, m, S.view, g.cw);
-      const t = Math.min(Math.max(b.in + (r - b.at), b.in), b.out);
+      const r = TL.xToOutT(x, m, S.view, g.cw);   // 잘린 곳 안·결과 끝 뒤는 같은 결과 초 → 같은 곡 초가 될 수 있다
+      let t = Math.min(Math.max(b.in + (r - b.at), b.in), b.out);
       let i = pts.findIndex((p) => p[0] > t);
       if (i < 0) i = pts.length;
+      if (i > 0 && t <= pts[i - 1][0]) t = pts[i - 1][0] + TIE_GAP;   // 서버(strict_points)와 같게 앞 점 뒤로 민다
+      if (t > b.out || (i < pts.length && t >= pts[i][0])) return;   // 밀 자리가 없으면 넣지 않는다
       pts.splice(i, 0, [t, TL.yToDb(y, CH)]);
       ptSel = { id, i };
       begin({ ...base, kind: 'pt', i, pts, added: true, live: { points: pts.map((p) => [...p]), touched: true } });
@@ -1978,7 +2004,7 @@ const bgl = (() => {
     e.preventDefault();
     e.stopPropagation();
     const g = zoomTl.geom(), m = map(), b = curOf(id), B = bars.get(id);
-    if (!g || !S.view || !m || !b || !B || !editable()) return;
+    if (!g || !S.view || !m || !b || !B || !editable() || b.resetting) return;
     const lr = B.bar.parentNode.getBoundingClientRect();
     ptSel = { id, i };
     begin({ id, kind: 'pt', i, b, pts: ptsOf(b), x0: e.clientX, y0: e.clientY, lx: lr.left, ly: lr.top, g, m,
@@ -2065,7 +2091,7 @@ const bgl = (() => {
   }
   function deletePoint(id, i) {
     const b = curOf(id);
-    if (!b || !editable()) return;
+    if (!b || !editable() || b.resetting) return;
     const pts = ptsOf(b);
     if (pts.length <= 1 || i >= pts.length) return;   // 점이 하나는 있어야 한다 (모두 없애려면 음원 자동 조절)
     pts.splice(i, 1);
@@ -2076,11 +2102,11 @@ const bgl = (() => {
   // ---- 음원 탭 ----
   async function add() {
     const before = new Set(list().map((b) => b.id));
-    pickNew(before, await send('add_bgm', outNow()));
+    pickNew(before, await request('add_bgm', [outNow()]));
   }
   async function insertPreset(pid) {
     const before = new Set(list().map((b) => b.id));
-    pickNew(before, await send('insert_bgm_preset', pid, outNow()));
+    pickNew(before, await request('insert_bgm_preset', [pid, outNow()]));
   }
   function pickNew(before, res) {
     if (!res) return;
@@ -2115,7 +2141,7 @@ const bgl = (() => {
     if (!nm || !it || nm === it.name) { renaming = null; renderTools(); return; }
     if (r.kind === 'bgm') {
       renaming = null;
-      const res = await send('rename_bgm', r.id, nm);
+      const res = await request('rename_bgm', [r.id, nm], r.id);
       if (!res) { itemErr = { id: r.id, text: '이름을 바꾸지 못했습니다' }; renderTools(); }
       return;
     }
@@ -2250,6 +2276,7 @@ const bgl = (() => {
       if (mixer) mixer.dispose();
       mixer = null; mixKey = null; mixSig = null; mapKeeps = null; mapVal = null;
       S.bgmSel = null; naming = false; renaming = null; presets = null; saveErr = null; itemErr = null; field = null;
+      for (const q of queue) q.resolve(null);
       held.clear(); queue = []; ptSel = null; lastPress = null; nearId = null; shownSel = null;
     } };
 })();
