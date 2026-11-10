@@ -281,6 +281,11 @@ function bgmSnap(at, len, total, others, pxPerSec, thr = 8) {
 function bgmDrag(kind, b, dt, total) {
   // move: 끝으로 끌면 곡 끝이 결과 끝에서 멈춘다 (곡이 결과보다 길면 0 에서 시작)
   if (kind === 'move') return { at: clamp(b.at + dt, 0, Math.max(0, total - bgmLen(b))), in: b.in, out: b.out };
+  // slip: 막대 자리·길이는 그대로, 안에서 들리는 곡 구간만 민다 (오른쪽으로 끌면 곡이 따라 움직여 앞부분이 나옴)
+  if (kind === 'slip') {
+    const len = b.out - b.in, nin = clamp(b.in - dt, 0, Math.max(0, b.dur - len));
+    return { at: b.at, in: nin, out: nin + len };
+  }
   if (kind === 'start') {
     const nin = Math.max(clamp(b.in + dt, 0, b.out - BGM_MIN_LEN), b.in - b.at);   // at >= 0 이 되게
     return { at: b.at + (nin - b.in), in: nin, out: b.out };
@@ -288,11 +293,12 @@ function bgmDrag(kind, b, dt, total) {
   return { at: b.at, in: b.in, out: clamp(b.out + dt, b.in + BGM_MIN_LEN, b.dur) };
 }
 
-// 끝 손잡이를 곡의 시작(start)·끝(end) 너머로 끌었나 — 더 붙일 소리가 없어 막혔다는 표시용
+// 곡의 시작·끝 너머로 끌었나 — 막힌 쪽 'start'|'end', 아니면 null (더 붙일 소리가 없다는 표시용)
 function bgmEdgeHit(kind, b, dt) {
-  if (kind === 'start') return b.in + dt < -1e-6;
-  if (kind === 'end') return b.out + dt > b.dur + 1e-6;
-  return false;
+  if (kind === 'start') return b.in + dt < -1e-6 ? 'start' : null;
+  if (kind === 'end') return b.out + dt > b.dur + 1e-6 ? 'end' : null;
+  if (kind === 'slip') return b.in - dt < -1e-6 ? 'start' : b.out - dt > b.dur + 1e-6 ? 'end' : null;
+  return null;
 }
 
 // 화면 x → 원본 초 → 결과 초 (잘린 구간 안이면 그 구간 끝의 결과 시간)

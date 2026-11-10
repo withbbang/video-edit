@@ -1680,6 +1680,7 @@ const bgl = (() => {
   const autoWrap = h('span', { class: 'bg-auto', hidden: true },
     h('span', { class: 'tipw', title: BGM_TIP_AUTO }, autoBtn), h('span', { class: 'tipw', title: BGM_TIP_FLAT }, flatBtn));
   autoWrap.addEventListener('pointerdown', (e) => e.stopPropagation());
+  const SLIP_KEY = /Mac/.test(navigator.platform || navigator.userAgent) ? 'Option' : 'Alt';
   const limitTip = h('div', { class: 'bg-limit-tip', hidden: true });   // 끝 손잡이를 곡 너머로 끌 때 말풍선   // 줄의 구간 고르기·이동으로 넘기지 않는다
   const isFlat = (b) => b.touched && (b.points || []).every(([, db]) => Math.abs(db) < 1e-9);
   let busy = false, naming = false, presets = null, loading = false, saveErr = null;
@@ -1909,7 +1910,8 @@ const bgl = (() => {
         limitTip.style.left = `${lim === 'start' ? Math.max(0, x0) : Math.min(L.lane.clientWidth, x1)}px`;
         limitTip.hidden = false;
       }
-      if (B.bar.title !== b.name) B.bar.title = b.name;
+      const tip = `${b.name}\n${SLIP_KEY}+끌기: 막대 자리는 그대로 두고 들리는 곡 구간만 바꾸기`;
+      if (B.bar.title !== tip) B.bar.title = tip;
       const pts = TL.bgmPolyline(b, b.points, m, v, g.cw, CH, w);
       if (pts.length) {
         const s = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
@@ -1982,6 +1984,7 @@ const bgl = (() => {
     if (e) {
       const rect = B.bar.getBoundingClientRect();
       if (e.clientX - rect.left <= BAR_END || rect.right - e.clientX <= BAR_END) cursor = 'ew-resize';
+      else if (e.altKey) cursor = 'col-resize';   // 곡 구간 밀기
       else if (id === S.bgmSel && editable()) {
         const g = zoomTl.geom(), m = map(), b = curOf(id), lr = B.bar.parentNode.getBoundingClientRect();
         near = !!(g && m && b && !b.resetting && S.view && nearLine(b, e.clientX - lr.left, e.clientY - lr.top - PAD, g, m));
@@ -2006,7 +2009,9 @@ const bgl = (() => {
     if (!editable() || !B || !B.bar.parentNode) return;
     const lr = B.bar.parentNode.getBoundingClientRect(), br = B.bar.getBoundingClientRect();
     const x = e.clientX - lr.left, y = e.clientY - lr.top - PAD;
-    const kind = e.clientX - br.left <= BAR_END ? 'start' : br.right - e.clientX <= BAR_END ? 'end' : 'move';
+    const edge = e.clientX - br.left <= BAR_END ? 'start' : br.right - e.clientX <= BAR_END ? 'end' : null;
+    // Alt(맥 Option)+가운데 끌기: 막대는 제자리, 안에서 들리는 곡 구간만 바꾼다
+    const kind = edge || (e.altKey ? 'slip' : 'move');
     const base = { id, b, x0: e.clientX, y0: e.clientY, lx: lr.left, ly: lr.top, g, m, on: false, live: null };
     if (wasSel && kind === 'move' && !b.resetting && nearLine(b, x, y, g, m)) {   // 선 위: 그 자리에 점을 넣고 바로 끌 수 있게
       const pts = ptsOf(b);
@@ -2082,7 +2087,7 @@ const bgl = (() => {
     } else {
       const dt = TL.xToOutT(x, d.m, S.view, cw) - TL.xToOutT(d.x0 - d.lx, d.m, S.view, cw);
       let live = TL.bgmDrag(d.kind, d.b, dt, total());
-      d.limit = TL.bgmEdgeHit(d.kind, d.b, dt) ? d.kind : null;   // 곡 시작·끝 너머로 끌었다: 막혔다고 보여 준다
+      d.limit = TL.bgmEdgeHit(d.kind, d.b, dt);   // 곡 시작·끝 너머로 끌었다: 막혔다고 보여 준다
       if (d.kind === 'move') live = { ...live, at: Math.min(TL.bgmSnap(live.at, lenOf(d.b), total(), snapTargets(d.id), cw / S.view.spc), Math.max(0, total() - lenOf(d.b))) };
       d.live = live;
     }

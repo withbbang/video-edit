@@ -255,11 +255,23 @@ def test_bgm_snap():
 
 def test_bgm_edge_hit():
     b = "{at:5,in:2,out:10,dur:10}"                       # 앞은 잘렸고 뒤는 곡 끝
-    assert run(f"out = T.bgmEdgeHit('end', {b}, 0.5);") is True
-    assert run(f"out = T.bgmEdgeHit('end', {b}, -0.5);") is False   # 안쪽으로 줄이기는 됨
-    assert run(f"out = T.bgmEdgeHit('start', {b}, -1);") is False   # 앞은 곡 시작까지 2초 남음
-    assert run(f"out = T.bgmEdgeHit('start', {b}, -3);") is True
-    assert run(f"out = T.bgmEdgeHit('move', {b}, 99);") is False
+    assert run(f"out = T.bgmEdgeHit('end', {b}, 0.5);") == 'end'
+    assert run(f"out = T.bgmEdgeHit('end', {b}, -0.5);") is None   # 안쪽으로 줄이기는 됨
+    assert run(f"out = T.bgmEdgeHit('start', {b}, -1);") is None   # 앞은 곡 시작까지 2초 남음
+    assert run(f"out = T.bgmEdgeHit('start', {b}, -3);") == 'start'
+    assert run(f"out = T.bgmEdgeHit('move', {b}, 99);") is None
+    assert run(f"out = T.bgmEdgeHit('slip', {b}, 1);") is None       # 앞으로 2초까지 밀 수 있음
+    assert run(f"out = T.bgmEdgeHit('slip', {b}, 3);") == 'start'
+    assert run(f"out = T.bgmEdgeHit('slip', {b}, -0.1);") == 'end'   # 뒤는 이미 곡 끝
+
+
+def test_bgm_slip():
+    r = run("out = T.bgmDrag('slip', {at:5,in:2,out:6,dur:10}, 1, 30);")
+    assert (r["at"], r["in"], r["out"]) == (5, 1, 5)                  # 자리·길이 그대로, 곡 구간만 앞으로
+    r = run("out = T.bgmDrag('slip', {at:5,in:2,out:6,dur:10}, 9, 30);")
+    assert (r["in"], r["out"]) == (0, 4)                              # 곡 시작에서 멈춤
+    r = run("out = T.bgmDrag('slip', {at:5,in:2,out:6,dur:10}, -9, 30);")
+    assert (r["in"], r["out"]) == (6, 10)                             # 곡 끝에서 멈춤
 
 
 def test_bgm_drag():

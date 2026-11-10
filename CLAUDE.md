@@ -177,7 +177,7 @@ tests/                pytest (requirements-dev.txt)
   전체 음량 `vol`(0~200%, 기본 100) 은 음원 탭 고른 줄의 슬라이더 — 렌더·미리보기 gain 은 `bgm.eff_gain`(불러올 때 gain + 20·log10(vol/100), 0% 는 무음).
   고른 파일은 작업 폴더 `bgm/<sha16>.m4a`(AAC 48kHz 로 다시 인코딩), 보관함은 `<데이터>/bgm_presets/`(presets.json + `<sha16>.m4a`, 파일·이름·길이·gain 만).
   저장 때 `out/<이름>.bgm.json` → `--bgm`. 화면은 `음원` 탭(이미지·영상 탭과 같은 구성, 소리만 있는 파일에도)과 이미지 줄 아래 같은 패널의 음원 줄(`bgl` in app.js):
-  막대 = `TL.bgmSpan`(원본 축), 음량 선 = `TL.bgmPolyline`(svg, 잘린 곳 위 평평), 끌기 `TL.bgmDrag`/`bgmSnap`, 점은 결과 시간 `TL.xToOutT` 로 계산해
+  막대 = `TL.bgmSpan`(원본 축), 음량 선 = `TL.bgmPolyline`(svg, 잘린 곳 위 평평), 끌기 `TL.bgmDrag`(move·start·end·slip = Alt 끌기로 곡 구간만 밀기)/`bgmSnap`, 곡 너머 막힘 표시 `TL.bgmEdgeHit`, 점은 결과 시간 `TL.xToOutT` 로 계산해
   손을 뗄 때 `update_bgm` 한 번. 음원 지우기는 탭 `제거`·타임라인 머리 줄 `제거`(고른 음원이 끼워 넣은 영상보다 먼저)·점 안 고른 Delete.
   넣는 자리가 결과 끝이면 곡 끝을 결과 끝에 맞추고(`Api._bgm_place`), 끌어 옮기면 곡 끝이 결과 끝에서 멈춘다 (넘겨 잘리지 않게). 미리보기는 `app/ui/bgmmix.js` 의 `BgmMixer` 를 이어 붙인 재생기(`player.mse`, 결과 시간)에 붙여 Web Audio 로 섞는다
   (예전 방식(fallback) 재생에선 안 섞임).
