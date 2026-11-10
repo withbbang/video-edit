@@ -1861,8 +1861,12 @@ const bgl = (() => {
     autoWrap.hidden = true;
     if (!all.length) return { names: [], lanes: [] };
     const v = S.view, w = g.w;
-    const laneOf = TL.bgmLanes(all);
-    const n = Math.max(...all.map((b) => laneOf[b.id])) + 1;
+    // 결과 끝 뒤에서 시작하는 음원(막대가 안 보임)은 줄을 차지하지 않는다 — 빈 줄만 생기지 않게
+    const shown = all.filter((b) => TL.bgmSpan(b, m));
+    if (!shown.length) { for (const b of all) barEl(b.id).bar.hidden = true; return { names: [], lanes: [] }; }
+    const laneOf = TL.bgmLanes(shown);
+    for (const b of all) if (!(b.id in laneOf)) laneOf[b.id] = 0;   // 안 보이는 막대는 첫 줄에 숨겨 둔다
+    const n = Math.max(...shown.map((b) => laneOf[b.id])) + 1;
     const Ls = Array.from({ length: n }, (_, k) => lane(k));
     const kids = Ls.map(() => []);
     const has = all.some((b) => b.id === S.bgmSel);
