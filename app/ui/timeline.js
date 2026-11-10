@@ -288,11 +288,18 @@ function bgmDrag(kind, b, dt, total) {
   return { at: b.at, in: b.in, out: clamp(b.out + dt, b.in + BGM_MIN_LEN, b.dur) };
 }
 
+// 끝 손잡이를 곡의 시작(start)·끝(end) 너머로 끌었나 — 더 붙일 소리가 없어 막혔다는 표시용
+function bgmEdgeHit(kind, b, dt) {
+  if (kind === 'start') return b.in + dt < -1e-6;
+  if (kind === 'end') return b.out + dt > b.dur + 1e-6;
+  return false;
+}
+
 // 화면 x → 원본 초 → 결과 초 (잘린 구간 안이면 그 구간 끝의 결과 시간)
 const xToOutT = (x, map, v, cw) => map.toOut(xToT(v, x, cw));
 
 const TL = { fitView, clampView, tToX, xToT, zoomAt, followT, playFollow, playSpc, cells, sheetCell, waveMax, spcToSlider, sliderToSpc,
   ovRect, ovMove, ovResizeEdge, barDrag, lanesDrag, clipBands, snapAt, dropTarget, isDrag, tlDataKey,
-  dbAt, dbAtSorted, dbToY, yToDb, bgmLanes, bgmSpan, bgmPolyline, bgmSnap, bgmDrag, xToOutT };
+  dbAt, dbAtSorted, dbToY, yToDb, bgmLanes, bgmSpan, bgmPolyline, bgmSnap, bgmDrag, bgmEdgeHit, xToOutT };
 if (typeof window !== 'undefined') window.TL = TL;
 if (typeof module !== 'undefined') module.exports = TL;

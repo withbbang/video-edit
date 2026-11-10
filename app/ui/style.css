@@ -516,6 +516,17 @@ body.ns-drag, body.ns-drag * { cursor: ns-resize !important; }   /* 끄는 동�
 .bg-auto[hidden] { display: none; }
 .bg-auto .btn { min-height: 0; padding: 0 6px; font-size: 10px; line-height: 15px; background: var(--bg); }
 .bg-auto { display: inline-flex; gap: 4px; }
+/* 끝 손잡이: 잘라 낸 쪽은 점선(더 늘릴 수 있음), 곡을 그대로 쓰는 쪽은 실선. 곡 너머로 끌면 빨갛게 */
+.bg-bar.trim-l { border-left-style: dashed; }
+.bg-bar.trim-r { border-right-style: dashed; }
+.bg-bar.limit-l { border-left-style: solid; border-left-color: #e5484d; animation: bg-limit .3s ease-out; }
+.bg-bar.limit-r { border-right-style: solid; border-right-color: #e5484d; animation: bg-limit .3s ease-out; }
+@keyframes bg-limit { 0%, 100% { translate: 0; } 30% { translate: -2px; } 60% { translate: 2px; } }
+@media (prefers-reduced-motion: reduce) { .bg-bar.limit-l, .bg-bar.limit-r { animation: none; } }
+.bg-limit-tip { position: absolute; top: 3px; z-index: 4; transform: translateX(calc(-100% - 6px)); pointer-events: none;
+  padding: 1px 6px; border-radius: 4px; font-size: 10px; line-height: 15px; white-space: nowrap; color: #fff; background: #e5484d; }
+.bg-limit-tip.at-l { transform: translateX(6px); }
+.bg-limit-tip[hidden] { display: none; }
 .bg-vol { display: flex; align-items: center; gap: 8px; padding: 2px 8px 6px 8px; background: #4a7dff12; }
 .bg-vol input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent, #4a7dff); }
 .bg-vol-lbl { font-size: 12px; color: var(--muted, #6b7280); flex-shrink: 0; }

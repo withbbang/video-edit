@@ -1679,7 +1679,8 @@ const bgl = (() => {
   // 비활성 버튼은 마우스를 받지 않으므로 말풍선은 감싼 span 에 단다
   const autoWrap = h('span', { class: 'bg-auto', hidden: true },
     h('span', { class: 'tipw', title: BGM_TIP_AUTO }, autoBtn), h('span', { class: 'tipw', title: BGM_TIP_FLAT }, flatBtn));
-  autoWrap.addEventListener('pointerdown', (e) => e.stopPropagation());   // 줄의 구간 고르기·이동으로 넘기지 않는다
+  autoWrap.addEventListener('pointerdown', (e) => e.stopPropagation());
+  const limitTip = h('div', { class: 'bg-limit-tip', hidden: true });   // 끝 손잡이를 곡 너머로 끌 때 말풍선   // 줄의 구간 고르기·이동으로 넘기지 않는다
   const isFlat = (b) => b.touched && (b.points || []).every(([, db]) => Math.abs(db) < 1e-9);
   let busy = false, naming = false, presets = null, loading = false, saveErr = null;
   let renaming = null;       // 이름 바꾸는 중 {kind: 'bgm' | 'preset', id, bad, value, err}
@@ -1869,6 +1870,7 @@ const bgl = (() => {
     const all = m ? list().map(cur) : [];
     for (const id of [...bars.keys()]) if (!all.some((b) => b.id === id)) { bars.get(id).bar.remove(); bars.delete(id); }
     autoWrap.hidden = true;
+    limitTip.hidden = true;
     if (!all.length) return { names: [], lanes: [] };
     const v = S.view, w = g.w;
     // 결과 끝 뒤에서 시작하는 음원(막대가 안 보임)은 줄을 차지하지 않는다 — 빈 줄만 생기지 않게
@@ -1894,6 +1896,19 @@ const bgl = (() => {
       B.bar.classList.toggle('sel', sel);
       B.bar.classList.toggle('over', sp.cut);   // 결과 끝을 넘는다: 끝을 흐리게
       B.bar.classList.toggle('dragging', live === b.id);
+      // 잘라 낸 쪽(더 늘릴 수 있음)은 점선 끝, 곡 시작·끝 그대로인 쪽은 굵은 실선
+      B.bar.classList.toggle('trim-l', b.in > 1e-3);
+      B.bar.classList.toggle('trim-r', b.out < b.dur - 1e-3);
+      const lim = live === b.id ? drag.limit : null;
+      B.bar.classList.toggle('limit-l', lim === 'start');
+      B.bar.classList.toggle('limit-r', lim === 'end');
+      if (lim) {
+        if (limitTip.parentNode !== L.lane) L.lane.append(limitTip);
+        limitTip.textContent = lim === 'start' ? '곡의 시작이에요' : '곡의 끝이에요';
+        limitTip.classList.toggle('at-l', lim === 'start');
+        limitTip.style.left = `${lim === 'start' ? Math.max(0, x0) : Math.min(L.lane.clientWidth, x1)}px`;
+        limitTip.hidden = false;
+      }
       if (B.bar.title !== b.name) B.bar.title = b.name;
       const pts = TL.bgmPolyline(b, b.points, m, v, g.cw, CH, w);
       if (pts.length) {
@@ -2067,6 +2082,7 @@ const bgl = (() => {
     } else {
       const dt = TL.xToOutT(x, d.m, S.view, cw) - TL.xToOutT(d.x0 - d.lx, d.m, S.view, cw);
       let live = TL.bgmDrag(d.kind, d.b, dt, total());
+      d.limit = TL.bgmEdgeHit(d.kind, d.b, dt) ? d.kind : null;   // 곡 시작·끝 너머로 끌었다: 막혔다고 보여 준다
       if (d.kind === 'move') live = { ...live, at: Math.min(TL.bgmSnap(live.at, lenOf(d.b), total(), snapTargets(d.id), cw / S.view.spc), Math.max(0, total() - lenOf(d.b))) };
       d.live = live;
     }

@@ -253,6 +253,15 @@ def test_bgm_snap():
     assert run("out = T.bgmSnap(0.5, 4, 20, [], 10, 2);") == 0.5                 # thr 보다 멀면 그대로
 
 
+def test_bgm_edge_hit():
+    b = "{at:5,in:2,out:10,dur:10}"                       # 앞은 잘렸고 뒤는 곡 끝
+    assert run(f"out = T.bgmEdgeHit('end', {b}, 0.5);") is True
+    assert run(f"out = T.bgmEdgeHit('end', {b}, -0.5);") is False   # 안쪽으로 줄이기는 됨
+    assert run(f"out = T.bgmEdgeHit('start', {b}, -1);") is False   # 앞은 곡 시작까지 2초 남음
+    assert run(f"out = T.bgmEdgeHit('start', {b}, -3);") is True
+    assert run(f"out = T.bgmEdgeHit('move', {b}, 99);") is False
+
+
 def test_bgm_drag():
     b = "{at:5,in:2,out:6,dur:10}"
     assert run(f"out = T.bgmDrag('end', {b}, 9, 30);")["out"] == 10
