@@ -108,7 +108,8 @@ def ffmpeg_with_progress(cmd: list, total_sec: float, stage: str,
     progress(stage, hi)
 
 
-def run(cmd: list, cwd: Path | None = None, quiet: bool = False) -> subprocess.CompletedProcess:
+def run(cmd: list, cwd: Path | None = None, quiet: bool = False,
+        binary: bool = False) -> subprocess.CompletedProcess:
     if not quiet:
         shown = " ".join(str(c) for c in cmd)
         log("$ " + (shown if len(shown) < 400 else shown[:400] + " …"))
@@ -116,11 +117,12 @@ def run(cmd: list, cwd: Path | None = None, quiet: bool = False) -> subprocess.C
         # 윈도우는 기본이 cp949 라 ffprobe 의 UTF-8(한글 파일명 등)을 못 읽고 stdout 이 None 이 된다
         return subprocess.run([str(c) for c in cmd], cwd=cwd, check=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              text=True, encoding="utf-8", errors="replace")
+                              **({} if binary else dict(text=True, encoding="utf-8", errors="replace")))
     except subprocess.CalledProcessError as e:
         # 캡처한 stderr 를 버리면 "moov atom not found" 같은 원인이 안 보인다
+        err = e.stderr.decode("utf-8", "replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
         log(f"명령 실패 (exit {e.returncode}): {Path(str(cmd[0])).name}")
-        for line in (e.stderr or "").strip().splitlines()[-15:]:
+        for line in err.strip().splitlines()[-15:]:
             log("  " + line)
         raise
 
@@ -1619,6 +1621,99 @@ def cut_audio(clean_wav: Path, out_wav: Path, keeps: list[tuple[int, int]], fps:
     return total, sr
 
 
+BGM_FLOOR_DB = -40.0   # 이 아래는 무음(배율 0)으로 친다
+
+
+def bgm_db_at(points: list[list[float]], t: "np.ndarray") -> "np.ndarray":
+    """곡 초 t → dB. 점 사이는 직선, 첫 점 앞·마지막 점 뒤는 그 점 값 그대로. 점이 없으면 0."""
+    import numpy as np
+    t = np.asarray(t, dtype=np.float64)
+    if not points:
+        return np.zeros_like(t)
+    pts = sorted((float(a), float(b)) for a, b in points)
+    return np.interp(t, [a for a, _ in pts], [b for _, b in pts])
+
+
+def bgm_gain(points: list[list[float]], gain_db: float, t: "np.ndarray") -> "np.ndarray":
+    """곡 초 t → 곱할 배율. 점 dB 가 BGM_FLOOR_DB 이하인 곳은 0."""
+    import numpy as np
+    db = bgm_db_at(points, t)
+    return np.where(db <= BGM_FLOOR_DB, 0.0, 10.0 ** ((db + float(gain_db)) / 20.0))
+
+
+def soft_limit(x: "np.ndarray") -> "np.ndarray":
+    """int16 범위 float. 0.9*FS 까지는 그대로, 넘는 부분은 tanh 로 부드럽게 눌러 32767 을 못 넘게 한다."""
+    import numpy as np
+    FS = 32767.0
+    knee = 0.9 * FS
+    a = np.abs(x)
+    over = knee + 0.1 * FS * np.tanh((a - knee) / (0.1 * FS))
+    return np.sign(x) * np.where(a <= knee, a, over)
+
+
+def load_bgms(path: Path | None) -> list[dict]:
+    """--bgm json [{path, at, in, out, gain, points}]. at: 결과 영상 초, in/out: 곡 안 초, gain: dB,
+    points: [[곡 초, dB], …]. 형식이 틀리거나 곡 파일이 없는 항목은 로그만 남기고 뺀다."""
+    if not path:
+        return []
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log(f"BGM 목록을 읽지 못해 BGM 없이 렌더합니다: {e}")
+        return []
+
+    def num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    out = []
+    for o in data if isinstance(data, list) else []:
+        pts = o.get("points") if isinstance(o, dict) else None
+        ok = (isinstance(o, dict) and isinstance(o.get("path"), str)
+              and all(num(o.get(k)) for k in ("at", "in", "out", "gain"))
+              and o["out"] > o["in"] and o["in"] >= 0
+              and isinstance(pts, list)
+              and all(isinstance(q, (list, tuple)) and len(q) == 2 and num(q[0]) and num(q[1]) for q in pts))
+        if ok and Path(o["path"]).is_file():
+            out.append({k: o[k] for k in ("path", "at", "in", "out", "gain", "points")})
+        else:
+            log(f"BGM 항목을 건너뜀: {o!r}")
+    return out
+
+
+def mix_bgm(wav: Path, bgms: list[dict]) -> int:
+    """cut.wav(16비트 PCM)를 제자리에서 고쳐 곡을 더한다. 곡은 ffmpeg 로 wav 와 같은 샘플레이트·채널로 받아
+    곡 초별 배율을 곱해 결과 샘플 round(at*sr) 부터 더한다. wav 길이 밖은 버리고, 더한 구간만 soft_limit.
+    섞은 곡 수를 돌려준다."""
+    import numpy as np
+    with wave.open(str(wav), "rb") as wf:
+        sr, ch, n = wf.getframerate(), wf.getnchannels(), wf.getnframes()
+    if n == 0:
+        return 0
+    # wave 가 쓴 머리는 44바이트지만 파일 크기로 소리 시작 위치를 구해 머리 길이에 기대지 않는다
+    offset = Path(wav).stat().st_size - n * ch * 2
+    mm = np.memmap(wav, dtype=np.int16, mode="r+", offset=offset, shape=(n, ch))
+    mixed = 0
+    try:
+        for b in bgms:
+            r = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{b['in']:.6f}",
+                     "-t", f"{b['out'] - b['in']:.6f}", "-i", b["path"], "-vn",
+                     "-ar", str(sr), "-ac", str(ch), "-f", "s16le", "-"], quiet=True, binary=True)
+            song = np.frombuffer(r.stdout, dtype=np.int16)
+            song = song[:len(song) // ch * ch].reshape(-1, ch)
+            start = int(round(b["at"] * sr))
+            a, e = max(start, 0), min(start + len(song), n)
+            if e <= a:
+                continue
+            song = song[a - start:e - start]
+            t = b["in"] + (np.arange(a - start, e - start) / sr)
+            g = bgm_gain(b.get("points") or [], b.get("gain", 0.0), t)[:, None]
+            mm[a:e] = np.round(soft_limit(mm[a:e].astype(np.float64) + song * g)).astype(np.int16)
+            mixed += 1
+        mm.flush()
+    finally:
+        del mm
+    return mixed
+
+
 def sum_tree(terms: list[str]) -> str:
     """ffmpeg 식 파서는 평평한 a+b+c… 를 100항까지만 받는다 → 괄호로 묶어 깊이를 log2(n)로"""
     if len(terms) == 1:
@@ -2121,7 +2216,8 @@ def render_audio_args(args: argparse.Namespace) -> tuple[str, bool, int | None]:
 
 def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: list[dict],
                  final_dur: float, modes: dict, args: argparse.Namespace, encoder: str,
-                 elapsed: float, pieces: list[dict] | None = None) -> None:
+                 elapsed: float, pieces: list[dict] | None = None,
+                 bgms: list[dict] | None = None) -> None:
     """pieces (이어 붙이기 모드): [{name, duration(원래 파일 길이), in, out, start(이어 붙인 시작)}] → "조각" 표"""
     from collections import Counter
     by_word = Counter(normalize(w) for c in cuts for w in c.word.split(" + ") if w not in ("(무음)", UNHEARD))
@@ -2149,6 +2245,10 @@ def write_report(path: Path, src: Path, info: dict, cuts: list[Cut], skipped: li
         for i, p in enumerate(pieces, 1):
             out.append(f"| {i} | {p['name']} | {fmt_clock(p['duration'])} | {fmt_clock(p['in'])}~{fmt_clock(p['out'])} "
                        f"| {fmt_clock(p['start'])} |")
+    if bgms:
+        out += ["", "## BGM", ""]
+        for b in bgms:
+            out.append(f"- {Path(b['path']).name} · 결과 {b['at']:.1f}초부터 · {b['out'] - b['in']:.1f}초")
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
@@ -2224,6 +2324,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="--burn-subs 가 쓸 글꼴 폴더 (기본: 시스템 글꼴)")
     ap.add_argument("--overlays", type=Path, default=None,
                     help="(앱 전용) 겹쳐 새길 이미지 목록 json [{path, x, y, w, start, end}] — 위치는 화면 비율, 시간은 원본 초")
+    ap.add_argument("--bgm", type=Path, default=None,
+                    help="(앱 전용) 컷 뒤 소리에 섞을 음원 목록 json [{path, at, in, out, gain, points}] — "
+                         "at 는 결과 영상 초, in/out 은 곡 안 초, gain 은 dB, points 는 [[곡 초, dB], …]")
     ap.add_argument("--crf", type=int, default=18, help="--hw off 일 때 화질")
     ap.add_argument("--vbitrate", default="auto",
                     help="--hw on 일 때 비트레이트 (기본 auto: 해상도·프레임 수에 맞춤, 예: 20M)")
@@ -2770,6 +2873,9 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
         render_wav = prepare_render_audio(src, work, info, r_denoise, r_loud, args.force)
     cut_wav = work / "cut.wav"
     n_samples, sr = cut_audio(render_wav, cut_wav, keeps, fps)
+    bgms = load_bgms(args.bgm)
+    if bgms:
+        log(f"BGM {mix_bgm(cut_wav, bgms)}곡을 섞음")
     final_dur = n_samples / sr
     encoder = "aac"
     if info["has_video"]:
@@ -2804,7 +2910,7 @@ def process(args: argparse.Namespace, src: Path, stem: str, out_dir: Path, work:
                 "in": float(sp.f_in / fps), "out": float(sp.f_out / fps), "start": p["start"]}
                for sp, p in zip(sq.spans, sq.tr["pieces"])] if sq else None)
     write_report(out_dir / f"{stem}.report.md", src, info, cuts, skipped, final_dur, modes, args,
-                 encoder, time.time() - t_start, pieces)
+                 encoder, time.time() - t_start, pieces, bgms)
     log("완료")
     log(f"  영상: {out_media}")
     log(f"  자막: {srt_path}")
