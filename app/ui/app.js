@@ -59,6 +59,8 @@ const S = {
   ovSel: null, ovTab: 'used',   // 이미지 탭 안 'used'(사용 중) | 'saved'(보관함)
   // 영상 끼워 넣기: clips 는 list_clips 결과(clipsFor 작업 것), clipSel 은 고른 영상, clipTab 은 영상 탭 안 'used' | 'saved'
   clips: null, clipsFor: null, clipSel: null, clipTab: 'used',
+  // 음원(BGM): 고른 음원 id (타임라인 음원 줄·음원 탭에서 함께 강조), bgmTab 은 음원 탭 안 'used' | 'saved'
+  bgmSel: null, bgmTab: 'used',
 };
 
 // ---- 작은 도우미 ---------------------------------------------------------
@@ -129,7 +131,7 @@ function select(id) {
   S.caps = null; S.capsFor = null; S.dropped = false; S.lineSel = null; S.editing = null; S.scroll = {};
   S.findKeys = new Set(); S.findCount = 0; findBar.find.value = ''; findBar.repl.value = '';
   S.range = null; S.rangeErr = false; S.mark = null; S.rangeEnd = 'end'; tlDrag = null;
-  S.view = null; S.thumbs = null; S.wave = null; S.tlDataFor = null; zoomTl.reset(); ovl.reset(); clp.reset();
+  S.view = null; S.thumbs = null; S.wave = null; S.tlDataFor = null; zoomTl.reset(); ovl.reset(); clp.reset(); bgl.reset();
   S.hist ={ undo: false, redo: false };
   player.detach();
   if (id) {
@@ -368,6 +370,8 @@ function renderResult(force) {
   ovl.renderTools();
   clp.renderTools();
   clp.drawBar();
+  bgl.renderTools();
+  bgl.syncMixer();   // 미리보기가 바뀌면 새 섞개, 음원·길이가 바뀌었으면 다시 예약
 }
 
 function resultParts(j, r) {
@@ -1060,16 +1064,19 @@ const ovl = (() => {
     return L;
   }
   // paintBg(canvas, 높이): 줄 바탕에 잘린 곳·구간을 그린다 (zoomTl 이 화면·소리 줄과 같은 그리기로 넘겨준다)
-  function paintRows(g, paintBg) {
+  // more = 이미지 줄 아래 같은 패널(높이·스크롤)에 붙일 음원 줄 {names, lanes} (bgl.paintLanes)
+  function paintRows(g, paintBg, more) {
     const all = hasPicture() ? list() : [];
+    const extra = more || { names: [], lanes: [] };
     for (const id of lanes.keys()) if (!all.some((o) => o.id === id)) lanes.delete(id);
-    names.hidden = rows.hidden = !g || !all.length;
-    grip.hidden = names.hidden || all.length < 2;   // 한 줄이면 바꿀 높이가 없다
+    names.hidden = rows.hidden = !g || !(all.length + extra.lanes.length);
+    grip.hidden = names.hidden || all.length + extra.lanes.length < 2;   // 한 줄이면 바꿀 높이가 없다
     if (names.hidden) return;
     const Ls = all.map(lane);
-    if (Ls.some((L, i) => rows.children[i] !== L.lane) || rows.children.length !== Ls.length) {
-      names.replaceChildren(...Ls.map((L) => L.name));
-      rows.replaceChildren(...Ls.map((L) => L.lane));
+    const laneEls = [...Ls.map((L) => L.lane), ...extra.lanes];
+    if (laneEls.some((el, i) => rows.children[i] !== el) || rows.children.length !== laneEls.length) {
+      names.replaceChildren(...Ls.map((L) => L.name), ...extra.names);
+      rows.replaceChildren(...laneEls);
     }
     all.forEach((raw, i) => {
       const o = cur(raw), L = Ls[i];
@@ -1633,6 +1640,595 @@ const clp = (() => {
     reset() { S.clips = null; S.clipsFor = null; S.clipSel = null; naming = false; renaming = null; presets = null; saveErr = null; clipErr = null; field = null; } };
 })();
 
+// ---- 음원(BGM) 넣기 -------------------------------------------------------
+// 항목 {id, name, url, at, in, out, dur, gain, points, touched}: at 은 결과 초, in/out·점은 곡 초. points 는 서버가 풀어 준 값
+// (손대지 않았으면 말소리에 맞춘 자동 곡선). 음원 탭 (잘린 곳·자막·이미지·영상 옆): 사용 중·보관함, 불러오기, 고른 음원 이름 변경·보관·제거,
+// 보관함 삽입. 확대 타임라인: 이미지 줄 아래(같은 패널·높이 손잡이·스크롤)에 겹치지 않게 나눈 음원 줄. 막대는 원본 축에서
+// toOrig(at) ~ toOrig(끝)이고 음량 선은 잘린 곳 위에서 평평하게 지난다. 고른 막대만 점·`음원 자동 조절`.
+// 끌기(4px 넘게 = 옮기기, 양 끝 6px = 자르기)·점 편집은 결과 시간으로 계산하고 손을 뗄 때 한 번만 서버에 알린다.
+// 미리보기: 이어 붙인 재생기(결과 시간)에 BgmMixer 로 섞는다.
+const BGM_TIP_AUTO = '말소리가 나오는 구간은 BGM을 낮추고, 말이 없는 구간은 다시 올리는 음량 선을 새로 깔아요. 손으로 고친 점은 지워져요.';
+const bgl = (() => {
+  const LANE_H = 36, PAD = 2, CH = LANE_H - 2 * PAD;   // 줄 높이(style.css .bg-lane), 막대 위아래 여백, 곡선 높이
+  const BAR_END = 6;   // 막대 양 끝 이만큼(px)은 자르기 손잡이
+  const NEAR = 6;      // 선에서 이만큼(px) 안을 누르면 점 추가
+  const DBL_MS = 400;  // 같은 점을 이 안에 두 번 누르면 지우기 (누를 때 다시 그려 dblclick 이 안 온다)
+  const PTS_MAX = 500; // 서버가 받는 점 수
+  const SVG = 'http://www.w3.org/2000/svg';
+  const sv = (tag, attrs) => {
+    const e = document.createElementNS(SVG, tag);
+    for (const [k, v] of Object.entries(attrs || {})) if (v !== null && v !== undefined) e.setAttribute(k, v);
+    return e;
+  };
+  const panel = h('div', { class: 'ov-panel bg-panel' });   // 음원 탭 내용 (이미지 탭과 같은 모양)
+  const tabText = h('span', {}, '음원');                     // 음원 탭 이름 (개수는 탭을 다시 그리지 않고 바꾼다)
+  const lanes = [];          // 줄마다 {name, lane, cuts, svg}
+  const bars = new Map();    // id → {bar, label}
+  const autoBtn = h('button', { type: 'button', class: 'btn', onclick: () => { if (S.bgmSel) send('reset_bgm', S.bgmSel); } }, '음원 자동 조절');
+  // 비활성 버튼은 마우스를 받지 않으므로 말풍선은 감싼 span 에 단다
+  const autoWrap = h('span', { class: 'tipw bg-auto', title: BGM_TIP_AUTO, hidden: true }, autoBtn);
+  autoWrap.addEventListener('pointerdown', (e) => e.stopPropagation());   // 줄의 구간 고르기·이동으로 넘기지 않는다
+  let busy = false, naming = false, presets = null, loading = false, saveErr = null;
+  let renaming = null;       // 이름 바꾸는 중 {kind: 'bgm' | 'preset', id, bad, value, err}
+  let itemErr = null;        // 넣은 음원 이름 바꾸기가 거절됨 {id, text}
+  let field = null;          // 열린 이름 칸 (renameField)
+  let drag = null;           // 끌기 {id, kind: 'move'|'start'|'end'|'pt', b, x0, y0, lx, ly, g, m, on, live, i, pts, added}
+  let held = null;           // 손을 뗀 뒤 서버 답을 기다리는 동안 보여 줄 값 {id, live} (막대가 옛 자리로 튀지 않게)
+  let ptSel = null;          // 고른 점 {id, i} (Delete·Backspace 로 지움)
+  let lastPress = null;      // 점 두 번 누르기 {id, i, t}
+  let nearId = null;         // 마우스가 선 위에 있는 (고른) 음원
+  let shownSel = null;       // 줄 스크롤로 보이게 맞춘 고른 음원
+  let mixer = null, mixKey = null, mixSig = null;
+  let mapKeeps = null, mapVal = null;
+
+  const result = () => (S.resultFor === S.sel ? S.result : null);
+  const list = () => { const r = result(); return (r && r.bgms) || []; };
+  const editable = () => { const j = selected(); return !!j && HAS_RESULT.has(j.status); };
+  const lenOf = (b) => b.out - b.in;
+  // 원본↔결과 시간 (get_result 의 keeps — 렌더와 같은 남길 구간)
+  function map() {
+    const r = result();
+    if (!r) return null;
+    if (mapKeeps !== r.keeps || !mapVal) { mapKeeps = r.keeps; mapVal = timeMap(r.keeps || []); }
+    return mapVal;
+  }
+  const total = () => { const r = result(), m = map(); return r && r.out_total != null ? r.out_total : (m ? m.total : 0); };
+  // 점은 곡 초 순서 (화면의 점 번호와 편집이 같은 순서를 쓴다)
+  const ptsOf = (b) => (b.points || []).map(([t, db]) => [+t, +db]).sort((p, q) => p[0] - q[0]);
+  // 끄는 중·답을 기다리는 중이면 그 값을 덧씌운 항목
+  function cur(b) {
+    const live = drag && drag.id === b.id && drag.live ? drag.live : held && held.id === b.id ? held.live : null;
+    return live ? { ...b, ...live } : b;
+  }
+  // 재생 위치 (결과 초)
+  function outNow() {
+    const m = map();
+    return m && player.ready() ? m.toOut(player.time()) : 0;
+  }
+
+  async function send(name, ...args) {
+    const j = selected();
+    if (!j || busy) { held = null; zoomTl.draw(); return null; }
+    busy = true;
+    renderTools();
+    try {
+      const res = await call(name, j.id, ...args);
+      if (res && S.sel === j.id && S.resultFor === j.id && S.result) {
+        S.result.bgms = res.bgms;
+        if (S.bgmSel && !res.bgms.some((b) => b.id === S.bgmSel)) S.bgmSel = null;
+        noteHist(j.id, res);
+      }
+      return res;
+    } finally {
+      busy = false;
+      held = null;
+      const b = ptSel && list().find((x) => x.id === ptSel.id);
+      if (ptSel && (!b || ptSel.i >= ptsOf(b).length)) ptSel = null;
+      syncMixer();
+      refresh();
+    }
+  }
+  function refresh() {
+    renderTools();
+    zoomTl.draw();
+  }
+  function select(id) {
+    if (S.bgmSel === id) return;
+    if (renaming && renaming.kind === 'bgm' && field) field.finish(true);   // 칸 밖을 누르면 반영 (다시 그리기 전에)
+    S.bgmSel = id; ptSel = null; naming = false; saveErr = null; renaming = null; itemErr = null;
+    refresh();
+  }
+  // 그 음원이 지금 안 들리는 자리면 시작 프레임 가운데로
+  function seekInto(b) {
+    const m = map(), t = outNow();
+    if (!m || (b.at <= t && t < b.at + lenOf(b))) return;
+    const o = m.toOrig(Math.min(b.at + 0.5 / fps(), total()));
+    player.seek(o);
+    ensureVisible(o);
+  }
+  // 타임라인에서 고르면 도구가 있는 음원 탭(사용 중)으로
+  function showTab() {
+    if (S.bgmTab !== 'used') { S.bgmTab = 'used'; renderTools(); }
+    if (S.tab !== 'bgm') { S.tab = 'bgm'; renderResult(); }
+  }
+
+  // ---- 미리보기 섞기: 이어 붙인 재생기(결과 시간)가 열릴 때마다 새로, 음원·길이가 바뀔 때만 다시 예약 ----
+  function syncMixer() {
+    const r = result();
+    const key = r && player.mode === 'mse' && window.BgmMixer ? player.key : null;
+    if (key !== mixKey) {
+      if (mixer) mixer.dispose();
+      mixer = key ? new BgmMixer(player.mse) : null;
+      mixKey = key; mixSig = null;
+    }
+    if (!mixer) return;
+    const items = list().map(cur), tot = total();
+    const sig = JSON.stringify([tot, items.map((b) => [b.id, b.url, b.at, b.in, b.out, b.gain, b.points])]);
+    if (sig === mixSig) return;
+    mixSig = sig;
+    mixer.set(items, tot);
+  }
+
+  // ---- 타임라인 음원 줄 ----
+  function lane(k) {
+    if (!lanes[k]) {
+      const cuts = h('canvas', { class: 'ov-cuts' });   // 잘린 곳 빗금 (다른 줄과 같게)
+      const svg = sv('svg', { class: 'bg-svg', 'aria-hidden': 'true' });
+      const ln = h('div', { class: 'bg-lane' }, cuts, svg);
+      rangePointer(ln, (x, rect) => { const g = zoomTl.geom(); return g && S.view ? TL.xToT(S.view, x - rect.left, g.cw) : 0; }, () => null);
+      lanes[k] = { name: h('span', { class: 'zt-name n-bgm' }, '음원'), lane: ln, cuts, svg };
+    }
+    return lanes[k];
+  }
+  function barEl(id) {
+    let B = bars.get(id);
+    if (!B) {
+      const bar = h('div', { class: 'bg-bar', 'data-id': id });
+      bar.addEventListener('pointerdown', (e) => pressBar(e, id));
+      bar.addEventListener('pointermove', (e) => hoverBar(e, id));
+      bar.addEventListener('pointerleave', () => hoverBar(null, id));
+      B = { bar };
+      bars.set(id, B);
+    }
+    return B;
+  }
+  // 누른 곳이 고른 막대의 음량 선 위인가 (줄 안 x, 곡선 안 y)
+  function nearLine(b, x, y, g, m) {
+    const r = TL.xToOutT(x, m, S.view, g.cw);
+    if (r < b.at - 1e-6 || r > Math.min(b.at + lenOf(b), m.total) + 1e-6) return false;
+    return Math.abs(TL.dbToY(TL.dbAt(b.points, b.in + (r - b.at)), CH) - y) <= NEAR;
+  }
+  // 줄들을 그려 {names, lanes} 를 돌려준다 (이미지 줄 패널이 그 아래에 붙인다). paintBg(canvas, 높이) 는 잘린 곳 빗금
+  function paintLanes(g, paintBg) {
+    const m = g && S.view ? map() : null;
+    const all = m ? list().map(cur) : [];
+    for (const id of [...bars.keys()]) if (!all.some((b) => b.id === id)) { bars.get(id).bar.remove(); bars.delete(id); }
+    autoWrap.hidden = true;
+    if (!all.length) return { names: [], lanes: [] };
+    const v = S.view, w = g.w;
+    const laneOf = TL.bgmLanes(all);
+    const n = Math.max(...all.map((b) => laneOf[b.id])) + 1;
+    const Ls = Array.from({ length: n }, (_, k) => lane(k));
+    const kids = Ls.map(() => []);
+    const has = all.some((b) => b.id === S.bgmSel);
+    const live = drag && drag.on && drag.kind !== 'pt' ? drag.id : null;
+    // 고른 음원은 맨 뒤에 그려 다른 선 위에 오게
+    for (const b of [...all].sort((p, q) => (p.id === S.bgmSel) - (q.id === S.bgmSel))) {
+      const k = laneOf[b.id], L = Ls[k], B = barEl(b.id), sel = b.id === S.bgmSel;
+      if (B.bar.parentNode !== L.lane) L.lane.insertBefore(B.bar, L.svg);
+      const sp = TL.bgmSpan(b, m);
+      B.bar.hidden = !sp;
+      if (!sp) continue;   // 결과 끝 뒤에서 시작 — 탭에만 보인다
+      const x0 = TL.tToX(v, sp.o0, g.cw), x1 = TL.tToX(v, sp.o1, g.cw);
+      B.bar.style.left = `${x0}px`;
+      B.bar.style.width = `${Math.max(2, x1 - x0)}px`;
+      B.bar.classList.toggle('sel', sel);
+      B.bar.classList.toggle('over', sp.cut);   // 결과 끝을 넘는다: 끝을 흐리게
+      B.bar.classList.toggle('dragging', live === b.id);
+      if (B.bar.title !== b.name) B.bar.title = b.name;
+      const pts = TL.bgmPolyline(b, b.points, m, v, g.cw, CH, w);
+      if (pts.length) {
+        const s = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+        const on = sel ? ' on' : '';
+        kids[k].push(sv('polygon', { class: 'bg-area' + on, points: `${pts[0][0].toFixed(1)},${CH} ${s} ${pts[pts.length - 1][0].toFixed(1)},${CH}` }));
+        kids[k].push(sv('polyline', { class: 'bg-curve' + on + (sel && nearId === b.id ? ' near' : ''), points: s }));
+      }
+      if (x1 < 0 || x0 > w) continue;
+      // 이름: 잘린 곳 빗금 위에 보이게 svg 에 (막대 앞이 보기 밖이면 보이는 쪽으로, 막대 밖으로는 잘라서)
+      const a = Math.max(0, x0), z = Math.min(w, x1), cid = `bgc-${b.id}`;
+      const clip = sv('clipPath', { id: cid });
+      clip.append(sv('rect', { x: a.toFixed(1), y: -PAD, width: Math.max(0, z - a - 4).toFixed(1), height: LANE_H }));
+      const label = sv('text', { class: 'bg-label' + (sel ? ' on' : ''), x: (a + 6).toFixed(1), y: CH - 4, 'clip-path': `url(#${cid})` });
+      label.textContent = b.name;
+      kids[k].push(clip, label);
+      if (!sel) continue;
+      // 고른 막대: 0dB 기준선, 점, 음원 자동 조절
+      const y0 = TL.dbToY(0, CH).toFixed(1);
+      kids[k].push(sv('line', { class: 'bg-zero', x1: a, x2: z, y1: y0, y2: y0 }));
+      if (editable()) {
+        const end = Math.min(b.at + lenOf(b), m.total);
+        ptsOf(b).forEach(([t, db], i) => {
+          const r = b.at + (t - b.in);
+          if (t < b.in - 1e-9 || t > b.out + 1e-9 || r > end + 1e-9) return;
+          const x = TL.tToX(v, m.toOrig(r), g.cw);
+          if (x < -8 || x > w + 8) return;
+          const y = TL.dbToY(db, CH);
+          const hit = sv('circle', { class: 'bg-hit', cx: x.toFixed(1), cy: y.toFixed(1), r: 7 });
+          hit.addEventListener('pointerdown', (e) => (towardEdge(e, b.id) ? pressBar(e, b.id) : pressPoint(e, b.id, i)));
+          hit.addEventListener('pointermove', (e) => { if (!drag) hit.style.cursor = towardEdge(e, b.id) ? 'ew-resize' : ''; });
+          const on = ptSel && ptSel.id === b.id && ptSel.i === i;
+          kids[k].push(hit, sv('circle', { class: 'bg-pt' + (on ? ' on' : ''), cx: x.toFixed(1), cy: y.toFixed(1), r: on ? 4 : 3.25 }));
+        });
+      }
+      if (live !== b.id) {
+        if (autoWrap.parentNode !== L.lane) L.lane.append(autoWrap);
+        autoWrap.style.left = `${Math.max(a + 60, z - 4)}px`;   // 보이는 막대 오른쪽 끝 (이름 칸은 비켜서)
+        autoWrap.hidden = false;
+        autoBtn.disabled = !editable() || busy || !b.touched;   // 손대지 않았으면 이미 자동 곡선
+      }
+    }
+    Ls.forEach((L, k) => {
+      L.lane.classList.toggle('has-sel', has);
+      L.lane.classList.toggle('sel', has && laneOf[S.bgmSel] === k);
+      const gr = sv('g', { transform: `translate(0,${PAD})` });
+      gr.append(...kids[k]);
+      L.svg.replaceChildren(gr);
+      if (paintBg) paintBg(L.cuts, LANE_H);
+    });
+    return { names: Ls.map((L) => L.name), lanes: Ls.map((L) => L.lane) };
+  }
+  // 새로 고른 음원(목록에서 고르기·불러오기)의 줄이 스크롤 밖이면 보이게 (이미지 줄과 같은 스크롤)
+  function reveal(rows, names) {
+    if (S.bgmSel === shownSel) return;
+    shownSel = S.bgmSel;
+    const B = S.bgmSel && bars.get(S.bgmSel);
+    if (!B || !B.bar.parentNode || rows.hidden) return;
+    const r = B.bar.parentNode.getBoundingClientRect(), box = rows.getBoundingClientRect();
+    if (r.top < box.top) rows.scrollTop -= box.top - r.top;
+    else if (r.bottom > box.bottom) rows.scrollTop += r.bottom - box.bottom;
+    names.scrollTop = rows.scrollTop;
+  }
+  // 막대 위 커서: 양 끝은 ↔, 고른 막대의 선 위는 점 추가
+  function hoverBar(e, id) {
+    if (drag) return;
+    const B = bars.get(id);
+    if (!B) return;
+    let near = false, cursor = '';
+    if (e) {
+      const rect = B.bar.getBoundingClientRect();
+      if (e.clientX - rect.left <= BAR_END || rect.right - e.clientX <= BAR_END) cursor = 'ew-resize';
+      else if (id === S.bgmSel && editable()) {
+        const g = zoomTl.geom(), m = map(), b = list().find((x) => x.id === id), lr = B.bar.parentNode.getBoundingClientRect();
+        near = !!(g && m && b && S.view && nearLine(b, e.clientX - lr.left, e.clientY - lr.top - PAD, g, m));
+        if (near) cursor = 'copy';
+      }
+    }
+    if (B.bar.style.cursor !== cursor) B.bar.style.cursor = cursor;
+    const want = near ? id : nearId === id ? null : nearId;
+    if (want !== nearId) { nearId = want; zoomTl.draw(); }
+  }
+  function pressBar(e, id) {
+    const g = zoomTl.geom(), m = map();
+    if (e.button !== 0 || !g || !S.view || !m) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const b = list().find((x) => x.id === id);
+    if (!b) return;
+    const wasSel = S.bgmSel === id;
+    select(id);
+    showTab();
+    const B = bars.get(id);
+    if (!editable() || !B || !B.bar.parentNode) return;
+    const lr = B.bar.parentNode.getBoundingClientRect(), br = B.bar.getBoundingClientRect();
+    const x = e.clientX - lr.left, y = e.clientY - lr.top - PAD;
+    const kind = e.clientX - br.left <= BAR_END ? 'start' : br.right - e.clientX <= BAR_END ? 'end' : 'move';
+    const base = { id, b, x0: e.clientX, y0: e.clientY, lx: lr.left, ly: lr.top, g, m, on: false, live: null };
+    if (wasSel && kind === 'move' && nearLine(b, x, y, g, m)) {   // 선 위: 그 자리에 점을 넣고 바로 끌 수 있게
+      const pts = ptsOf(b);
+      if (pts.length >= PTS_MAX) return;
+      const r = TL.xToOutT(x, m, S.view, g.cw);
+      const t = Math.min(Math.max(b.in + (r - b.at), b.in), b.out);
+      let i = pts.findIndex((p) => p[0] > t);
+      if (i < 0) i = pts.length;
+      pts.splice(i, 0, [t, TL.yToDb(y, CH)]);
+      ptSel = { id, i };
+      begin({ ...base, kind: 'pt', i, pts, added: true, live: { points: pts.map((p) => [...p]), touched: true } });
+      return;
+    }
+    begin({ ...base, kind });
+  }
+  // 첫·끝 점은 막대 끝에 붙어 있어 넓은 누름 자리가 자르기 손잡이를 덮는다:
+  // 막대 끝 6px 안이면서 점 가운데에서 4px 넘게 떨어졌으면 점 대신 자르기
+  function towardEdge(e, id) {
+    const B = bars.get(id);
+    if (!B) return false;
+    const br = B.bar.getBoundingClientRect(), c = e.target.getBoundingClientRect();
+    const edge = e.clientX - br.left <= BAR_END || br.right - e.clientX <= BAR_END;
+    return edge && Math.hypot(e.clientX - (c.left + c.width / 2), e.clientY - (c.top + c.height / 2)) > 4;
+  }
+  function pressPoint(e, id, i) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const g = zoomTl.geom(), m = map(), b = list().find((x) => x.id === id), B = bars.get(id);
+    if (!g || !S.view || !m || !b || !B || !editable()) return;
+    const lr = B.bar.parentNode.getBoundingClientRect();
+    ptSel = { id, i };
+    begin({ id, kind: 'pt', i, b, pts: ptsOf(b), x0: e.clientX, y0: e.clientY, lx: lr.left, ly: lr.top, g, m,
+      on: false, live: null, added: false });
+    zoomTl.draw();
+  }
+  // 끄는 동안 줄이 다시 그려져 막대·점이 바뀌어도 받도록 창에서 듣는다
+  function begin(d) {
+    if (drag) finish(false);
+    drag = d;
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    window.addEventListener('keydown', onKey, true);
+    zoomTl.draw();
+  }
+  // 영상 띠 경계(결과 시간)·다른 음원 시작·끝
+  function snapTargets(id) {
+    const m = map(), out = new Set();
+    for (const p of clp.pieces()) { out.add(m.toOut(p.start)); out.add(m.toOut(p.end)); }
+    for (const b of list()) if (b.id !== id) { out.add(b.at); out.add(b.at + lenOf(b)); }
+    return [...out];
+  }
+  function onMove(e) {
+    const d = drag;
+    if (!d) return;
+    if (e.buttons === 0) { finish(false); return; }   // 손 뗀 걸 못 받았다 (창 밖 등)
+    if (!d.on) {
+      if (!TL.isDrag(e.clientX - d.x0, e.clientY - d.y0)) return;
+      d.on = true;
+    }
+    const x = e.clientX - d.lx, cw = d.g.cw;
+    if (d.kind === 'pt') {
+      // 이웃 점 사이·막대(곡 in~out) 안에서 좌우 시점, 위아래 음량
+      const b = d.b, pts = d.pts, i = d.i, gap = 1e-3;
+      const lo = Math.max(b.in, i > 0 ? pts[i - 1][0] + gap : -Infinity);
+      const hi = Math.min(b.out, i < pts.length - 1 ? pts[i + 1][0] - gap : Infinity);
+      const t = b.in + (TL.xToOutT(x, d.m, S.view, cw) - b.at);
+      pts[i] = [Math.min(Math.max(t, lo), Math.max(lo, hi)), TL.yToDb(e.clientY - d.ly - PAD, CH)];
+      d.live = { points: pts.map((p) => [...p]), touched: true };
+    } else {
+      const dt = TL.xToOutT(x, d.m, S.view, cw) - TL.xToOutT(d.x0 - d.lx, d.m, S.view, cw);
+      let live = TL.bgmDrag(d.kind, d.b, dt, total());
+      if (d.kind === 'move') live = { ...live, at: TL.bgmSnap(live.at, lenOf(d.b), total(), snapTargets(d.id), cw / S.view.spc) };
+      d.live = live;
+    }
+    zoomTl.draw();
+  }
+  const onUp = () => finish(true);
+  const onCancel = () => finish(false);
+  function onKey(e) {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    finish(false);
+  }
+  function finish(commit) {
+    const d = drag;
+    drag = null;
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onCancel);
+    window.removeEventListener('keydown', onKey, true);
+    if (!d) return;
+    if (!commit) { if (d.added) ptSel = null; zoomTl.draw(); return; }
+    if (d.kind === 'pt') {
+      if (d.on || d.added) { commitPoints(d.id, d.live.points); return; }
+      // 끌지 않고 누르기만: 고른 점. 같은 점을 곧바로 또 누르면 지우기
+      const now = performance.now(), p = lastPress;
+      lastPress = { id: d.id, i: d.i, t: now };
+      if (p && p.id === d.id && p.i === d.i && now - p.t < DBL_MS) { lastPress = null; deletePoint(d.id, d.i); return; }
+      zoomTl.draw();
+      return;
+    }
+    if (!d.on || !d.live) { seekInto(d.b); zoomTl.draw(); return; }   // 눌러 고르기만
+    const L = d.live;
+    commitLive(d.id, L, d.kind === 'move' ? { at: L.at } : { at: L.at, in: L.in, out: L.out });
+  }
+  function commitLive(id, live, patch) {
+    held = { id, live };
+    syncMixer();   // 다시 그리기를 기다리지 않고 바로 들리게
+    send('update_bgm', id, patch);
+  }
+  function commitPoints(id, points) {
+    commitLive(id, { points, touched: true }, { points });
+  }
+  function deletePoint(id, i) {
+    const b = list().find((x) => x.id === id);
+    if (!b || !editable()) return;
+    const pts = ptsOf(b);
+    if (pts.length <= 1 || i >= pts.length) return;   // 점이 하나는 있어야 한다 (모두 없애려면 음원 자동 조절)
+    pts.splice(i, 1);
+    ptSel = null;
+    commitPoints(id, pts);
+  }
+
+  // ---- 음원 탭 ----
+  async function add() {
+    const before = new Set(list().map((b) => b.id));
+    pickNew(before, await send('add_bgm', outNow()));
+  }
+  async function insertPreset(pid) {
+    const before = new Set(list().map((b) => b.id));
+    pickNew(before, await send('insert_bgm_preset', pid, outNow()));
+  }
+  function pickNew(before, res) {
+    if (!res) return;
+    const fresh = res.bgms.find((b) => !before.has(b.id));
+    S.bgmTab = 'used';
+    if (fresh) select(fresh.id); else renderTools();
+  }
+  async function remove() {
+    if (S.bgmSel) await send('delete_bgm', S.bgmSel);
+  }
+  async function savePreset(nm) {
+    const j = selected();
+    if (!j || !S.bgmSel) return;
+    const res = await call('save_bgm_preset', j.id, S.bgmSel, nm);
+    if (res) { presets = res; naming = false; saveErr = null; } else saveErr = '보관하지 못했습니다';
+    renderTools();
+  }
+  async function loadPresets() {
+    loading = true;
+    try { presets = (await call('list_bgm_presets')) || []; } finally { loading = false; }
+    renderTools();
+  }
+  // 이름 바꾸기: 이름을 두 번 누르거나 [이름 변경]. Enter·칸 밖을 누르면 반영, Esc 는 취소
+  function startRename(kind, id) {
+    naming = false; itemErr = null;
+    renaming = { kind, id, bad: false };
+    renderTools();
+  }
+  async function commitRename(r, nm) {
+    if (!r) return;
+    const it = r.kind === 'bgm' ? list().find((b) => b.id === r.id) : (presets || []).find((p) => p.id === r.id);
+    if (!nm || !it || nm === it.name) { renaming = null; renderTools(); return; }
+    if (r.kind === 'bgm') {
+      renaming = null;
+      const res = await send('rename_bgm', r.id, nm);
+      if (!res) { itemErr = { id: r.id, text: '이름을 바꾸지 못했습니다' }; renderTools(); }
+      return;
+    }
+    const res = await call('rename_bgm_preset', r.id, nm);
+    if (res) { presets = res; renaming = null; } else renaming = { ...r, bad: true, value: nm, err: '보관함에 같은 이름이 있습니다' };
+    renderTools();
+  }
+  function nameEl(kind, id, nm) {
+    if (!(renaming && renaming.kind === kind && renaming.id === id)) return renameName('ov-item-name bg-item-name', kind, id, nm);
+    const r = renaming;
+    const input = renameField({ value: r.value || nm, bad: r.bad, label: '음원 이름', done: (save, v) => {
+      if (field === input) field = null;
+      if (save) commitRename(r, v);
+      else { renaming = null; renderTools(); }
+    } });
+    field = input;
+    return input;
+  }
+  function renameErr(kind, id) {
+    if (kind === 'bgm' && itemErr && itemErr.id === id) return h('div', { class: 'ov-err err' }, itemErr.text);
+    return renaming && renaming.kind === kind && renaming.id === id && renaming.bad
+      ? h('div', { class: 'ov-err err' }, renaming.err || '보관함에 같은 이름이 있습니다') : null;
+  }
+  // 목록 줄의 작은 음량 선 (곡 in~out)
+  function glyph(b, on) {
+    const W = 40, H = 24, n = 24, pts = ptsOf(b), a = b.in || 0, len = (b.out != null ? b.out : b.dur) - a;
+    const s = Array.from({ length: n }, (_, k) => {
+      const db = pts.length ? TL.dbAtSorted(pts, a + (len * k) / (n - 1)) : 0;
+      return `${((W * k) / (n - 1)).toFixed(1)},${(3 + TL.dbToY(db, H - 6)).toFixed(1)}`;
+    }).join(' ');
+    const svg = sv('svg', { class: 'bg-glyph' + (on ? ' on' : ''), viewBox: `0 0 ${W} ${H}`, 'aria-hidden': 'true' });
+    svg.append(sv('polyline', { points: s }));
+    return svg;
+  }
+  const secs = (d) => `${(Number(d) || 0).toFixed(1)}초`;
+  function itemRows(b, can) {
+    const sel = b.id === S.bgmSel;
+    const row = h('div', { class: 'opt row ov-item' + (sel ? ' sel' : ''),
+      onclick: () => { select(b.id); if (editable()) seekInto(b); } },
+      h('span', { class: 'ov-item-main' }, glyph(b, sel), nameEl('bgm', b.id, b.name)),
+      h('span', { class: 'sec' }, `${clock(b.at)} · ${secs(lenOf(b))}`));
+    if (!sel) return [row, renameErr('bgm', b.id)];
+    let acts;
+    if (naming) {
+      const input = h('input', { type: 'text', class: 'ov-name', maxlength: '40', value: b.name, 'aria-label': '저장할 이름' });
+      input.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter' && input.value.trim()) savePreset(input.value.trim());
+        if (e.key === 'Escape') { naming = false; saveErr = null; renderTools(); }
+      });
+      acts = [input, h('button', { type: 'button', class: 'btn', onclick: () => input.value.trim() && savePreset(input.value.trim()) }, '저장'),
+        h('button', { type: 'button', class: 'btn', onclick: () => { naming = false; saveErr = null; renderTools(); } }, '취소')];
+      requestAnimationFrame(() => { input.focus(); input.select(); });
+    } else {
+      acts = [h('button', { type: 'button', class: 'btn', disabled: !can || busy, onclick: () => startRename('bgm', b.id) }, '이름 변경'),
+        h('button', { type: 'button', class: 'btn', disabled: !can || busy,
+          onclick: () => { renaming = null; naming = true; saveErr = null; renderTools(); } }, '보관'),
+        h('button', { type: 'button', class: 'btn', disabled: !can || busy, onclick: remove }, '제거')];
+    }
+    const out = [row, renameErr('bgm', b.id), h('div', { class: 'ov-acts' }, acts)];
+    if (naming && saveErr) out.push(h('div', { class: 'ov-err err' }, saveErr));
+    return out;
+  }
+  function presetRow(p, can) {
+    const row = h('div', { class: 'opt ov-item' },
+      h('span', { class: 'ov-item-main' }, glyph({ in: 0, out: p.dur, points: [] }, false), nameEl('preset', p.id, p.name)),
+      h('span', { class: 'ov-item-btns' },
+        h('span', { class: 'sec' }, secs(p.dur)),
+        h('button', { type: 'button', class: 'btn', title: '지금 재생 위치에 삽입', disabled: !can || busy,
+          onclick: () => insertPreset(p.id) }, '삽입'),
+        h('button', { type: 'button', class: 'x', title: '보관함에서 지우기',
+          onclick: async () => { presets = (await call('delete_bgm_preset', p.id)) || presets; renderTools(); } }, '✕')));
+    return [row, renameErr('preset', p.id)];
+  }
+  function renderTools() {
+    const all = list();
+    tabText.textContent = all.length ? `음원 ${all.length}` : '음원';
+    // 실행 취소·다시 읽기로 음원이 바뀌었으면 없어진 고르기를 푼다 (Delete 가 다른 점을 지우지 않게)
+    if (S.bgmSel && !all.some((b) => b.id === S.bgmSel)) S.bgmSel = null;
+    const pb = ptSel && all.find((b) => b.id === ptSel.id);
+    if (ptSel && (!pb || ptSel.id !== S.bgmSel || ptSel.i >= ptsOf(pb).length)) ptSel = null;
+    const can = editable();
+    // 처리 중으로 바뀌면 열린 보관 이름 칸·넣은 음원 이름 칸은 닫는다 (반영하지 않고)
+    if (!can && (naming || (renaming && renaming.kind === 'bgm'))) {
+      if (field && renaming && renaming.kind === 'bgm') { field.cancel(); field = null; }
+      naming = false; saveErr = null;
+      if (renaming && renaming.kind === 'bgm') renaming = null;
+    }
+    if (S.tab !== 'bgm') return;
+    if (presets === null && !loading) loadPresets();
+    const scroll = panel.scrollTop;
+    const sub = (key, text) => h('button', { type: 'button', class: S.bgmTab === key ? 'on' : null,
+      onclick: () => { if (S.bgmTab !== key) { S.bgmTab = key; naming = false; renaming = null; panel.scrollTop = 0; renderTools(); } } }, text);
+    const head = h('div', { class: 'ov-top' },
+      h('div', { class: 'kinds', role: 'tablist' },
+        sub('used', `사용 중 ${all.length}`), sub('saved', presets ? `보관함 ${presets.length}` : '보관함')),
+      h('button', { type: 'button', class: 'btn', title: '파일에서 음원을 골라 지금 재생 위치에 넣기', disabled: !can || busy, onclick: add }, '불러오기'));
+    const body = S.bgmTab === 'used'
+      ? (all.length ? all.flatMap((b) => itemRows(b, can)) : [h('div', { class: 'opt muted' }, h('span', {}, '넣은 음원이 없습니다'))])
+      : presets === null ? [h('div', { class: 'opt muted' }, h('span', {}, '…'))]
+        : presets.length ? presets.flatMap((p) => presetRow(p, can))
+          : [h('div', { class: 'opt muted' }, h('span', {}, '사용 중인 음원을 보관하면 여기에 모입니다'))];
+    panel.replaceChildren(head, ...body.filter(Boolean));
+    panel.scrollTop = scroll;
+  }
+
+  // 이름을 두 번 누르면 이름 바꾸기 (첫 누름에 목록을 다시 그리므로 그대로 남는 panel 에서 받는다)
+  bindRenameDblclick(panel, '.bg-item-name', (kind, id) => {
+    if (!editable()) return;
+    if (kind === 'bgm') select(id);
+    startRename(kind, id);
+  });
+
+  // 음원 막대·점·음원 탭 밖을 누르면 고르기를 푼다
+  document.addEventListener('pointerdown', (e) => {
+    if (S.bgmSel && !(e.target.closest && e.target.closest('.bg-bar, .bg-hit, .bg-auto, .bg-panel, .bg-tab'))) select(null);
+  }, true);
+  // 고른 점이 있으면 Delete·Backspace 로 지운다 (음원 자체는 탭의 제거 버튼으로만). Esc 는 점 → 음원 순서로 고르기를 푼다
+  document.addEventListener('keydown', (e) => {
+    if (!S.bgmSel || drag || S.editing || typingIn(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (ptSel && ptSel.id === S.bgmSel) { e.preventDefault(); deletePoint(ptSel.id, ptSel.i); }
+    } else if (e.key === 'Escape') {
+      if (ptSel) { ptSel = null; zoomTl.draw(); } else select(null);
+    }
+  });
+
+  return { panel, tabText, paintLanes, reveal, renderTools, syncMixer,
+    available: () => !!result(),
+    reset() {
+      if (drag) finish(false);
+      if (mixer) mixer.dispose();
+      mixer = null; mixKey = null; mixSig = null; mapKeeps = null; mapVal = null;
+      S.bgmSel = null; naming = false; renaming = null; presets = null; saveErr = null; itemErr = null; field = null;
+      held = null; ptSel = null; lastPress = null; nearId = null; shownSel = null;
+    } };
+})();
+
 const zoomTl = (() => {
   const ruler = h('canvas', { class: 'zt-ruler' });
   const frames = h('canvas', { class: 'zt-frames' });
@@ -1835,16 +2431,18 @@ const zoomTl = (() => {
     el.hidden = !r || (!showFrames && !showWave);
     zoom.hidden = el.hidden;
     const g = el.hidden ? null : geom();
-    if (!g) { viewWin.hidden = true; ovl.paintRows(null); clp.paintLane(null); return; }
+    if (!g) { viewWin.hidden = true; ovl.paintRows(null, null, bgl.paintLanes(null)); clp.paintLane(null); return; }
     S.view = TL.clampView(S.view || TL.fitView(g.d, g.w, g.cw), g.d, g.w, g.cw, fps());
     const c = colors();
     const v = S.view;
     paintRuler(g, c);
-    ovl.paintRows(g, (cv, hh) => {
+    const laneBg = (cv, hh) => {
       const ctx = fit(cv, g.w, hh);
       ctx.clearRect(0, 0, g.w, hh);
       overlays(ctx, g, hh, c);
-    });
+    };
+    ovl.paintRows(g, laneBg, bgl.paintLanes(g, laneBg));
+    bgl.reveal(ovl.rows, ovl.names);
     clp.paintLane(g);
     if (showFrames) {
       const ctx = fit(frames, g.w, ROW_H);
@@ -2065,7 +2663,7 @@ function listParts(j, r) {
   const n = items.filter((c) => c.restored).length + restoreOps(r).length;
   const caps = S.capsFor === j.id ? S.caps : null;
   const imgs = ovl.available();
-  if (!items.length && !n && !(caps && caps.length) && !imgs) return [];
+  if (!items.length && !n && !(caps && caps.length) && !imgs && !bgl.available()) return [];
   if ((S.tab === 'imgs' || S.tab === 'clips') && !imgs) S.tab = 'cuts';   // 소리만 있는 파일은 이미지·영상 탭을 숨긴다
   const tab = (key, text, cls) => h('button', { type: 'button', class: [S.tab === key ? 'on' : '', cls || ''].join(' ').trim() || null,
     onclick: () => { if (S.tab !== key) { S.tab = key; renderResult(); } } }, text);
@@ -2073,9 +2671,14 @@ function listParts(j, r) {
     tab('cuts', `잘린 곳 ${items.length}` + (n ? ` · 되살린 곳 ${n}` : '')),
     tab('subs', caps ? `자막 ${caps.filter((c) => !c.empty).length}` : '자막'),
     imgs ? tab('imgs', ovl.tabText, 'ov-tab') : null,
-    imgs ? tab('clips', clp.tabText, 'cl-tab') : null)];
+    imgs ? tab('clips', clp.tabText, 'cl-tab') : null,
+    tab('bgm', bgl.tabText, 'bg-tab'))];   // 음원은 소리만 있는 파일에도
   if (S.tab === 'imgs') {
     out.push(ovl.panel);
+    return out;
+  }
+  if (S.tab === 'bgm') {
+    out.push(bgl.panel);
     return out;
   }
   if (S.tab === 'clips') {

@@ -149,6 +149,8 @@ tests/                pytest (requirements-dev.txt)
   `work/<이름>/files/<fkey>/` 에 캐시해 조각대로 잘라 잇고, 조각 경계는 영상 맨 앞/뒤처럼(앞뒤 무음 전부 컷, 무음 잇기·자막 줄·필러 경계
   넓히기가 넘지 않음) 다룬다. 자동 무음 기준·음량 정규화는 파일마다. 해상도·fps·색은 A(입력 파일 — B 를 맨 앞에 넣으면 둘째 조각)를 따르고 다른 비율은 검은 여백,
   렌더는 조각별 trim→concat 한 번 인코딩. 없으면 기존 동작. 단독 실행도 키가 맞으면 파일별 캐시를 쓴다(`restore_single_cache`)).
+  `--bgm <json>`(음원 섞기 `[{path, at, in, out, gain, points}]`: at 은 결과 초, in/out·points 는 곡 초, 점 사이 dB 직선·-40dB 이하 무음,
+  배율 `10**((dB+gain)/20)`. 컷·잡음 제거·음량 맞춤 뒤 소리에 더하고 결과 길이 밖은 버림. `--preview-cut-audio` 소리엔 섞지 않음 — 화면이 섞는다).
 - 앱 화면: 자막 탭 줄·(멈췄을 때) 영상 위 자막을 누르면 그 줄 전체를 고치는 칸(contenteditable)이 열리고 꾸밈 막대도 켜짐
   (Api.set_line → `subtitles.plan_line` 이 띄어쓰기 낱말을 어절에 다시 나눠 담고 꾸밈을 글자 따라 옮김, `원문 복원`), 찾아 바꾸기, 줄 시간 ±0.1초·`지금 위치로`.
   타임라인을 끌거나 Shift+클릭 두 번으로 구간을 골라 직접 자르거나 되살림
@@ -170,6 +172,13 @@ tests/                pytest (requirements-dev.txt)
   실행 취소·빼기가 된다. 보관함은 `<데이터>/clip_presets/`(presets.json, `<id>/<sha16><ext>`, 분석 캐시 `<id>/files/`): 그 영상 안의 편집
   (파일 안 초)도 같이 저장되고, 넣을 때 캐시를 작업 복사본 서명으로 옮겨(`rebase_file_cache`) 바로 들어간다.
   옮기기는 `Api.move_clip`(덩어리 = 첫~마지막 조각, 그 안에 끼운 영상 포함, `sequence.move_block`/`shift_for_move` 가 편집 시간을 옮김): 타임라인 머리 줄의 `옮기기`·`제거`(고른 끼운 영상이 있을 때만)나 띠를 4px 넘게 끌어 옮긴다. 넣기·옮기기의 자리 맞춤은 `sequence.snap_at`(잘린 구간 안에 조각 경계가 있으면 가장 가까운 경계, 아니면 구간 시작) — 화면은 `TL.snapAt`/`dropTarget`. 실행 취소 대상.
+  음원(BGM) 넣기: `Job.bgms`(`[{id, file, name, dur, gain, at, in, out, points}]`, `points=None` 이면 자동 곡선 — 결과 시간이 바뀌는 편집 뒤
+  `app/bgm.auto_points` 로 다시 계산, 점을 손대면(`update_bgm` 의 `points`) 그대로 둔다. 옮기기·자르기·이름은 손댐 아님, `reset_bgm` = `음원 자동 조절`).
+  고른 파일은 작업 폴더 `bgm/<sha16>.m4a`(AAC 48kHz 로 다시 인코딩), 보관함은 `<데이터>/bgm_presets/`(presets.json + `<sha16>.m4a`, 파일·이름·길이·gain 만).
+  저장 때 `out/<이름>.bgm.json` → `--bgm`. 화면은 `음원` 탭(이미지·영상 탭과 같은 구성, 소리만 있는 파일에도)과 이미지 줄 아래 같은 패널의 음원 줄(`bgl` in app.js):
+  막대 = `TL.bgmSpan`(원본 축), 음량 선 = `TL.bgmPolyline`(svg, 잘린 곳 위 평평), 끌기 `TL.bgmDrag`/`bgmSnap`, 점은 결과 시간 `TL.xToOutT` 로 계산해
+  손을 뗄 때 `update_bgm` 한 번. 미리보기는 `app/ui/bgmmix.js` 의 `BgmMixer` 를 이어 붙인 재생기(`player.mse`, 결과 시간)에 붙여 Web Audio 로 섞는다
+  (예전 방식(fallback) 재생에선 안 섞임).
   자막은 영상 화면 아래쪽에 겹쳐 그린다(새기는 자리·크기 그대로). 글자 꾸미기는 줄 고치는 칸 안 선택(없으면 줄 전체) 또는 자막 탭 목록에서
   음절(span.c)을 끌어 선택하면(브라우저 선택이 있는 동안만 켜짐, 꾸민 뒤엔 같은 글자를 다시 선택) 꾸밈 막대(목록 위 — 꺼지면 흐리게·inert, 영상 위에서 고칠 땐 자막 위에 뜨는 한 벌 더)로 글자마다 글꼴·크기·색·굵기를 바꾼다 (Api.set_style, Job.word_styles, 실행 취소 대상). 글꼴은 `app/ui/fonts`(OFL) — 화면 @font-face 와 새기기가 같은 파일을 쓴다.
 - 사용자 데이터: 맥 `~/Library/Application Support/youtube-edit`, 윈도우 `%APPDATA%\youtube-edit` (`YTEDIT_DATA_DIR` 로 덮어씀).

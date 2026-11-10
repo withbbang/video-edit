@@ -2,7 +2,7 @@
 
     YTEDIT_E2E_MODELS=<models 폴더가 든 데이터 폴더> .venv/bin/python -m pytest tests/test_e2e_app.py -s
 
-input/test.mp4 를 한글·공백 경로로 복사해 추가 → 분석 → 미리보기(Range) → 말버릇 모두 → 저장까지 확인한다.
+input/test.mp4 를 한글·공백 경로로 복사해 추가 → 분석 → 미리보기(Range) → 말버릇 모두 → 음원 불러오기 → 저장까지 확인한다.
 """
 import http.client
 import json
@@ -25,12 +25,16 @@ TIMEOUT = 900
 class FakeDialogs:
     def __init__(self):
         self.folder = None
+        self.audio = None
 
     def open_files(self):
         return None
 
     def choose_folder(self):
         return self.folder
+
+    def open_audio(self):
+        return self.audio
 
 
 def _wait(api, job_id, statuses, timeout=TIMEOUT):
@@ -97,6 +101,17 @@ def test_app_end_to_end(tmp_path, monkeypatch):
     assert res["accepted"] and res["options"]["habit"] == "all"
     _wait(api, job_id, {"review"})
     assert api.get_result(job_id)["cuts"]
+
+    # 음원 탭 불러오기: 재생 위치(결과 0초)에 넣으면 자동 곡선이 깔리고, 저장 결과에도 섞인다 (아래 길이 검사)
+    song = tmp_path / "배경 음악.mp3"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=8",
+                    "-c:a", "libmp3lame", str(song)], check=True)
+    dialogs.audio = str(song)
+    res = api.add_bgm(job_id, 0.0)
+    assert res and len(res["bgms"]) == 1 and res["history"]["undo"]
+    b = api.get_result(job_id)["bgms"][0]
+    assert b["at"] == 0.0 and b["name"] == "배경 음악" and b["points"] and not b["touched"]
+    assert b["url"].endswith(".m4a")
 
     dialogs.folder = str(save_dir)
     assert api.set_save_dir() == str(save_dir)

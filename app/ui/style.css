@@ -477,3 +477,45 @@ body.ns-drag, body.ns-drag * { cursor: ns-resize !important; }   /* 끄는 동�
 .cl-sw { display: block; width: 10px; height: 24px; border-radius: 3px; flex-shrink: 0; }
 .cl-c0 { background: var(--clip-0); } .cl-c1 { background: var(--clip-1); } .cl-c2 { background: var(--clip-2); }
 .cl-c3 { background: var(--clip-3); } .cl-c4 { background: var(--clip-4); }
+
+/* 음원(BGM): 이미지 줄 아래 같은 패널의 음원 줄 (막대 + 음량 선) · 음원 탭. 높이 36px 는 app.js bgl 의 LANE_H 와 같게 */
+.zt-name.n-bgm { height: 36px; line-height: 36px; display: block; overflow: hidden; white-space: nowrap; }
+.bg-lane { position: relative; height: 36px; background: var(--tl-lane); border-radius: 5px; overflow: hidden;
+  cursor: pointer; touch-action: none; }
+.bg-lane.sel { box-shadow: inset 0 0 0 1px var(--accent); }
+.bg-bar { position: absolute; top: 2px; bottom: 2px; border-radius: 4px; box-sizing: border-box; overflow: hidden;
+  background: #8881; border: 1px solid #8886; border-left-width: 3px; border-right-width: 3px;
+  cursor: grab; touch-action: none; transition: opacity .12s; }
+.bg-bar[hidden] { display: none; }
+.bg-bar:hover { border-color: #888a; }
+.bg-bar.sel { background: #4a7dff14; border-color: var(--accent); }
+.bg-bar.dragging { cursor: grabbing; border-style: dashed; }
+.bg-lane.has-sel .bg-bar:not(.sel) { opacity: .45; }   /* 영상 띠 고르기와 같은 모양: 고른 것만 또렷하게 */
+/* 결과(영상) 끝을 넘는 막대: 끝을 흐리게 — 넘는 부분은 들리지 않는다 */
+.bg-bar.over { border-right-style: dotted;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), #0002); mask-image: linear-gradient(to right, #000 calc(100% - 28px), #0002); }
+.bg-label { font-size: 10px; font-weight: 500; fill: var(--muted); stroke: var(--tl-lane); stroke-width: 3px; stroke-linejoin: round;
+  paint-order: stroke; }   /* 빗금·선 위에서도 읽히게 줄 바탕색 테두리 */
+.bg-lane.has-sel .bg-label:not(.on) { opacity: .55; }
+.bg-label.on { fill: var(--accent); font-weight: 600; }
+/* 이름·자동 조절 버튼은 아래쪽 (음량 선은 보통 위쪽 0dB 근처를 지난다) */
+/* 음량 선: 줄 전체를 덮는 svg (점만 마우스를 받는다). 잘린 곳 빗금(.ov-cuts) 위, 자동 조절 버튼 아래 */
+.bg-svg { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; overflow: visible; pointer-events: none; }
+.bg-area { fill: var(--fg); fill-opacity: .05; }
+.bg-area.on { fill: var(--accent); fill-opacity: .13; }
+.bg-curve { fill: none; stroke: var(--fg); stroke-opacity: .5; stroke-width: 1.25; stroke-linejoin: round; stroke-linecap: round; }
+.bg-lane.has-sel .bg-curve:not(.on) { stroke-opacity: .25; }
+.bg-curve.on { stroke: var(--accent); stroke-opacity: 1; stroke-width: 1.75; }
+.bg-curve.on.near { stroke-width: 2.75; }   /* 누르면 점이 생기는 자리 */
+.bg-zero { stroke: var(--accent); stroke-opacity: .4; stroke-width: 1; stroke-dasharray: 2 3; }   /* 0dB (곡 크기 맞춤 그대로) */
+.bg-hit { fill: transparent; pointer-events: all; cursor: grab; }
+.bg-pt { fill: var(--bg); stroke: var(--accent); stroke-width: 1.5; pointer-events: none; }
+.bg-hit:hover + .bg-pt { stroke-width: 2.5; }
+.bg-pt.on { fill: var(--accent); stroke: var(--bg); stroke-width: 1.5; }
+.bg-auto { position: absolute; bottom: 3px; z-index: 3; transform: translateX(-100%); }
+.bg-auto[hidden] { display: none; }
+.bg-auto .btn { min-height: 0; padding: 0 6px; font-size: 10px; line-height: 15px; background: var(--bg); }
+/* 음원 탭: 이미지 탭 줄 모양 그대로, 그림 자리에 작은 음량 선 */
+.bg-glyph { display: block; width: 40px; height: 24px; flex-shrink: 0; background: var(--tl-lane); border-radius: 3px; }
+.bg-glyph polyline { fill: none; stroke: var(--muted); stroke-width: 1.25; stroke-linejoin: round; }
+.bg-glyph.on polyline { stroke: var(--accent); stroke-width: 1.5; }
