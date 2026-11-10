@@ -43,3 +43,8 @@ def test_gain_curve_db_interpolated():
 def test_gain_curve_mute_judged_before_gain():
     c = run("out = Array.from(M.gainCurve([[0,-40],[1,-40]], 6, 0, 1, 0.5));")
     assert c == [0, 0, 0]
+
+
+def test_gain_curve_sorts_points():
+    c = run("out = Array.from(M.gainCurve([[1,-40],[0,0]], 0, 0, 1, 0.5));")
+    assert c == pytest.approx([1, 0.1, 0], abs=1e-6)

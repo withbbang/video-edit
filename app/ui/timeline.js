@@ -292,6 +292,6 @@ const xToOutT = (x, map, v, cw) => map.toOut(xToT(v, x, cw));
 
 const TL = { fitView, clampView, tToX, xToT, zoomAt, followT, playFollow, playSpc, cells, sheetCell, waveMax, spcToSlider, sliderToSpc,
   ovRect, ovMove, ovResizeEdge, barDrag, lanesDrag, clipBands, snapAt, dropTarget, isDrag, tlDataKey,
-  dbAt, dbToY, yToDb, bgmLanes, bgmSpan, bgmPolyline, bgmSnap, bgmDrag, xToOutT };
+  dbAt, dbAtSorted, dbToY, yToDb, bgmLanes, bgmSpan, bgmPolyline, bgmSnap, bgmDrag, xToOutT };
 if (typeof window !== 'undefined') window.TL = TL;
 if (typeof module !== 'undefined') module.exports = TL;
