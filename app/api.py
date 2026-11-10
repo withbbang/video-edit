@@ -18,6 +18,7 @@ import json
 import math
 import logging
 import os
+import re
 import secrets
 import shutil
 import struct
@@ -59,6 +60,7 @@ class Dialogs(Protocol):
     def choose_folder(self) -> str | None: ...
     def open_image(self) -> str | None: ...
     def open_video(self) -> str | None: ...
+    def open_audio(self) -> str | None: ...
 
 
 def _union(cuts: list[dict]) -> list[list[float]]:
@@ -273,6 +275,8 @@ OVERLAY_SPAN = 5.0       # 새 이미지가 나오는 기본 초
 OVERLAY_W = 0.25         # 새 이미지 너비 (영상 너비 대비)
 OVERLAY_MIN_W = 0.02
 PRESET_NAME_MAX = 40
+BGM_POINTS_MAX = 500     # 음원 하나의 음량 점 최대 수
+_BGM_FILE = re.compile(r"[0-9a-f]{16}\.m4a")   # 작업·보관함 폴더 안 음원 파일 이름
 
 
 def png_size(path: Path) -> tuple[int, int] | None:
@@ -951,6 +955,242 @@ class Api:
                                             "start": 0.0, "end": d}]
             return True
         return self._change_overlays(job_id, change)
+
+    # ---- 음원(BGM) -------------------------------------------------------------
+    # 항목 {id, file, name, dur, gain, at, in, out, points}: at = 결과 초, in/out = 곡 초, points None = 자동 조절.
+    # 음원은 작업 폴더 bgm/<16자>.m4a 로 바꿔 두고, 저장한 음원은 <data_root>/bgm_presets/ 에 둔다.
+
+    def _change_bgms(self, job_id: str, change: Callable[[Job, float], bool],
+                     ctx: tuple[list, list, float] | None = None) -> dict | None:
+        """음원 편집 공통: 확인 대기·저장됨에서만. change(job, 결과 길이) 가 False 면 거절. → {"bgms", "history"}."""
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None or job.status not in (Status.REVIEW, Status.SAVED):
+                return None
+        keeps, speech, _ = ctx or self._bgm_context(job)
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None or job.status not in (Status.REVIEW, Status.SAVED):
+                return None
+            before = self._snap(job)
+            if not change(job, bgm.out_total(keeps)):
+                return None
+            self._record(job, before)
+            if job.status == Status.SAVED:
+                job.status = Status.REVIEW
+            self._store.save()
+            view, out = job_view(job), self._bgm_views(job, speech)
+        self._push("job", view)
+        return {"bgms": out, "history": self._hist(job_id)}
+
+    def _job_bgm_dir(self, job_id: str) -> Path | None:
+        with self._queue.lock:
+            job = self._job(job_id)
+            if job is None or job.status not in (Status.REVIEW, Status.SAVED):
+                return None
+            return paths.job_dir(Path(job.src)) / "bgm"
+
+    @staticmethod
+    def _bgm_at(at: float, out_total: float, fps) -> float:
+        """결과 초 at 을 [0, out_total] 안으로 넣고 프레임 격자에 맞춘다."""
+        t = min(max(float(at), 0.0), out_total)
+        return min(max(_grid(t, Fraction(fps).limit_denominator(100000)), 0.0), out_total)
+
+    def add_bgm(self, job_id: str, at: float) -> dict | None:
+        """음원을 골라 결과 위치 at(초)에 넣는다. 취소·소리 파일 아님·편집할 수 없는 상태면 None."""
+        if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at):
+            return None
+        folder = self._job_bgm_dir(job_id)
+        if folder is None:
+            return None
+        picked = self._dialogs.open_audio()
+        got = bgm.import_audio(Path(picked), folder) if picked else None
+        if got is None:
+            return None
+        ctx = self._bgm_context(self._job(job_id))
+        place = self._bgm_at(at, bgm.out_total(ctx[0]), ctx[2])
+
+        def change(job: Job, _d: float) -> bool:
+            job.bgms = [*job.bgms, {"id": secrets.token_hex(4), "file": got["file"], "name": Path(picked).stem,
+                                    "dur": got["dur"], "gain": got["gain"], "at": place, "in": 0.0, "out": got["dur"],
+                                    "points": None}]
+            return True
+        return self._change_bgms(job_id, change, ctx)
+
+    @staticmethod
+    def _num(v) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+    def update_bgm(self, job_id: str, bid: str, patch: dict) -> dict | None:
+        """at·in·out·points 만 바꾼다. at >= 0, 0 <= in < out <= dur, out - in >= MIN_LEN.
+        points = [[곡 초, dB], …] — 곡 초는 [0, dur], dB 는 [DB_MIN, DB_MAX] 로 고정하고 시간순으로 저장 (최대 500개). 주면 손댄 것."""
+        if not isinstance(patch, dict) or not patch or set(patch) - {"at", "in", "out", "points"}:
+            return None
+        if not all(self._num(v) for k, v in patch.items() if k != "points"):
+            return None
+        raw = patch.get("points")
+        if "points" in patch:
+            if not isinstance(raw, (list, tuple)) or not 1 <= len(raw) <= BGM_POINTS_MAX:
+                return None
+            if not all(isinstance(p, (list, tuple)) and len(p) == 2 and all(self._num(x) for x in p) for p in raw):
+                return None
+
+        def change(job: Job, _d: float) -> bool:
+            i = next((i for i, b in enumerate(job.bgms) if b["id"] == bid), None)
+            if i is None:
+                return False
+            b = {**job.bgms[i], **{k: float(v) for k, v in patch.items() if k != "points"}}
+            if not (b["at"] >= 0 and 0 <= b["in"] < b["out"] <= b["dur"] + EPS and b["out"] - b["in"] >= bgm.MIN_LEN - EPS):
+                return False
+            if raw is not None:
+                b["points"] = sorted(([min(max(float(t), 0.0), b["dur"]), min(max(float(db), bgm.DB_MIN), bgm.DB_MAX)]
+                                      for t, db in raw), key=lambda p: p[0])
+            job.bgms = [*job.bgms[:i], b, *job.bgms[i + 1:]]
+            return True
+        return self._change_bgms(job_id, change)
+
+    def reset_bgm(self, job_id: str, bid: str) -> dict | None:
+        """음원 자동 조절: 손댄 음량 점을 버리고 말소리에 맞춰 자동으로 따라가게 한다."""
+        def change(job: Job, _d: float) -> bool:
+            i = next((i for i, b in enumerate(job.bgms) if b["id"] == bid), None)
+            if i is None:
+                return False
+            job.bgms = [*job.bgms[:i], {**job.bgms[i], "points": None}, *job.bgms[i + 1:]]
+            return True
+        return self._change_bgms(job_id, change)
+
+    def rename_bgm(self, job_id: str, bid: str, name: str) -> dict | None:
+        name = name.strip() if isinstance(name, str) else ""
+        if not 1 <= len(name) <= PRESET_NAME_MAX:
+            return None
+
+        def change(job: Job, _d: float) -> bool:
+            i = next((i for i, b in enumerate(job.bgms) if b["id"] == bid), None)
+            if i is None:
+                return False
+            job.bgms = [*job.bgms[:i], {**job.bgms[i], "name": name}, *job.bgms[i + 1:]]
+            return True
+        return self._change_bgms(job_id, change)
+
+    def delete_bgm(self, job_id: str, bid: str) -> dict | None:
+        def change(job: Job, _d: float) -> bool:
+            kept = [b for b in job.bgms if b["id"] != bid]
+            if len(kept) == len(job.bgms):
+                return False
+            job.bgms = kept
+            return True
+        return self._change_bgms(job_id, change)
+
+    # 저장한 음원: [{id, name, file, dur, gain}]. 다른 영상에 누르면 그 위치에 곡 처음부터 끝까지 들어간다
+
+    def _bgm_presets_dir(self) -> Path:
+        return self._data_root / "bgm_presets"
+
+    def _read_bgm_presets(self) -> list[dict]:
+        data = _read_json(self._bgm_presets_dir() / "presets.json")
+        return [p for p in data if isinstance(p, dict) and isinstance(p.get("id"), str)] if isinstance(data, list) else []
+
+    def _write_bgm_presets(self, items: list[dict]) -> None:
+        d = self._bgm_presets_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / "presets.json.tmp"
+        tmp.write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, d / "presets.json")
+
+    def _bgm_preset_views(self, items: list[dict]) -> list[dict]:
+        return [{**p, "url": f"{self._preview_base}/bgm_presets/{p['file']}"} for p in items]
+
+    @staticmethod
+    def _copy_bgm_file(src: Path, folder: Path) -> None:
+        """음원(이름이 곧 내용 해시)을 folder 로 복사. 이미 있으면 그대로 둔다."""
+        folder.mkdir(parents=True, exist_ok=True)
+        dst = folder / src.name
+        if not dst.is_file():
+            tmp = dst.with_name(dst.name + ".part")
+            try:
+                shutil.copyfile(src, tmp)
+                os.replace(tmp, dst)
+            finally:
+                tmp.unlink(missing_ok=True)
+
+    def list_bgm_presets(self) -> list[dict]:
+        with self._presets_lock:
+            return self._bgm_preset_views(self._read_bgm_presets())
+
+    def save_bgm_preset(self, job_id: str, bid: str, name: str) -> list[dict] | None:
+        """고른 음원을 이름 붙여 저장한다 (같은 이름이 있으면 덮어씀). → 저장한 음원 목록, 안 되면 None."""
+        name = name.strip() if isinstance(name, str) else ""
+        if not 1 <= len(name) <= PRESET_NAME_MAX:
+            return None
+        with self._queue.lock:
+            job = self._job(job_id)
+            b = next((dict(b) for b in job.bgms if b["id"] == bid), None) if job else None
+            src = paths.job_dir(Path(job.src)) / "bgm" if job else None
+        if b is None or not _BGM_FILE.fullmatch(str(b["file"])):
+            return None
+        try:
+            self._copy_bgm_file(src / b["file"], self._bgm_presets_dir())
+        except OSError:
+            log.exception("저장할 음원 복사 실패")
+            return None
+        with self._presets_lock:
+            items = self._read_bgm_presets()
+            same = next((p for p in items if p.get("name") == name), None)   # 같은 이름은 덮어쓰되 id 는 그대로
+            items = [p for p in items if p is not same]
+            items.append({"id": same["id"] if same else secrets.token_hex(4), "name": name, "file": b["file"],
+                          "dur": b["dur"], "gain": b["gain"]})
+            self._write_bgm_presets(items)
+            if same and same.get("file") != b["file"] and not any(q.get("file") == same.get("file") for q in items):
+                (self._bgm_presets_dir() / str(same.get("file"))).unlink(missing_ok=True)
+            return self._bgm_preset_views(items)
+
+    def rename_bgm_preset(self, pid: str, name: str) -> list[dict] | None:
+        """저장한 음원 이름을 바꾼다. 다른 항목과 같은 이름은 안 된다. → 목록, 안 되면 None."""
+        name = name.strip() if isinstance(name, str) else ""
+        if not 1 <= len(name) <= PRESET_NAME_MAX:
+            return None
+        with self._presets_lock:
+            items = self._read_bgm_presets()
+            if not any(p["id"] == pid for p in items) or any(p["id"] != pid and p.get("name") == name for p in items):
+                return None
+            items = [{**p, "name": name} if p["id"] == pid else p for p in items]
+            self._write_bgm_presets(items)
+            return self._bgm_preset_views(items)
+
+    def delete_bgm_preset(self, pid: str) -> list[dict]:
+        """저장한 음원을 지운다 (다른 항목이 같은 파일을 쓰지 않으면 파일도)."""
+        with self._presets_lock:
+            items = self._read_bgm_presets()
+            gone = [p for p in items if p["id"] == pid]
+            items = [p for p in items if p["id"] != pid]
+            self._write_bgm_presets(items)
+            for p in gone:
+                if _BGM_FILE.fullmatch(str(p.get("file"))) and not any(q.get("file") == p.get("file") for q in items):
+                    (self._bgm_presets_dir() / p["file"]).unlink(missing_ok=True)
+            return self._bgm_preset_views(items)
+
+    def insert_bgm_preset(self, job_id: str, pid: str, at: float) -> dict | None:
+        """저장한 음원을 결과 위치 at(초)에 곡 처음부터 끝까지 넣는다."""
+        if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at):
+            return None
+        with self._presets_lock:
+            p = next((dict(p) for p in self._read_bgm_presets() if p["id"] == pid), None)
+        folder = self._job_bgm_dir(job_id)
+        if p is None or folder is None or not _BGM_FILE.fullmatch(str(p.get("file"))):
+            return None
+        try:
+            self._copy_bgm_file(self._bgm_presets_dir() / p["file"], folder)
+        except OSError:
+            log.exception("저장한 음원 복사 실패")
+            return None
+        ctx = self._bgm_context(self._job(job_id))
+        place = self._bgm_at(at, bgm.out_total(ctx[0]), ctx[2])
+
+        def change(job: Job, _d: float) -> bool:
+            job.bgms = [*job.bgms, {"id": secrets.token_hex(4), "file": p["file"], "name": p["name"], "dur": p["dur"],
+                                    "gain": p["gain"], "at": place, "in": 0.0, "out": p["dur"], "points": None}]
+            return True
+        return self._change_bgms(job_id, change, ctx)
 
     # ---- 영상 끼워 넣기 --------------------------------------------------------
     # 조각 {id, clip, src, name, in, out}: 이어 붙인 시간 = 앞 조각들의 (out-in) 합. A(맨 처음 영상)는 clip "main".

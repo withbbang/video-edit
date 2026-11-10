@@ -279,6 +279,9 @@ def test_dialogs_use_window(monkeypatch):
     assert d.open_video() == "/save/here"
     assert calls[2][0] == webview.OPEN_DIALOG and calls[2][1]["allow_multiple"] is False
     assert all(e in calls[2][1]["file_types"][0] for e in ("*.mp4", "*.mov", "*.m4v", "*.mkv", "*.webm"))
+    assert d.open_audio() == "/save/here"
+    assert calls[3][1]["allow_multiple"] is False
+    assert all(e in calls[3][1]["file_types"][0] for e in ("*.mp3", "*.m4a", "*.wav"))
 
 
 def test_build_wires_api(tmp_path):
@@ -339,3 +342,27 @@ def test_serves_overlay_and_preset_png(served, tmp_path):
                  "/0123456789ab/overlays/0123456789ABCDEF.png"):
         r, _ = _req(served[0], path)
         assert r.status == 404, path
+
+
+def test_serves_bgm_and_bgm_preset(served, tmp_path):
+    d = tmp_path / "jobs" / "0123456789ab" / "bgm"
+    d.mkdir(parents=True)
+    (d / "0123456789abcdef.m4a").write_bytes(b"song")
+    p = tmp_path / "bgm_presets"
+    p.mkdir()
+    (p / "fedcba9876543210.m4a").write_bytes(b"saved")
+    (p / "presets.json").write_bytes(b"[]")
+    r, body = _req(served[0], "/0123456789ab/bgm/0123456789abcdef.m4a")
+    assert r.status == 200 and body == b"song" and r.getheader("Content-Type") == "audio/mp4"
+    r, body = _req(served[0], "/0123456789ab/bgm/0123456789abcdef.m4a", headers={"Range": "bytes=1-2"})
+    assert r.status == 206 and body == b"on"
+    r, body = _req(served[0], "/bgm_presets/fedcba9876543210.m4a")
+    assert r.status == 200 and body == b"saved" and r.getheader("Content-Type") == "audio/mp4"
+    for path in ("/bgm_presets/presets.json", "/0123456789ab/bgm/x.m4a", "/0123456789ab/bgm/../x",
+                 "/0123456789ab/bgm/../preview.mp4", "/bgm_presets/../jobs/0123456789ab/preview.mp4",
+                 "/0123456789ab/bgm/0123456789ABCDEF.m4a", "/0123456789ab/bgm/0123456789abcdef.mp3"):
+        r, _ = _req(served[0], path)
+        assert r.status == 404, path
+    r, _ = _req(served[0], "/bgm_presets/fedcba9876543210.m4a", method="OPTIONS",
+                headers={"Origin": "null", "Access-Control-Request-Method": "GET"})
+    assert r.status == 204

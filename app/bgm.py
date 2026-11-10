@@ -4,6 +4,14 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+import os
+import re
+import subprocess
+from pathlib import Path
+
 AUTO_BASE_DB = 0.0     # 말 없을 때 기본 음량
 AUTO_DUCK_DB = -15.0   # 말하는 동안 낮춘 음량
 AUTO_RAMP = 0.3        # 말 앞뒤로 내리고 올리는 시간(초)
@@ -12,6 +20,9 @@ SPEECH_JOIN = 0.5      # 이보다 짧은 말 사이 틈은 한 덩어리로 봄
 DB_MIN = -40.0         # 음량 점 하한 (pipeline.BGM_FLOOR_DB 와 같음 — 이 아래는 무음)
 DB_MAX = 6.0
 MIN_LEN = 0.1          # BGM 구간 최소 길이(초)
+AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".aif", ".aiff"}   # 불러올 수 있는 음원
+TARGET_LUFS = -24.0    # 불러올 때 맞추는 기본 음량(적분 라우드니스)
+GAIN_MIN, GAIN_MAX = -30.0, 12.0
 
 
 def keeps_from_cuts(cuts, duration, fps):
@@ -140,3 +151,73 @@ def db_at(points, t):
         if t <= x1:
             return y1 if x1 == x0 else y0 + (y1 - y0) * (t - x0) / (x1 - x0)
     return pts[-1][1]
+
+
+def _hidden() -> dict:
+    from . import runner
+    return {"creationflags": subprocess.CREATE_NO_WINDOW} if runner.IS_WIN else {}
+
+
+def _loudness_gain(m4a: Path) -> float:
+    """ebur128 요약의 적분 음량(I:)을 TARGET_LUFS 로 맞추는 이득(dB). 못 읽거나 무음이면 0."""
+    from . import runner
+    try:
+        res = subprocess.run(["ffmpeg", "-nostats", "-i", str(m4a), "-af", "ebur128", "-f", "null", "-"],
+                             capture_output=True, text=True, env=runner.build_env(), timeout=300, **_hidden())
+    except (OSError, subprocess.SubprocessError):
+        return 0.0
+    found = re.findall(r"^\s*I:\s*(-?[0-9.]+)\s*LUFS", res.stderr or "", re.M)
+    try:
+        loud = float(found[-1])
+    except (IndexError, ValueError):
+        return 0.0
+    if not math.isfinite(loud):
+        return 0.0
+    return min(max(TARGET_LUFS - loud, GAIN_MIN), GAIN_MAX)
+
+
+def import_audio(src: Path, folder: Path) -> dict | None:
+    """음원을 folder/<sha1 앞 16자>.m4a (AAC 48k 스테레오)로 바꿔 두고 {"file", "dur", "gain"} 을 돌려준다.
+    소리가 없거나 영상이 들어 있거나(앨범 아트 제외) 못 읽으면 None. 이미 있으면 다시 만들지 않는다."""
+    from . import runner
+    src = Path(src)
+    try:
+        res = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                              "format=duration:stream=codec_type:stream_disposition=attached_pic", "-of", "json",
+                              str(src)], capture_output=True, text=True, env=runner.build_env(), timeout=30, **_hidden())
+        data = json.loads(res.stdout or "{}")
+        streams = data.get("streams") or []
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if not any(s.get("codec_type") == "audio" for s in streams) or \
+            any(s.get("codec_type") == "video" and not (s.get("disposition") or {}).get("attached_pic") for s in streams):
+        return None
+    h = hashlib.sha1()
+    try:
+        with open(src, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    dst = folder / (h.hexdigest()[:16] + ".m4a")
+    if not dst.is_file():
+        tmp = dst.with_name(dst.name + ".part.m4a")
+        try:
+            subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vn", "-ac", "2", "-ar", "48000",
+                            "-c:a", "aac", "-b:a", "192k", str(tmp)], capture_output=True, env=runner.build_env(),
+                           check=True, timeout=1800, **_hidden())
+            os.replace(tmp, dst)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        finally:
+            tmp.unlink(missing_ok=True)
+    try:
+        res = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(dst)],
+                             capture_output=True, text=True, env=runner.build_env(), timeout=30, **_hidden())
+        dur = float(json.loads(res.stdout)["format"]["duration"])
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return None
+    if not math.isfinite(dur) or dur <= 0:
+        return None
+    return {"file": dst.name, "dur": dur, "gain": _loudness_gain(dst)}
